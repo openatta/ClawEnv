@@ -15,5 +15,19 @@ export default defineConfig({
   build: {
     target: "esnext",
     outDir: "dist",
+    rollupOptions: {
+      external: [
+        "@tauri-apps/api",
+        "@tauri-apps/api/core",
+        "@tauri-apps/api/event",
+        "@tauri-apps/plugin-shell",
+        "@tauri-apps/plugin-notification",
+      ],
+    },
+  },
+  resolve: {
+    alias: {
+      "@": "/src",
+    },
   },
 });
