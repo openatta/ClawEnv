@@ -1,0 +1,47 @@
+# ClawEnv Lima Template — Alpine Linux
+# cgroup v2 unified mode fix included (alpine-lima issue #1878)
+
+vmType: vz
+os: Linux
+arch: host
+
+images:
+  - location: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-virt-3.21-aarch64.iso"
+    arch: aarch64
+  - location: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-virt-3.21-x86_64.iso"
+    arch: x86_64
+
+cpus: 2
+memory: "512MiB"
+disk: "8GiB"
+
+mounts:
+  - location: "~/.clawenv/workspaces/{INSTANCE_NAME}"
+    writable: true
+    mountPoint: "/workspace"
+  - location: "~"
+    writable: false
+    mountPoint: "/host-home"
+
+hostResolver:
+  enabled: true
+
+provision:
+  - mode: system
+    script: |
+      #!/bin/ash
+      set -e
+
+      # Fix: cgroup v2 unified mode
+      sed -i 's/rc_cgroup_mode=.*/rc_cgroup_mode=unified/' /etc/conf.d/cgroups
+      rc-update add cgroups boot
+
+      # Install runtime dependencies
+      apk update
+      apk add --no-cache nodejs npm git curl bash ca-certificates
+
+      # Install OpenClaw
+      npm install -g openclaw@{OPENCLAW_VERSION}
+
+      openclaw --version
+      echo "ClawEnv Alpine VM initialized"

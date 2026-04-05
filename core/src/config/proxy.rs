@@ -1,0 +1,94 @@
+use anyhow::Result;
+
+use super::models::ProxyConfig;
+use super::keychain;
+use crate::sandbox::SandboxBackend;
+
+/// Build the full proxy URL including auth credentials if needed
+fn proxy_url_with_auth(proxy: &ProxyConfig) -> Result<String> {
+    if !proxy.auth_required || proxy.auth_user.is_empty() {
+        return Ok(proxy.http_proxy.clone());
+    }
+
+    let password = match keychain::get_proxy_password() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("Failed to retrieve proxy password from keychain: {e}. Using empty password.");
+            String::new()
+        }
+    };
+    // Insert user:pass into proxy URL: http://user:pass@host:port
+    if let Some(rest) = proxy.http_proxy.strip_prefix("http://") {
+        Ok(format!("http://{}:{}@{}", proxy.auth_user, password, rest))
+    } else if let Some(rest) = proxy.http_proxy.strip_prefix("https://") {
+        Ok(format!("https://{}:{}@{}", proxy.auth_user, password, rest))
+    } else {
+        Ok(format!("http://{}:{}@{}", proxy.auth_user, password, proxy.http_proxy))
+    }
+}
+
+/// Apply proxy configuration inside a sandbox environment
+pub async fn apply_proxy(backend: &dyn SandboxBackend, proxy: &ProxyConfig) -> Result<()> {
+    if !proxy.enabled || proxy.http_proxy.is_empty() {
+        return Ok(());
+    }
+
+    let http_proxy = proxy_url_with_auth(proxy)?;
+    let https_proxy = if proxy.https_proxy.is_empty() {
+        http_proxy.clone()
+    } else {
+        proxy.https_proxy.clone()
+    };
+    let no_proxy = if proxy.no_proxy.is_empty() {
+        "localhost,127.0.0.1"
+    } else {
+        &proxy.no_proxy
+    };
+
+    // Write /etc/profile.d/proxy.sh — applies to all processes in sandbox
+    let script = format!(
+        r#"export http_proxy="{http_proxy}"
+export https_proxy="{https_proxy}"
+export HTTP_PROXY="{http_proxy}"
+export HTTPS_PROXY="{https_proxy}"
+export no_proxy="{no_proxy}"
+export NO_PROXY="{no_proxy}"
+"#
+    );
+
+    backend.exec(&format!(
+        "cat > /etc/profile.d/proxy.sh << 'PROXYEOF'\n{script}PROXYEOF"
+    )).await?;
+    backend.exec("chmod +x /etc/profile.d/proxy.sh").await?;
+
+    // Configure npm proxy separately (escape for shell safety)
+    let esc = |s: &str| s.replace('\'', "'\\''");
+    backend.exec(&format!("npm config set proxy '{}'", esc(&http_proxy))).await?;
+    backend.exec(&format!("npm config set https-proxy '{}'", esc(&https_proxy))).await?;
+
+    tracing::info!("Proxy configuration applied to sandbox");
+    Ok(())
+}
+
+/// Test proxy connectivity by attempting to reach Alpine CDN
+pub async fn test_proxy(proxy: &ProxyConfig) -> Result<()> {
+    let client = if proxy.enabled && !proxy.http_proxy.is_empty() {
+        let proxy_url = proxy_url_with_auth(proxy)?;
+        let reqwest_proxy = reqwest::Proxy::all(&proxy_url)?;
+        reqwest::Client::builder().proxy(reqwest_proxy).build()?
+    } else {
+        reqwest::Client::new()
+    };
+
+    let resp = client
+        .head("https://dl-cdn.alpinelinux.org/alpine/latest-stable/")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await?;
+
+    if resp.status().is_success() || resp.status().is_redirection() {
+        Ok(())
+    } else {
+        anyhow::bail!("Proxy test failed: HTTP {}", resp.status())
+    }
+}

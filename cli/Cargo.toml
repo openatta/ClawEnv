@@ -1,0 +1,16 @@
+[package]
+name = "clawenv-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clawenv-core = { path = "../core" }
+clap       = { version = "4", features = ["derive", "color"] }
+indicatif  = "0.17"
+console    = "0.15"
+dialoguer  = "0.11"
+tokio      = { version = "1", features = ["full"] }
+tracing    = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow     = "1"
+serde_json = "1"

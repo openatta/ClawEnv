@@ -1,0 +1,61 @@
+# ClawEnv
+
+OpenClaw（及 claw 生态）的跨平台沙盒安装器、启动器与管理器。
+
+## 技术栈
+
+- **后端**: Rust 2021 edition
+- **GUI**: Tauri v2（系统原生 WebView）
+- **前端**: SolidJS + TailwindCSS v4 + TypeScript
+- **CLI**: clap v4（derive 模式）
+- **配置**: TOML（`~/.clawenv/config.toml`）
+- **沙盒**: Alpine Linux，三平台对等后端（WSL2 / Lima / Podman）+ Native（开发者模式）
+
+## Workspace 结构
+
+```
+core/            # 核心逻辑（平台无关，无 UI 依赖）
+tauri/           # Tauri GUI 应用（含 System Tray）
+cli/             # 纯 CLI（开发者模式）
+src/             # 前端 SolidJS
+assets/          # 平台模板、图标资源
+docs/            # 规格文档（SSOT，共 11 个文件）
+```
+
+## 架构铁律
+
+1. **沙盒后端对等**：WSL2 / Lima / Podman 是同一层级的三种对等实现，`detect_backend()` 工厂函数只返回一个后端，不做组合，不嵌套。
+2. **Tauri IPC 异步**：安装、升级等耗时操作必须通过 `tauri::Emitter::emit` 推送事件，不能用同步 IPC。
+3. **凭证安全**：API Key、代理密码一律存入系统 Keychain（`keyring` crate），`config.toml` 和日志中不得出现明文。
+4. **浏览器安全边界**：Chromium 必须安装在沙盒内部，不得调用宿主机浏览器。noVNC 仅传输画面像素流。
+5. **启动器路由**：`App.tsx` 的 `LaunchState` 状态机是唯一顶层路由入口，不得在组件内直接跳转。
+6. **System Tray 生命周期**：托盘在 Tauri `setup` 阶段初始化，不依赖主窗口。主窗口关闭时继续在托盘运行。
+7. **OpenClaw 页是 WebView**：不自己实现管理 UI，内嵌加载 OpenClaw 自带的 Web 管理面板。
+
+## 开发命令
+
+```bash
+cargo tauri dev          # 开发模式（热重载）
+cargo tauri build        # 生产构建
+cargo test --workspace   # 运行所有测试
+cargo clippy --workspace # Lint
+npm install              # 前端依赖
+```
+
+## 规格文档
+
+所有设计决策的 SSOT 在 `docs/` 目录，开发前必须阅读相关文档：
+
+- `docs/README.md` — 文档索引
+- `docs/02-architecture.md` — 沙盒架构（最重要）
+- `docs/04-sandbox.md` — 三平台实现 + 浏览器 + noVNC
+- `docs/05-launcher.md` — 启动流程状态机
+- `docs/06-main-ui.md` — Slack 风格 UI 布局
+- `docs/09-config.md` — 配置格式 + 源码结构
+
+## 关键约束
+
+- Lima cgroup v2：模板中必须包含 `sed -i 's/rc_cgroup_mode=.*/rc_cgroup_mode=unified/' /etc/conf.d/cgroups`
+- Podman rootless：`podman run` 必须加 `--userns=keep-id`，volume 加 `:Z`
+- 代理密码安全：`config.toml` 仅存用户名，密码存 Keychain，沙盒内通过环境变量注入
+- 安装模式：在线构建 / 预构建镜像下载 / 本地镜像文件导入
