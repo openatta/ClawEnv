@@ -20,7 +20,7 @@ const INSTALL_STAGES = [
   { key: "save_config", label: "Save configuration" },
 ];
 
-export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void }) {
+export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void }) {
   const [step, setStep] = createSignal(1);
   const totalSteps = 7;
 
@@ -63,7 +63,12 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
 
   onCleanup(() => { unlistenProgress?.(); unlistenComplete?.(); unlistenFailed?.(); unlistenConnStep?.(); });
 
-  const stepLabels = ["Welcome", "System Check", "Network", "Install Plan", "API Key", "Installing", "Complete"];
+  const [iLang, setILang] = createSignal<"zh-CN" | "en">("zh-CN");
+  const stepLabelsMap = {
+    "zh-CN": ["欢迎", "系统检测", "网络设置", "安装方案", "API 密钥", "安装中", "完成"],
+    en: ["Welcome", "System Check", "Network", "Install Plan", "API Key", "Installing", "Complete"],
+  };
+  const stepLabels = () => stepLabelsMap[iLang()];
 
   // === Step 2: System Check ===
   async function runSystemCheck() {
@@ -247,7 +252,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
       <div class="w-48 bg-gray-950 border-r border-gray-800 p-4 shrink-0">
         <div class="text-base font-bold mb-5">Install</div>
         <div class="space-y-2">
-          {stepLabels.map((label, idx) => {
+          {stepLabels().map((label, idx) => {
             const num = idx + 1;
             return (
               <div class={`flex items-center gap-2 text-xs ${step() === num ? "text-white font-medium" : step() > num ? "text-green-500" : "text-gray-500"}`}>
@@ -267,15 +272,14 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
 
           {/* ===== Step 1: Welcome ===== */}
           {step() === 1 && (() => {
-            const [wLang, setWLang] = createSignal<"zh-CN" | "en">("zh-CN");
-            const zh = wLang() === "zh-CN";
+            const zh = iLang() === "zh-CN";
             return (
               <div>
                 <div class="flex items-center justify-between mb-3">
                   <h2 class="text-xl font-bold">{zh ? "欢迎使用 ClawEnv" : "Welcome to ClawEnv"}</h2>
                   <div class="flex gap-1">
-                    <button class={`px-2 py-0.5 text-xs rounded ${zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setWLang("zh-CN")}>中文</button>
-                    <button class={`px-2 py-0.5 text-xs rounded ${!zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setWLang("en")}>EN</button>
+                    <button class={`px-2 py-0.5 text-xs rounded ${zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setILang("zh-CN")}>中文</button>
+                    <button class={`px-2 py-0.5 text-xs rounded ${!zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setILang("en")}>EN</button>
                   </div>
                 </div>
                 <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-sm text-gray-300 space-y-2">
@@ -436,9 +440,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
           {/* ===== Step 6: Installing ===== */}
           {step() === 6 && (
             <div class="flex flex-col h-full">
-              <h2 class="text-xl font-bold mb-3">
-                {installError() ? "Installation Failed" : installing() ? "Installing..." : "Ready to Install"}
-              </h2>
+              <h2 class="text-xl font-bold mb-3">Installing...</h2>
 
               {/* Progress bar */}
               <div class="w-full bg-gray-800 rounded-full h-2 mb-1">
@@ -447,47 +449,31 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
               </div>
               <p class="text-xs text-gray-400 mb-3">{progressMessage() || "Preparing..."}</p>
 
-              {/* Install stages — scrollable list at top */}
-              <div class="bg-gray-800 rounded border border-gray-700 p-2 mb-3 max-h-40 overflow-y-auto">
+              {/* Install stages checklist */}
+              <div class="bg-gray-800 rounded border border-gray-700 p-2 mb-3 max-h-32 overflow-y-auto">
                 <For each={INSTALL_STAGES}>
                   {(s) => {
                     const done = () => completedStages().has(s.key);
                     const active = () => currentStage() === s.key && !done();
-                    const failed = () => installError() && active();
+                    const failed = () => !!(installError()) && active();
                     return (
-                      <div class={`flex items-center gap-2 text-xs py-1 px-1 rounded ${
-                        active() ? "bg-gray-700/50" : ""
-                      } ${done() ? "text-green-400" : active() ? (failed() ? "text-red-400" : "text-indigo-300") : "text-gray-600"}`}>
+                      <div class={`flex items-center gap-2 text-xs py-0.5 px-1 ${
+                        done() ? "text-green-400" : active() ? (failed() ? "text-red-400" : "text-indigo-300") : "text-gray-600"
+                      }`}>
                         <span class="w-4 text-center shrink-0">
                           {done() ? "✓" : failed() ? "✗" : active() ? "▶" : "○"}
                         </span>
-                        <span class="flex-1">{s.label}</span>
-                        <Show when={active() && !failed()}>
-                          <span class="text-[10px] text-indigo-400 animate-pulse">running</span>
-                        </Show>
-                        <Show when={done()}>
-                          <span class="text-[10px] text-green-600">done</span>
-                        </Show>
-                        <Show when={failed()}>
-                          <span class="text-[10px] text-red-400">failed</span>
-                        </Show>
+                        <span>{s.label}</span>
                       </div>
                     );
                   }}
                 </For>
               </div>
 
-              {/* Log output — fills remaining space */}
+              {/* Log output — fills remaining space, errors show here too */}
               <div class="flex-1 min-h-0">
                 <LogBox logs={installLogs()} height="h-full" />
               </div>
-
-              {/* Error display */}
-              <Show when={installError()}>
-                <div class="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">
-                  {installError()}
-                </div>
-              </Show>
             </div>
           )}
 
@@ -508,9 +494,12 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
         {/* Navigation */}
         <div class="flex justify-between pt-3 border-t border-gray-800 shrink-0">
           <button class="px-4 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-            disabled={step() === 1 || step() === 6 || step() === 7}
-            onClick={() => goToStep(step() - 1)}>
-            Previous
+            disabled={(step() === 1 && !props.onBack) || step() === 6 || step() === 7}
+            onClick={() => {
+              if (step() === 1 && props.onBack) { props.onBack(); }
+              else { goToStep(step() - 1); }
+            }}>
+            {step() === 1 ? (iLang() === "zh-CN" ? "返回" : "Back") : (iLang() === "zh-CN" ? "上一步" : "Previous")}
           </button>
           <div class="flex gap-2">
             {/* Step 5: Skip & Install vs Install */}

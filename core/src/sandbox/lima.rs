@@ -169,11 +169,10 @@ impl SandboxBackend for LimaBackend {
             InstallMode::OnlineBuild => {
                 // Use Lima's built-in Alpine template (has SSH + cloud-init pre-configured)
                 // Then provision OpenClaw inside the running VM
-                tracing::info!("Creating Lima VM '{}' from template://alpine", self.vm_name);
+                tracing::info!("Creating Lima VM '{}' from template:alpine", self.vm_name);
 
-                self.limactl_stream(
-                    &["start", "--name", &self.vm_name, "--tty=false", "template://alpine"],
-                    None,
+                self.limactl(
+                    &["start", "--name", &self.vm_name, "--tty=false", "template:alpine"],
                 ).await?;
 
                 tracing::info!("Lima VM created, installing OpenClaw...");

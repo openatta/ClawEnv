@@ -51,6 +51,7 @@ export default function App() {
           onComplete={(instances: Instance[]) =>
             setState({ type: "ready", instances })
           }
+          onBack={() => setState({ type: "first_run" })}
         />
       </Match>
 
