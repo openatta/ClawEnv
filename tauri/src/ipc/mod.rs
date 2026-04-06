@@ -170,8 +170,14 @@ pub async fn get_instance_health(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     let health = instance::instance_health(inst).await;
-    tracing::info!("get_instance_health('{}') = {:?}", name, health);
-    Ok(format!("{:?}", health))
+    // Return snake_case to match serde serialization in monitor events
+    let result = match health {
+        clawenv_core::monitor::InstanceHealth::Running => "running",
+        clawenv_core::monitor::InstanceHealth::Stopped => "stopped",
+        clawenv_core::monitor::InstanceHealth::Unreachable => "unreachable",
+    };
+    tracing::info!("get_instance_health('{}') = {}", name, result);
+    Ok(result.to_string())
 }
 
 #[tauri::command]

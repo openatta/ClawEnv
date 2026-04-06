@@ -26,7 +26,7 @@ export default function MainLayout(props: { instances: Instance[] }) {
         const h = await invoke<string>("get_instance_health", { name: inst.name });
         setHealths((prev) => ({ ...prev, [inst.name]: h }));
       } catch {
-        setHealths((prev) => ({ ...prev, [inst.name]: "Unreachable" }));
+        setHealths((prev) => ({ ...prev, [inst.name]: "unreachable" }));
       }
     }
   }

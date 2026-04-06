@@ -10,8 +10,8 @@ export default function OpenClawPage(props: {
   const [activeTab, setActiveTab] = createSignal(props.instances[0]?.name ?? "");
 
   const activeInstance = () => props.instances.find((i) => i.name === activeTab());
-  const activeHealth = () => props.healths[activeTab()] || "Unreachable";
-  const isRunning = () => activeHealth() === "Running";
+  const activeHealth = () => props.healths[activeTab()] || "unreachable";
+  const isRunning = () => activeHealth() === "running";
 
   const openInBrowser = () => {
     const inst = activeInstance();
@@ -20,8 +20,8 @@ export default function OpenClawPage(props: {
 
   function healthColor(name: string): string {
     const h = props.healths[name] ?? "unknown";
-    if (h === "Running") return "bg-green-500";
-    if (h === "Stopped") return "bg-gray-500";
+    if (h === "running") return "bg-green-500";
+    if (h === "stopped") return "bg-gray-500";
     return "bg-red-500";
   }
 

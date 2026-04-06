@@ -25,7 +25,7 @@ const t: Record<Lang, Record<string, string>> = {
 };
 
 const healthColor: Record<string, string> = {
-  Running: "bg-green-500", Stopped: "bg-gray-500", Unreachable: "bg-red-500",
+  running: "bg-green-500", stopped: "bg-gray-500", unreachable: "bg-red-500",
 };
 
 export default function Home(props: {
@@ -84,7 +84,7 @@ export default function Home(props: {
     finally { setActionLoading(null); }
   }
 
-  const getHealth = (name: string) => props.healths[name] || "Unreachable";
+  const getHealth = (name: string) => props.healths[name] || "unreachable";
 
   return (
     <div class="h-full overflow-y-auto p-6 relative">
@@ -104,7 +104,7 @@ export default function Home(props: {
           <For each={props.instances}>
             {(inst) => {
               const health = () => getHealth(inst.name);
-              const isRunning = () => health() === "Running";
+              const isRunning = () => health() === "running";
               const loading = () => actionLoading()?.includes(inst.name);
               return (
                 <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
@@ -114,7 +114,7 @@ export default function Home(props: {
                       <span class="font-medium">{inst.name}</span>
                       <span class="text-xs text-gray-400">({inst.sandbox_type})</span>
                       <span class="text-xs text-gray-500">
-                        {health() === "Running" ? l().running : health() === "Stopped" ? l().stopped : l().unreachable}
+                        {health() === "running" ? l().running : health() === "stopped" ? l().stopped : l().unreachable}
                       </span>
                     </div>
                     <span class="text-sm text-gray-400">v{inst.version}</span>
