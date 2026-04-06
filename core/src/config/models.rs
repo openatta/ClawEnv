@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use crate::bridge::permissions::BridgePermissions;
 use crate::sandbox::SandboxType;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,8 @@ pub struct ClawEnvConfig {
     pub tray: TrayConfig,
     #[serde(default)]
     pub proxy: ProxyConfig,
+    #[serde(default)]
+    pub bridge: BridgeConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +212,28 @@ impl Default for ProxyConfig {
             no_proxy: "localhost,127.0.0.1".into(),
             auth_required: false,
             auth_user: String::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BridgeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_bridge_port")]
+    pub port: u16,
+    #[serde(default)]
+    pub permissions: BridgePermissions,
+}
+
+fn default_bridge_port() -> u16 { 3100 }
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_bridge_port(),
+            permissions: BridgePermissions::default(),
         }
     }
 }

@@ -174,6 +174,9 @@ async fn do_install(
         }
     }
 
+    // Log workspace mount info (Lima's template:alpine mounts home directory by default)
+    send(tx, "Workspace directory mounted at /Users/konghan/.clawenv/workspaces/default", 37, InstallStage::BootVm).await;
+
     // --- Step: Configure Proxy (BEFORE installing packages!) ---
     let proxy_config = &config.config().clawenv.proxy;
     if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {

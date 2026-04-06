@@ -6,6 +6,7 @@ pub mod monitor;
 pub mod manager;
 pub mod update;
 pub mod browser;
+pub mod bridge;
 
 #[cfg(test)]
 mod tests;

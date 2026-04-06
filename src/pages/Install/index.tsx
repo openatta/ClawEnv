@@ -42,7 +42,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
   const [connLog, setConnLog] = createSignal<string[]>([]);
 
   // Step 4
-  const [installMethod, setInstallMethod] = createSignal<"online" | "local">("online");
+  const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native">("online");
   const [localFilePath, setLocalFilePath] = createSignal("");
 
   // Step 5
@@ -205,7 +205,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
     try {
       await invoke("install_openclaw", {
         instanceName: "default", clawVersion: "latest",
-        apiKey: apiKey() || null, useNative: false,
+        apiKey: apiKey() || null, useNative: installMethod() === "native",
         installBrowser: false, gatewayPort: 3000,
       });
     } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
@@ -404,11 +404,19 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
               <div class="space-y-2">
                 <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
                   <input type="radio" name="im" checked={installMethod() === "online"} onChange={() => setInstallMethod("online")} class="w-4 h-4" />
-                  <div><div class="font-medium text-sm">Online Build</div><div class="text-xs text-gray-400">Download and build from source</div></div>
+                  <div><div class="font-medium text-sm">Sandbox - Online Build</div><div class="text-xs text-gray-400">Create VM/container and install from source (recommended)</div></div>
                 </label>
                 <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
                   <input type="radio" name="im" checked={installMethod() === "local"} onChange={() => setInstallMethod("local")} class="w-4 h-4" />
-                  <div><div class="font-medium text-sm">Local File</div><div class="text-xs text-gray-400">Use a pre-downloaded image</div></div>
+                  <div><div class="font-medium text-sm">Sandbox - Local Image</div><div class="text-xs text-gray-400">Import a pre-built sandbox image file</div></div>
+                </label>
+                <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500 border-dashed border-yellow-700/50">
+                  <input type="radio" name="im" checked={installMethod() === "native"} onChange={() => setInstallMethod("native")} class="w-4 h-4" />
+                  <div>
+                    <div class="font-medium text-sm">Native (Developer Only)</div>
+                    <div class="text-xs text-gray-400">Install directly on host OS — no isolation, no sandbox</div>
+                    <div class="text-xs text-yellow-500 mt-1">⚠ Requires Node.js ≥ 22 + npm. No security isolation.</div>
+                  </div>
                 </label>
               </div>
               <Show when={installMethod() === "local"}>

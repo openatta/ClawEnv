@@ -217,63 +217,28 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let out = Command::new("wsl")
-            .args(["-d", &self.distro_name, "--", "ash", "-c", cmd])
-            .output()
-            .await?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("exec in WSL sandbox failed: {stderr}");
+        // Use tempfile approach to avoid pipe-inheritance hangs
+        let base_args = ["-d", &self.distro_name, "--", "sh", "-c"];
+        let (stdout, stderr, rc) = super::exec_helper::exec_via_tempfile(
+            "wsl", &base_args, cmd
+        ).await?;
+        if rc != 0 {
+            anyhow::bail!("exec in WSL sandbox failed (exit {rc}):\nstdout: {}\nstderr: {}",
+                stdout.chars().take(500).collect::<String>(),
+                stderr.chars().take(500).collect::<String>());
         }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok(stdout)
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let mut child = Command::new("wsl")
-            .args(["-d", &self.distro_name, "--", "sh", "-c", cmd])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        let tx2 = tx.clone();
-        let stderr_task = tokio::spawn(async move {
-            if let Some(se) = stderr {
-                let mut reader = BufReader::new(se).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx2.send(line).await;
-                }
-            }
-        });
-
-        let tx3 = tx.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut output = String::new();
-            if let Some(so) = stdout {
-                let mut reader = BufReader::new(so).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx3.send(line.clone()).await;
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-            }
-            output
-        });
-
-        let status = child.wait().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        stderr_task.abort();
-        let output = stdout_task.await.unwrap_or_default();
-
-        if !status.success() {
-            anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
+        let base_args = ["-d", &self.distro_name, "--", "sh", "-c"];
+        let (stdout, rc) = super::exec_helper::exec_with_progress_via_tempfile(
+            "wsl", &base_args, cmd, tx
+        ).await?;
+        if rc != 0 {
+            anyhow::bail!("command failed in WSL (exit {rc}): {cmd}");
         }
-        Ok(output)
+        Ok(stdout)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {

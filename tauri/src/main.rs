@@ -35,6 +35,22 @@ fn main() {
                 }
             });
 
+            // Start bridge server if enabled
+            tauri::async_runtime::spawn(async move {
+                if let Ok(config) = ConfigManager::load() {
+                    let bridge_cfg = &config.config().clawenv.bridge;
+                    if bridge_cfg.enabled {
+                        tracing::info!("Starting bridge server on port {}", bridge_cfg.port);
+                        if let Err(e) = clawenv_core::bridge::server::start_bridge(
+                            bridge_cfg.port,
+                            bridge_cfg.permissions.clone(),
+                        ).await {
+                            tracing::error!("Bridge server failed: {e}");
+                        }
+                    }
+                }
+            });
+
             // Spawn background instance health monitor
             let monitor_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

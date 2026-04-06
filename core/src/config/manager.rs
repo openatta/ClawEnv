@@ -69,6 +69,7 @@ impl ConfigManager {
                 security: Default::default(),
                 tray: Default::default(),
                 proxy: Default::default(),
+                bridge: Default::default(),
             },
             instances: vec![],
         };

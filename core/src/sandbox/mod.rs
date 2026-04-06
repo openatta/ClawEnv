@@ -2,6 +2,7 @@ mod lima;
 mod native;
 mod wsl;
 mod podman;
+mod exec_helper;
 
 pub use lima::LimaBackend;
 pub use native::NativeBackend;

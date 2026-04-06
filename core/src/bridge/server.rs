@@ -1,0 +1,253 @@
+use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tokio::sync::RwLock;
+
+use super::permissions::{BridgePermissions, PermissionResult};
+
+pub struct BridgeState {
+    pub permissions: BridgePermissions,
+}
+
+type SharedState = Arc<RwLock<BridgeState>>;
+
+// ---------- Request / Response types ----------
+
+#[derive(Deserialize)]
+struct FileReadReq {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct FileReadRes {
+    content: String,
+}
+
+#[derive(Deserialize)]
+struct FileWriteReq {
+    path: String,
+    content: String,
+}
+
+#[derive(Serialize)]
+struct OkRes {
+    ok: bool,
+}
+
+#[derive(Deserialize)]
+struct FileListReq {
+    path: String,
+}
+
+#[derive(Serialize)]
+struct DirEntry {
+    name: String,
+    is_dir: bool,
+    size: u64,
+}
+
+#[derive(Serialize)]
+struct FileListRes {
+    entries: Vec<DirEntry>,
+}
+
+#[derive(Deserialize)]
+struct ExecReq {
+    command: String,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ExecRes {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+}
+
+#[derive(Serialize)]
+struct HealthRes {
+    status: String,
+    version: String,
+}
+
+#[derive(Serialize)]
+struct ErrorRes {
+    error: String,
+}
+
+// ---------- Helpers ----------
+
+fn expand_home(p: &str) -> PathBuf {
+    if p.starts_with("~/") {
+        if let Some(home) = dirs::home_dir() {
+            return home.join(&p[2..]);
+        }
+    }
+    PathBuf::from(p)
+}
+
+fn err_json(msg: impl Into<String>) -> (StatusCode, Json<ErrorRes>) {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorRes {
+            error: msg.into(),
+        }),
+    )
+}
+
+fn forbidden_json(msg: impl Into<String>) -> (StatusCode, Json<ErrorRes>) {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorRes {
+            error: msg.into(),
+        }),
+    )
+}
+
+// ---------- Handlers ----------
+
+async fn health_handler() -> Json<HealthRes> {
+    Json(HealthRes {
+        status: "ok".into(),
+        version: "0.1.0".into(),
+    })
+}
+
+async fn permissions_handler(State(state): State<SharedState>) -> Json<BridgePermissions> {
+    let s = state.read().await;
+    Json(s.permissions.clone())
+}
+
+async fn file_read_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<FileReadReq>,
+) -> Result<Json<FileReadRes>, (StatusCode, Json<ErrorRes>)> {
+    let path = expand_home(&req.path);
+    let perms = &state.read().await.permissions;
+
+    match perms.can_read_file(&path) {
+        PermissionResult::Allowed => {}
+        PermissionResult::Denied(reason) => return Err(forbidden_json(reason)),
+        PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
+    }
+
+    let content = tokio::fs::read_to_string(&path)
+        .await
+        .map_err(|e| err_json(format!("Failed to read file: {e}")))?;
+
+    Ok(Json(FileReadRes { content }))
+}
+
+async fn file_write_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<FileWriteReq>,
+) -> Result<Json<OkRes>, (StatusCode, Json<ErrorRes>)> {
+    let path = expand_home(&req.path);
+    let perms = &state.read().await.permissions;
+
+    match perms.can_write_file(&path) {
+        PermissionResult::Allowed => {}
+        PermissionResult::Denied(reason) => return Err(forbidden_json(reason)),
+        PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
+    }
+
+    // Ensure parent directory exists
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| err_json(format!("Failed to create directory: {e}")))?;
+    }
+
+    tokio::fs::write(&path, &req.content)
+        .await
+        .map_err(|e| err_json(format!("Failed to write file: {e}")))?;
+
+    Ok(Json(OkRes { ok: true }))
+}
+
+async fn file_list_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<FileListReq>,
+) -> Result<Json<FileListRes>, (StatusCode, Json<ErrorRes>)> {
+    let path = expand_home(&req.path);
+    let perms = &state.read().await.permissions;
+
+    match perms.can_read_file(&path) {
+        PermissionResult::Allowed => {}
+        PermissionResult::Denied(reason) => return Err(forbidden_json(reason)),
+        PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
+    }
+
+    let mut entries = Vec::new();
+    let mut dir = tokio::fs::read_dir(&path)
+        .await
+        .map_err(|e| err_json(format!("Failed to list directory: {e}")))?;
+
+    while let Ok(Some(entry)) = dir.next_entry().await {
+        let meta = entry.metadata().await.unwrap_or_else(|_| {
+            // fallback: shouldn't happen often
+            std::fs::metadata(entry.path()).unwrap()
+        });
+        entries.push(DirEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            is_dir: meta.is_dir(),
+            size: meta.len(),
+        });
+    }
+
+    Ok(Json(FileListRes { entries }))
+}
+
+async fn exec_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<ExecReq>,
+) -> Result<Json<ExecRes>, (StatusCode, Json<ErrorRes>)> {
+    let perms = &state.read().await.permissions;
+
+    // Build the full command string for permission checking
+    let full_cmd = if req.args.is_empty() {
+        req.command.clone()
+    } else {
+        format!("{} {}", req.command, req.args.join(" "))
+    };
+
+    match perms.can_exec(&full_cmd) {
+        PermissionResult::Allowed => {}
+        PermissionResult::Denied(reason) => return Err(forbidden_json(reason)),
+        PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
+    }
+
+    let output = tokio::process::Command::new(&req.command)
+        .args(&req.args)
+        .output()
+        .await
+        .map_err(|e| err_json(format!("Failed to execute command: {e}")))?;
+
+    Ok(Json(ExecRes {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        exit_code: output.status.code().unwrap_or(-1),
+    }))
+}
+
+// ---------- Server entry point ----------
+
+pub async fn start_bridge(port: u16, permissions: BridgePermissions) -> anyhow::Result<()> {
+    let state: SharedState = Arc::new(RwLock::new(BridgeState { permissions }));
+
+    let app = Router::new()
+        .route("/api/health", get(health_handler))
+        .route("/api/permissions", get(permissions_handler))
+        .route("/api/file/read", post(file_read_handler))
+        .route("/api/file/write", post(file_write_handler))
+        .route("/api/file/list", post(file_list_handler))
+        .route("/api/exec", post(exec_handler))
+        .with_state(state);
+
+    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
+    tracing::info!("Bridge server listening on 127.0.0.1:{port}");
+    axum::serve(listener, app).await?;
+    Ok(())
+}

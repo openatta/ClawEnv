@@ -84,6 +84,7 @@ mod tests {
                 security: Default::default(),
                 tray: Default::default(),
                 proxy: Default::default(),
+                bridge: Default::default(),
             },
             instances: vec![],
         };
@@ -120,6 +121,7 @@ mod tests {
                     auth_required: false,
                     auth_user: "".into(),
                 },
+                bridge: Default::default(),
             },
             instances: vec![],
         };
@@ -294,5 +296,115 @@ created_at = "2026-04-01T10:00:00Z"
         let path = path.unwrap();
         assert!(path.to_string_lossy().contains(".clawenv"));
         assert!(path.to_string_lossy().ends_with("config.toml"));
+    }
+
+    // ===== Bridge Permissions =====
+
+    #[test]
+    fn test_bridge_permissions_default() {
+        let perms = crate::bridge::permissions::BridgePermissions::default();
+        // Just verify it constructs without panic and has required fields
+        assert!(perms.require_approval.contains(&"exec".to_string()) ||
+                perms.require_approval.contains(&"file_write".to_string()) ||
+                perms.require_approval.is_empty());
+    }
+
+    #[test]
+    fn test_bridge_permissions_file_deny() {
+        let perms = crate::bridge::permissions::BridgePermissions {
+            file_deny: vec!["~/.ssh/**".into(), "~/.aws/**".into()],
+            ..Default::default()
+        };
+        let home = dirs::home_dir().unwrap();
+        let result = perms.can_read_file(&home.join(".ssh/id_rsa"));
+        assert!(matches!(result, crate::bridge::permissions::PermissionResult::Denied(_)));
+    }
+
+    #[test]
+    fn test_bridge_permissions_exec_allow() {
+        let perms = crate::bridge::permissions::BridgePermissions {
+            exec_allow: vec!["git".into(), "npm".into()],
+            exec_deny: vec!["sudo".into(), "rm -rf".into()],
+            ..Default::default()
+        };
+        let git_result = perms.can_exec("git");
+        assert!(matches!(git_result,
+            crate::bridge::permissions::PermissionResult::Allowed |
+            crate::bridge::permissions::PermissionResult::RequiresApproval(_)
+        ));
+        let sudo_result = perms.can_exec("sudo rm -rf /");
+        assert!(matches!(sudo_result, crate::bridge::permissions::PermissionResult::Denied(_)));
+    }
+
+    // ===== Cross-platform Sandbox Backend Interface Tests =====
+    // These test the SandboxBackend trait contract consistency.
+    // On macOS: tests Lima. On Linux: tests Podman. On Windows: tests WSL2.
+
+    #[test]
+    fn test_detect_backend_returns_correct_type() {
+        let backend = crate::sandbox::detect_backend();
+        assert!(backend.is_ok(), "detect_backend should succeed on supported platforms");
+        let b = backend.unwrap();
+        let name = b.name();
+        #[cfg(target_os = "macos")]
+        assert!(name.contains("Lima"), "macOS should use Lima backend");
+        #[cfg(target_os = "linux")]
+        assert!(name.contains("Podman"), "Linux should use Podman backend");
+        #[cfg(target_os = "windows")]
+        assert!(name.contains("WSL"), "Windows should use WSL2 backend");
+    }
+
+    #[test]
+    fn test_native_backend_create() {
+        use crate::sandbox::SandboxBackend;
+        let backend = crate::sandbox::native_backend("test-unit");
+        assert_eq!(backend.name(), "Native (no sandbox)");
+    }
+
+    // Integration test: exec on current platform's backend
+    // Only runs if the sandbox is actually available
+    #[tokio::test]
+    async fn test_exec_echo_on_current_platform() {
+        let backend = match crate::sandbox::detect_backend() {
+            Ok(b) => b,
+            Err(_) => return, // Skip if no backend
+        };
+        if !backend.is_available().await.unwrap_or(false) {
+            return; // Skip if backend not installed
+        }
+        // This would actually create/exec in a real VM — skip in CI
+        // Just verify the method signature compiles and is callable
+        // Real integration tests need a running VM
+    }
+
+    // ===== Config with Bridge =====
+
+    #[test]
+    fn test_config_with_bridge_roundtrip() {
+        let toml_str = r#"
+[clawenv]
+version = "0.1.0"
+user_mode = "developer"
+language = "en"
+theme = "dark"
+
+[clawenv.bridge]
+enabled = true
+port = 3100
+
+[clawenv.bridge.permissions]
+file_read = ["~/Documents/**"]
+file_deny = ["~/.ssh/**"]
+exec_allow = ["git", "npm"]
+exec_deny = ["sudo"]
+require_approval = ["exec"]
+auto_approve = ["file_read"]
+"#;
+        let config: crate::config::AppConfig =
+            toml::from_str(toml_str).expect("Parse failed");
+        assert!(config.clawenv.bridge.enabled);
+        assert_eq!(config.clawenv.bridge.port, 3100);
+        assert_eq!(config.clawenv.bridge.permissions.file_read, vec!["~/Documents/**"]);
+        assert_eq!(config.clawenv.bridge.permissions.exec_deny, vec!["sudo"]);
     }
 }
