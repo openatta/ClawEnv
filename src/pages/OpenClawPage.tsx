@@ -1,6 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import { open as shellOpen } from "@tauri-apps/plugin-shell";
 
 type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
 
@@ -75,17 +74,11 @@ export default function OpenClawPage(props: {
               <button
                 class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
                 onClick={async () => {
+                  const url = `http://127.0.0.1:${activeInstance()!.gateway_port}`;
                   try {
-                    await shellOpen(`http://127.0.0.1:${activeInstance()!.gateway_port}`);
+                    await invoke("open_url_in_browser", { url });
                   } catch (e) {
-                    console.error("shellOpen failed:", e);
-                    // Fallback: try invoking a Tauri command
-                    try {
-                      await invoke("open_url_in_browser", { url: `http://127.0.0.1:${activeInstance()!.gateway_port}` });
-                    } catch {
-                      // Last resort
-                      alert(`Please open in browser: http://127.0.0.1:${activeInstance()!.gateway_port}`);
-                    }
+                    alert(`Please open manually: ${url}`);
                   }
                 }}
               >
