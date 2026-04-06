@@ -102,11 +102,9 @@ pub async fn install(
             Ok(())
         }
         Err(e) => {
-            tracing::error!("Installation failed, rolling back: {e}");
-            send(&tx, &format!("Installation failed: {e}. Cleaning up..."), 0, InstallStage::Failed).await;
-            if let Err(ce) = backend.destroy().await {
-                tracing::warn!("Rollback cleanup failed: {ce}");
-            }
+            tracing::error!("Installation failed: {e}");
+            // Do NOT destroy the VM — user can retry from the failed step
+            send(&tx, &format!("Installation failed: {e}"), 0, InstallStage::Failed).await;
             Err(e)
         }
     }
@@ -128,37 +126,51 @@ async fn do_install(
         install_mode: opts.install_mode.clone(),
     };
 
-    // --- Step: Create VM ---
-    send(tx, "Creating virtual machine...", 15, InstallStage::CreateVm).await;
+    // --- Step: Create VM (skip if already exists) ---
+    let vm_exists = backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false);
 
-    // Heartbeat during long VM creation
-    let tx_hb = tx.clone();
-    let heartbeat = tokio::spawn(async move {
-        let mut tick = 0u32;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
-            tick += 1;
-            let pct = std::cmp::min(15 + tick as u8 * 2, 29);
-            let msg = match tick {
-                1..=2 => "Downloading VM image...",
-                3..=5 => "Booting virtual machine...",
-                _ => "Waiting for VM to become ready...",
-            };
-            send(&tx_hb, msg, pct, InstallStage::CreateVm).await;
-        }
-    });
-    backend.create(&sandbox_opts).await?;
-    heartbeat.abort();
+    if vm_exists {
+        send(tx, "VM already exists, resuming from current state...", 30, InstallStage::CreateVm).await;
+    } else {
+        send(tx, "Creating virtual machine...", 15, InstallStage::CreateVm).await;
 
-    // --- Step: Boot VM (verify it's accessible) ---
+        let tx_hb = tx.clone();
+        let heartbeat = tokio::spawn(async move {
+            let mut tick = 0u32;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+                tick += 1;
+                let pct = std::cmp::min(15 + tick as u8 * 2, 29);
+                let msg = match tick {
+                    1..=2 => "Downloading VM image...",
+                    3..=5 => "Booting virtual machine...",
+                    _ => "Waiting for VM to become ready...",
+                };
+                send(&tx_hb, msg, pct, InstallStage::CreateVm).await;
+            }
+        });
+        backend.create(&sandbox_opts).await?;
+        heartbeat.abort();
+    }
+
+    // --- Step: Boot VM (verify accessible) ---
     send(tx, "Verifying VM is accessible...", 30, InstallStage::BootVm).await;
-    let vm_check = backend.exec("echo ok 2>&1").await;
+    let vm_check = backend.exec("echo ok").await;
     match vm_check {
         Ok(out) if out.contains("ok") => {
             send(tx, "VM is ready", 35, InstallStage::BootVm).await;
         }
         _ => {
-            anyhow::bail!("VM created but not accessible via exec");
+            // Try starting it first (it may be stopped)
+            send(tx, "VM not responding, attempting to start...", 32, InstallStage::BootVm).await;
+            backend.start().await?;
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            let retry = backend.exec("echo ok").await;
+            if retry.map(|o| o.contains("ok")).unwrap_or(false) {
+                send(tx, "VM started successfully", 35, InstallStage::BootVm).await;
+            } else {
+                anyhow::bail!("VM not accessible. Check Lima status with: limactl list");
+            }
         }
     }
 

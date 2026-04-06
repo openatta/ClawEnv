@@ -84,6 +84,17 @@ impl LimaBackend {
         Ok(stdout_data)
     }
 
+    /// Read a small file from inside the VM
+    async fn read_vm_file(&self, path: &str) -> Result<String> {
+        let out = Command::new("limactl")
+            .args(["shell", &self.vm_name, "--", "cat", path])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output()
+            .await?;
+        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
     fn templates_dir() -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -217,111 +228,133 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Lima pipes can hang due to hostagent inheriting FDs.
-        // Strategy: spawn, concurrently read stdout+stderr with timeout, then wait.
-        use tokio::io::AsyncReadExt;
+        // IMPORTANT: Lima's hostagent inherits pipe FDs from limactl shell,
+        // causing .output()/.read_to_end() to hang forever.
+        // Solution: redirect output to temp files INSIDE the VM, then read them.
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let out_file = format!("/tmp/.clawenv_exec_{stamp}");
 
-        let mut child = Command::new("limactl")
-            .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
+        // Run command, redirect all output to temp file, capture exit code
+        let wrapper = format!(
+            "({cmd}) > {out_file}.out 2> {out_file}.err; echo $? > {out_file}.rc",
+        );
 
-        let mut stdout_h = child.stdout.take();
-        let mut stderr_h = child.stderr.take();
+        // limactl shell with no pipes — just wait for exit
+        let status = Command::new("limactl")
+            .args(["shell", &self.vm_name, "--", "sh", "-c", &wrapper])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
 
-        // Read stdout and stderr concurrently with the process, with a global timeout
-        let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
-            let mut stdout_buf = Vec::new();
-            let mut stderr_buf = Vec::new();
+        // Read results from temp files
+        let stdout = self.read_vm_file(&format!("{out_file}.out")).await.unwrap_or_default();
+        let stderr = self.read_vm_file(&format!("{out_file}.err")).await.unwrap_or_default();
+        let rc_str = self.read_vm_file(&format!("{out_file}.rc")).await.unwrap_or_default();
+        let rc: i32 = rc_str.trim().parse().unwrap_or(-1);
 
-            // Read both pipes concurrently
-            let (so_res, se_res) = tokio::join!(
-                async {
-                    if let Some(ref mut so) = stdout_h {
-                        so.read_to_end(&mut stdout_buf).await.ok();
-                    }
-                },
-                async {
-                    if let Some(ref mut se) = stderr_h {
-                        se.read_to_end(&mut stderr_buf).await.ok();
-                    }
-                }
-            );
+        // Cleanup temp files
+        let _ = Command::new("limactl")
+            .args(["shell", &self.vm_name, "--", "sh", "-c",
+                   &format!("rm -f {out_file}.out {out_file}.err {out_file}.rc")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
 
-            let status = child.wait().await?;
-            Ok::<_, anyhow::Error>((status, stdout_buf, stderr_buf))
-        }).await;
-
-        match result {
-            Ok(Ok((status, stdout_buf, stderr_buf))) => {
-                if !status.success() {
-                    let stderr = String::from_utf8_lossy(&stderr_buf);
-                    let stdout = String::from_utf8_lossy(&stdout_buf);
-                    anyhow::bail!("exec failed (exit {:?}): {}\nstdout: {}\nstderr: {}",
-                        status.code(), cmd, stdout.chars().take(500).collect::<String>(),
-                        stderr.chars().take(500).collect::<String>());
-                }
-                Ok(String::from_utf8_lossy(&stdout_buf).to_string())
-            }
-            Ok(Err(e)) => Err(e),
-            Err(_) => {
-                // Timeout — kill the child
-                anyhow::bail!("exec timed out (5 min): {}", cmd);
-            }
+        if rc != 0 {
+            anyhow::bail!("exec failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
+                stdout.chars().take(500).collect::<String>(),
+                stderr.chars().take(500).collect::<String>());
         }
+        Ok(stdout)
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
+        // Same temp-file approach but with periodic tailing for progress
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let out_file = format!("/tmp/.clawenv_exec_{stamp}");
 
+        let wrapper = format!(
+            "({cmd}) > {out_file}.out 2>&1; echo $? > {out_file}.rc",
+        );
+
+        // Start the command (no pipes)
         let mut child = Command::new("limactl")
-            .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
+            .args(["shell", &self.vm_name, "--", "sh", "-c", &wrapper])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .kill_on_drop(true)
             .spawn()?;
 
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
+        // Tail the output file periodically for progress
+        let vm_name = self.vm_name.clone();
+        let out_file2 = out_file.clone();
         let tx2 = tx.clone();
-        // Stream stderr (where npm/apk write progress)
-        let stderr_task = tokio::spawn(async move {
-            if let Some(se) = stderr {
-                let mut reader = BufReader::new(se).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx2.send(line).await;
+        let tail_task = tokio::spawn(async move {
+            let mut last_size = 0usize;
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                // Read new content from output file
+                let result = Command::new("limactl")
+                    .args(["shell", &vm_name, "--", "sh", "-c",
+                           &format!("tail -c +{} {}.out 2>/dev/null", last_size + 1, out_file2)])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::null())
+                    .output()
+                    .await;
+                if let Ok(out) = result {
+                    let new_content = String::from_utf8_lossy(&out.stdout);
+                    if !new_content.is_empty() {
+                        last_size += new_content.len();
+                        for line in new_content.lines() {
+                            let trimmed = line.trim();
+                            if !trimmed.is_empty() {
+                                let _ = tx2.send(trimmed.to_string()).await;
+                            }
+                        }
+                    }
                 }
             }
-        });
-
-        // Also stream stdout
-        let tx3 = tx.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut output = String::new();
-            if let Some(so) = stdout {
-                let mut reader = BufReader::new(so).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx3.send(line.clone()).await;
-                    output.push_str(&line);
-                    output.push('\n');
-                }
-            }
-            output
         });
 
         let status = child.wait().await?;
-        // Give pipes a moment to flush
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        stderr_task.abort();
-        let output = stdout_task.await.unwrap_or_default();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        tail_task.abort();
 
-        if !status.success() {
-            anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
+        // Read final output
+        let stdout = self.read_vm_file(&format!("{out_file}.out")).await.unwrap_or_default();
+        let rc_str = self.read_vm_file(&format!("{out_file}.rc")).await.unwrap_or_default();
+        let rc: i32 = rc_str.trim().parse().unwrap_or(-1);
+
+        // Send any remaining output
+        for line in stdout.lines() {
+            let trimmed = line.trim();
+            if !trimmed.is_empty() {
+                let _ = tx.send(trimmed.to_string()).await;
+            }
         }
-        Ok(output)
+
+        // Cleanup
+        let _ = Command::new("limactl")
+            .args(["shell", &self.vm_name, "--", "sh", "-c",
+                   &format!("rm -f {out_file}.out {out_file}.rc")])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+
+        if rc != 0 {
+            anyhow::bail!("command failed (exit {rc}): {cmd}\noutput: {}",
+                stdout.chars().take(1000).collect::<String>());
+        }
+        Ok(stdout)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {
