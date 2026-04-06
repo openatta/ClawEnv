@@ -40,20 +40,30 @@ impl InstanceMonitor {
     }
 
     /// Check the health of a single instance
-    pub async fn check_health(backend: &dyn SandboxBackend) -> InstanceHealth {
-        // Try `openclaw health` first (proper API check)
-        match backend.exec("openclaw health 2>/dev/null").await {
-            Ok(out) if out.to_lowercase().contains("ok") || out.to_lowercase().contains("running") || out.to_lowercase().contains("healthy") => {
-                return InstanceHealth::Running;
+    /// Uses HTTP probe on the gateway port — most reliable method.
+    pub async fn check_health_with_port(backend: &dyn SandboxBackend, port: u16) -> InstanceHealth {
+        // Primary: HTTP probe the gateway inside the VM
+        match backend.exec(&format!(
+            "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+        )).await {
+            Ok(out) => {
+                let code = out.trim().trim_matches('\'');
+                if code.starts_with('2') || code.starts_with('3') || code == "401" || code == "403" {
+                    return InstanceHealth::Running; // HTTP response = gateway alive
+                }
             }
-            _ => {}
+            Err(_) => return InstanceHealth::Unreachable,
         }
-        // Fallback: check if gateway process exists (avoid matching pgrep itself)
-        match backend.exec("pgrep -f 'openclaw gateway' 2>/dev/null || echo ''").await {
-            Ok(out) if !out.trim().is_empty() => InstanceHealth::Running,
-            Ok(_) => InstanceHealth::Stopped,
-            Err(_) => InstanceHealth::Unreachable,
+        // Fallback: check if process exists via pidof (no self-match issue)
+        match backend.exec("pidof node 2>/dev/null || echo ''").await {
+            Ok(out) if !out.trim().is_empty() => InstanceHealth::Stopped, // process alive but not responding on port
+            _ => InstanceHealth::Stopped,
         }
+    }
+
+    /// Legacy check without port (uses default 3000)
+    pub async fn check_health(backend: &dyn SandboxBackend) -> InstanceHealth {
+        Self::check_health_with_port(backend, 3000).await
     }
 
     /// Run the monitoring loop, sending health events for all instances

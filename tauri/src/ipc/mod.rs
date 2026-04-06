@@ -50,15 +50,43 @@ pub fn list_instances() -> Result<Vec<InstanceInfo>, String> {
         .collect())
 }
 
+#[derive(Serialize)]
+pub struct InstanceStatusDetail {
+    pub processes: String,
+    pub resources: String,
+    pub gateway_log: String,
+}
+
+#[tauri::command]
+pub async fn get_instance_status_detail(name: String) -> Result<InstanceStatusDetail, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+
+    let processes = backend.exec(
+        "ps aux 2>/dev/null || ps -ef 2>/dev/null || echo 'ps not available'"
+    ).await.unwrap_or_else(|e| format!("Error: {e}"));
+
+    let resources = backend.exec(
+        "echo '--- Memory ---' && free -m 2>/dev/null || cat /proc/meminfo 2>/dev/null | head -5; echo ''; echo '--- Disk ---' && df -h / 2>/dev/null; echo ''; echo '--- Uptime ---' && uptime 2>/dev/null"
+    ).await.unwrap_or_else(|e| format!("Error: {e}"));
+
+    let gateway_log = backend.exec(
+        "tail -80 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log found'"
+    ).await.unwrap_or_else(|e| format!("Error: {e}"));
+
+    Ok(InstanceStatusDetail { processes, resources, gateway_log })
+}
+
 #[tauri::command]
 pub async fn get_instance_logs(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    // Get gateway log + system log
-    let gateway_log = backend.exec("tail -50 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'").await.unwrap_or_default();
-    let process_info = backend.exec("ps aux 2>/dev/null | grep -E 'openclaw|node' | grep -v grep || echo 'No processes'").await.unwrap_or_default();
-    Ok(format!("=== Gateway Log ===\n{gateway_log}\n=== Processes ===\n{process_info}"))
+    let log = backend.exec(
+        "tail -100 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'"
+    ).await.unwrap_or_else(|e| format!("Error: {e}"));
+    Ok(log)
 }
 
 #[tauri::command]

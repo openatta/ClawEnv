@@ -101,6 +101,7 @@ fn main() {
             ipc::get_openclaw_url,
             ipc::list_instances,
             ipc::get_instance_logs,
+            ipc::get_instance_status_detail,
             ipc::install_openclaw,
             ipc::start_instance,
             ipc::stop_instance,

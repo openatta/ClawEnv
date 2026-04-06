@@ -51,7 +51,7 @@ pub async fn instance_health(instance: &InstanceConfig) -> InstanceHealth {
         Ok(b) => b,
         Err(_) => return InstanceHealth::Unreachable,
     };
-    InstanceMonitor::check_health(backend.as_ref()).await
+    InstanceMonitor::check_health_with_port(backend.as_ref(), instance.openclaw.gateway_port).await
 }
 
 /// Get instance by name from config
