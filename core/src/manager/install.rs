@@ -11,15 +11,13 @@ pub fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
-/// Validate instance name — only allow safe characters
+/// Validate instance name
 pub fn validate_instance_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 63 {
         anyhow::bail!("Instance name must be 1-63 characters");
     }
     if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
-        anyhow::bail!(
-            "Instance name can only contain alphanumeric characters, hyphens, and underscores"
-        );
+        anyhow::bail!("Instance name can only contain alphanumeric characters, hyphens, and underscores");
     }
     if name.starts_with('-') {
         anyhow::bail!("Instance name cannot start with a hyphen");
@@ -27,7 +25,6 @@ pub fn validate_instance_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Installation options from the wizard
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
     pub instance_name: String,
@@ -53,7 +50,6 @@ impl Default for InstallOptions {
     }
 }
 
-/// Progress event emitted during installation
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct InstallProgress {
     pub message: String,
@@ -66,8 +62,11 @@ pub struct InstallProgress {
 pub enum InstallStage {
     DetectPlatform,
     EnsurePrerequisites,
-    CreateSandbox,
+    CreateVm,
+    BootVm,
     ConfigureProxy,
+    InstallDeps,
+    InstallOpenClaw,
     StoreApiKey,
     InstallBrowser,
     StartOpenClaw,
@@ -82,10 +81,8 @@ pub async fn install(
     config: &mut ConfigManager,
     tx: mpsc::Sender<InstallProgress>,
 ) -> Result<()> {
-    // Validate instance name before anything else
     validate_instance_name(&opts.instance_name)?;
 
-    // 1. Select backend
     send(&tx, "Detecting platform...", 5, InstallStage::DetectPlatform).await;
     let backend: Box<dyn SandboxBackend> = if opts.use_native {
         Box::new(native_backend(&opts.instance_name))
@@ -94,17 +91,11 @@ pub async fn install(
     };
     tracing::info!("Using backend: {}", backend.name());
 
-    // 2. Ensure prerequisites
-    send(
-        &tx,
-        &format!("Checking {} prerequisites...", backend.name()),
-        10,
-        InstallStage::EnsurePrerequisites,
-    )
-    .await;
+    send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
     backend.ensure_prerequisites().await?;
+    send(&tx, &format!("{} ready", backend.name()), 10, InstallStage::EnsurePrerequisites).await;
 
-    // Run the actual install steps with rollback on failure
+    // Run install with rollback on failure
     match do_install(&opts, config, backend.as_ref(), &tx).await {
         Ok(()) => {
             send(&tx, "Installation complete!", 100, InstallStage::Complete).await;
@@ -112,16 +103,9 @@ pub async fn install(
         }
         Err(e) => {
             tracing::error!("Installation failed, rolling back: {e}");
-            send(
-                &tx,
-                &format!("Installation failed: {e}. Cleaning up..."),
-                0,
-                InstallStage::Failed,
-            )
-            .await;
-            // Best-effort cleanup — destroy the sandbox
-            if let Err(cleanup_err) = backend.destroy().await {
-                tracing::warn!("Rollback cleanup failed: {cleanup_err}");
+            send(&tx, &format!("Installation failed: {e}. Cleaning up..."), 0, InstallStage::Failed).await;
+            if let Err(ce) = backend.destroy().await {
+                tracing::warn!("Rollback cleanup failed: {ce}");
             }
             Err(e)
         }
@@ -134,7 +118,6 @@ async fn do_install(
     backend: &dyn SandboxBackend,
     tx: &mpsc::Sender<InstallProgress>,
 ) -> Result<()> {
-    // 3. Create sandbox
     let sandbox_opts = SandboxOpts {
         instance_name: opts.instance_name.clone(),
         claw_version: opts.claw_version.clone(),
@@ -145,104 +128,129 @@ async fn do_install(
         install_mode: opts.install_mode.clone(),
     };
 
-    send(tx, "Creating sandbox VM (this may take a few minutes)...", 20, InstallStage::CreateSandbox).await;
+    // --- Step: Create VM ---
+    send(tx, "Creating virtual machine...", 15, InstallStage::CreateVm).await;
 
-    // Heartbeat — keeps UI alive during long VM creation
+    // Heartbeat during long VM creation
     let tx_hb = tx.clone();
     let heartbeat = tokio::spawn(async move {
         let mut tick = 0u32;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(8)).await;
             tick += 1;
-            let pct = std::cmp::min(20 + tick as u8 * 2, 44);
+            let pct = std::cmp::min(15 + tick as u8 * 2, 29);
             let msg = match tick {
-                1..=2 => "Downloading Alpine Linux image...",
-                3..=4 => "Booting virtual machine...",
-                5..=8 => "Waiting for VM to become ready...",
-                _ => "Still working, please wait...",
+                1..=2 => "Downloading VM image...",
+                3..=5 => "Booting virtual machine...",
+                _ => "Waiting for VM to become ready...",
             };
-            send(&tx_hb, msg, pct, InstallStage::CreateSandbox).await;
+            send(&tx_hb, msg, pct, InstallStage::CreateVm).await;
         }
     });
-
-    let create_result = backend.create(&sandbox_opts).await;
+    backend.create(&sandbox_opts).await?;
     heartbeat.abort();
-    create_result?;
 
-    send(tx, "Sandbox VM ready, installing packages...", 45, InstallStage::CreateSandbox).await;
-
-    // 3b. Provision: install essential packages
-    send(tx, "Installing essential packages (git, curl)...", 48, InstallStage::CreateSandbox).await;
-    backend.exec("sudo apk add --no-cache git curl bash 2>/dev/null || true").await?;
-
-    // 3c. Provision: ensure Node.js
-    send(tx, "Checking Node.js...", 50, InstallStage::CreateSandbox).await;
-    let has_node = backend.exec("which node 2>/dev/null || echo ''").await.unwrap_or_default();
-    if has_node.trim().is_empty() {
-        send(tx, "Installing Node.js + npm...", 52, InstallStage::CreateSandbox).await;
-        backend.exec("sudo apk add --no-cache nodejs npm").await?;
-    }
-
-    // 3d. Provision: install OpenClaw
-    send(tx, "Installing OpenClaw (this may take 1-2 minutes)...", 55, InstallStage::CreateSandbox).await;
-    let installed = backend.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
-    if installed.trim().is_empty() {
-        backend.exec(&format!("sudo npm install -g openclaw@{}", opts.claw_version)).await?;
-    }
-    send(tx, "OpenClaw installed", 60, InstallStage::CreateSandbox).await;
-
-    // 4. Apply proxy if configured
-    let proxy_config = &config.config().clawenv.proxy;
-    if proxy_config.enabled {
-        send(tx, "Configuring proxy...", 65, InstallStage::ConfigureProxy).await;
-        proxy::apply_proxy(backend, proxy_config).await?;
-    }
-
-    // 5. Store API key in keychain and inject into sandbox (safely escaped)
-    if let Some(ref api_key) = opts.api_key {
-        send(tx, "Storing API key securely...", 70, InstallStage::StoreApiKey).await;
-        keychain::store_api_key(&opts.instance_name, api_key)?;
-        let escaped = shell_escape(api_key);
-        backend
-            .exec(&format!("openclaw config set apiKey '{escaped}'"))
-            .await?;
-    }
-
-    // 6. Optional: install browser
-    if opts.install_browser {
-        send(tx, "Installing Chromium + noVNC...", 75, InstallStage::InstallBrowser).await;
-        backend
-            .exec("sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont")
-            .await?;
-    }
-
-    // 7. Start OpenClaw
-    send(tx, "Starting OpenClaw...", 85, InstallStage::StartOpenClaw).await;
-    // VM is already running from create step, just start OpenClaw daemon
-    backend.exec("openclaw start --daemon 2>/dev/null || true").await?;
-
-    // 8. Verify OpenClaw actually started
-    let health = crate::monitor::InstanceMonitor::check_health(backend).await;
-    if health == crate::monitor::InstanceHealth::Unreachable {
-        // Give it a few more seconds
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-        let health2 = crate::monitor::InstanceMonitor::check_health(backend).await;
-        if health2 == crate::monitor::InstanceHealth::Unreachable {
-            anyhow::bail!("OpenClaw failed to start after installation");
+    // --- Step: Boot VM (verify it's accessible) ---
+    send(tx, "Verifying VM is accessible...", 30, InstallStage::BootVm).await;
+    let vm_check = backend.exec("echo ok 2>&1").await;
+    match vm_check {
+        Ok(out) if out.contains("ok") => {
+            send(tx, "VM is ready", 35, InstallStage::BootVm).await;
+        }
+        _ => {
+            anyhow::bail!("VM created but not accessible via exec");
         }
     }
 
-    // 9. Save config — only after everything succeeds
-    send(tx, "Saving configuration...", 90, InstallStage::SaveConfig).await;
-    let sandbox_type = if opts.use_native {
-        SandboxType::Native
+    // --- Step: Configure Proxy (BEFORE installing packages!) ---
+    let proxy_config = &config.config().clawenv.proxy;
+    if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
+        send(tx, "Configuring proxy inside sandbox...", 38, InstallStage::ConfigureProxy).await;
+        proxy::apply_proxy(backend, proxy_config).await?;
+        send(tx, "Proxy configured", 40, InstallStage::ConfigureProxy).await;
     } else {
-        SandboxType::from_os()
-    };
+        send(tx, "No proxy configured, using direct connection", 40, InstallStage::ConfigureProxy).await;
+    }
 
-    let version = backend
-        .exec("openclaw --version")
-        .await
+    // --- Step: Install Dependencies ---
+    send(tx, "Installing dependencies (git, curl, bash)...", 42, InstallStage::InstallDeps).await;
+    // Source proxy env if it was set
+    let proxy_prefix = if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
+        ". /etc/profile.d/proxy.sh 2>/dev/null; "
+    } else {
+        ""
+    };
+    backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache git curl bash 2>&1 || apk add --no-cache git curl bash 2>&1")).await?;
+
+    // Check Node.js
+    send(tx, "Checking Node.js availability...", 48, InstallStage::InstallDeps).await;
+    let has_node = backend.exec("which node 2>/dev/null").await.unwrap_or_default();
+    if has_node.trim().is_empty() {
+        send(tx, "Installing Node.js + npm...", 50, InstallStage::InstallDeps).await;
+        backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache nodejs npm 2>&1 || apk add --no-cache nodejs npm 2>&1")).await?;
+    } else {
+        send(tx, "Node.js already available", 50, InstallStage::InstallDeps).await;
+    }
+
+    // --- Step: Install OpenClaw ---
+    send(tx, "Installing OpenClaw (this may take 1-2 minutes)...", 55, InstallStage::InstallOpenClaw).await;
+    let installed = backend.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
+    if installed.trim().is_empty() {
+        // Use exec_with_progress for streaming npm output
+        let (progress_tx, mut progress_rx) = mpsc::channel::<String>(64);
+
+        // Forward npm output lines to install progress
+        let tx_npm = tx.clone();
+        let npm_log = tokio::spawn(async move {
+            while let Some(line) = progress_rx.recv().await {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    send(&tx_npm, &format!("  npm: {}", &trimmed[..trimmed.len().min(80)]), 58, InstallStage::InstallOpenClaw).await;
+                }
+            }
+        });
+
+        let install_cmd = format!(
+            "{proxy_prefix}sudo npm install -g openclaw@{ver} 2>&1 || npm install -g openclaw@{ver} 2>&1",
+            ver = opts.claw_version
+        );
+        let install_result = backend.exec_with_progress(&install_cmd, &progress_tx).await;
+        drop(progress_tx);
+        npm_log.await.ok();
+
+        install_result?;
+        send(tx, "OpenClaw installed successfully", 65, InstallStage::InstallOpenClaw).await;
+    } else {
+        send(tx, &format!("OpenClaw already installed: {}", installed.trim()), 65, InstallStage::InstallOpenClaw).await;
+    }
+
+    // --- Step: Store API Key ---
+    if let Some(ref api_key) = opts.api_key {
+        send(tx, "Storing API key in keychain...", 70, InstallStage::StoreApiKey).await;
+        keychain::store_api_key(&opts.instance_name, api_key)?;
+        let escaped = shell_escape(api_key);
+        backend.exec(&format!("openclaw config set apiKey '{escaped}' 2>/dev/null || true")).await?;
+        send(tx, "API key stored", 73, InstallStage::StoreApiKey).await;
+    }
+
+    // --- Step: Install Browser (optional) ---
+    if opts.install_browser {
+        send(tx, "Installing Chromium + noVNC...", 75, InstallStage::InstallBrowser).await;
+        backend.exec(&format!(
+            "{proxy_prefix}sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1"
+        )).await?;
+        send(tx, "Browser components installed", 80, InstallStage::InstallBrowser).await;
+    }
+
+    // --- Step: Start OpenClaw ---
+    send(tx, "Starting OpenClaw daemon...", 85, InstallStage::StartOpenClaw).await;
+    backend.exec("openclaw start --daemon 2>/dev/null || true").await?;
+    send(tx, "OpenClaw started", 88, InstallStage::StartOpenClaw).await;
+
+    // --- Step: Save Config ---
+    send(tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
+    let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
+    let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await
         .unwrap_or_else(|_| opts.claw_version.clone());
 
     config.config_mut().instances.push(InstanceConfig {
@@ -262,6 +270,7 @@ async fn do_install(
         browser: Default::default(),
     });
     config.save()?;
+    send(tx, "Configuration saved", 95, InstallStage::SaveConfig).await;
 
     Ok(())
 }
@@ -271,6 +280,5 @@ async fn send(tx: &mpsc::Sender<InstallProgress>, message: &str, percent: u8, st
         message: message.to_string(),
         percent,
         stage,
-    })
-    .await;
+    }).await;
 }

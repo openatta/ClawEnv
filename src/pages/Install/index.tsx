@@ -10,14 +10,17 @@ type CheckItem = { name: string; ok: boolean; detail: string };
 type SystemCheckInfo = { os: string; arch: string; memory_gb: number; disk_free_gb: number; sandbox_backend: string; sandbox_available: boolean; checks: CheckItem[] };
 
 const INSTALL_STAGES = [
-  { key: "detect_platform", label: "Detect platform" },
-  { key: "ensure_prerequisites", label: "Check prerequisites" },
-  { key: "create_sandbox", label: "Create sandbox" },
-  { key: "configure_proxy", label: "Configure proxy" },
-  { key: "store_api_key", label: "Store API key" },
-  { key: "install_browser", label: "Install browser" },
-  { key: "start_open_claw", label: "Start OpenClaw" },
-  { key: "save_config", label: "Save configuration" },
+  { key: "detect_platform", label: "检测平台 / Detect Platform" },
+  { key: "ensure_prerequisites", label: "检查前置条件 / Prerequisites" },
+  { key: "create_vm", label: "创建虚拟机 / Create VM" },
+  { key: "boot_vm", label: "启动虚拟机 / Boot VM" },
+  { key: "configure_proxy", label: "配置代理 / Configure Proxy" },
+  { key: "install_deps", label: "安装依赖 / Install Dependencies" },
+  { key: "install_open_claw", label: "安装 OpenClaw / Install OpenClaw" },
+  { key: "store_api_key", label: "存储 API Key / Store API Key" },
+  { key: "install_browser", label: "安装浏览器 / Install Browser" },
+  { key: "start_open_claw", label: "启动 OpenClaw / Start OpenClaw" },
+  { key: "save_config", label: "保存配置 / Save Config" },
 ];
 
 export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void }) {

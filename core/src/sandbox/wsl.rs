@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -229,22 +228,52 @@ impl SandboxBackend for WslBackend {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    async fn exec_stream(&self, cmd: &str, tx: mpsc::Sender<String>) -> Result<ExitStatus> {
+    async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut child = Command::new("wsl")
-            .args(["-d", &self.distro_name, "--", "ash", "-c", cmd])
+            .args(["-d", &self.distro_name, "--", "sh", "-c", cmd])
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("No stdout"))?;
-        let mut reader = BufReader::new(stdout).lines();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-        while let Some(line) = reader.next_line().await? {
-            let _ = tx.send(line).await;
+        let tx2 = tx.clone();
+        let stderr_task = tokio::spawn(async move {
+            if let Some(se) = stderr {
+                let mut reader = BufReader::new(se).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx2.send(line).await;
+                }
+            }
+        });
+
+        let tx3 = tx.clone();
+        let stdout_task = tokio::spawn(async move {
+            let mut output = String::new();
+            if let Some(so) = stdout {
+                let mut reader = BufReader::new(so).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx3.send(line.clone()).await;
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+            output
+        });
+
+        let status = child.wait().await?;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stderr_task.abort();
+        let output = stdout_task.await.unwrap_or_default();
+
+        if !status.success() {
+            anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
         }
-
-        Ok(child.wait().await?)
+        Ok(output)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {

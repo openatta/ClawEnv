@@ -12,7 +12,6 @@ use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
-use std::process::ExitStatus;
 
 use crate::platform::{OsType, detect_platform};
 
@@ -44,8 +43,23 @@ pub trait SandboxBackend: Send + Sync {
     /// 在沙盒内执行命令，返回 stdout
     async fn exec(&self, cmd: &str) -> Result<String>;
 
-    /// 在沙盒内以流式方式执行命令
-    async fn exec_stream(&self, cmd: &str, tx: mpsc::Sender<String>) -> Result<ExitStatus>;
+    /// 在沙盒内以流式方式执行命令（stderr 逐行发送到 channel）
+    async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String>;
+
+    /// 安装系统包（平台抽象：Lima=sudo apk add, WSL2=apk add, Podman=podman exec apk add）
+    async fn install_package(&self, packages: &str) -> Result<()> {
+        self.exec(&format!("sudo apk add --no-cache {packages} 2>&1 || apk add --no-cache {packages} 2>&1")).await?;
+        Ok(())
+    }
+
+    /// 安装 npm 全局包
+    async fn npm_install_global(&self, package: &str, tx: &mpsc::Sender<String>) -> Result<()> {
+        self.exec_with_progress(
+            &format!("sudo npm install -g {package} 2>&1 || npm install -g {package} 2>&1"),
+            tx,
+        ).await?;
+        Ok(())
+    }
 
     /// 创建快照
     async fn snapshot_create(&self, tag: &str) -> Result<()>;

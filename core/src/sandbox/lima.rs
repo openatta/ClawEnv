@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
@@ -218,64 +217,111 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Use a two-phase approach:
-        // 1. Spawn with piped stdout, read with a timeout guard
-        // 2. If the command writes output we need, capture it
-        // For most exec calls, we just need the exit code.
-        //
-        // Lima's shell can keep pipes open (hostagent inheritance),
-        // so we use spawn + read_to_end with concurrent wait.
+        // Lima pipes can hang due to hostagent inheriting FDs.
+        // Strategy: spawn, concurrently read stdout+stderr with timeout, then wait.
         use tokio::io::AsyncReadExt;
 
         let mut child = Command::new("limactl")
             .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null()) // don't capture stderr to avoid pipe hang
+            .stderr(std::process::Stdio::piped())
             .kill_on_drop(true)
             .spawn()?;
 
-        let stdout_handle = child.stdout.take();
+        let mut stdout_h = child.stdout.take();
+        let mut stderr_h = child.stderr.take();
 
-        // Wait for process to exit first
-        let status = child.wait().await?;
+        // Read stdout and stderr concurrently with the process, with a global timeout
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            let mut stdout_buf = Vec::new();
+            let mut stderr_buf = Vec::new();
 
-        // Then read whatever stdout is available (process is done, pipe should close)
-        let stdout_data = if let Some(mut so) = stdout_handle {
-            let mut buf = Vec::new();
-            // Use a short timeout for reading — if pipe doesn't close, give up
-            match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                so.read_to_end(&mut buf),
-            ).await {
-                Ok(Ok(_)) => String::from_utf8_lossy(&buf).to_string(),
-                _ => String::new(),
+            // Read both pipes concurrently
+            let (so_res, se_res) = tokio::join!(
+                async {
+                    if let Some(ref mut so) = stdout_h {
+                        so.read_to_end(&mut stdout_buf).await.ok();
+                    }
+                },
+                async {
+                    if let Some(ref mut se) = stderr_h {
+                        se.read_to_end(&mut stderr_buf).await.ok();
+                    }
+                }
+            );
+
+            let status = child.wait().await?;
+            Ok::<_, anyhow::Error>((status, stdout_buf, stderr_buf))
+        }).await;
+
+        match result {
+            Ok(Ok((status, stdout_buf, stderr_buf))) => {
+                if !status.success() {
+                    let stderr = String::from_utf8_lossy(&stderr_buf);
+                    let stdout = String::from_utf8_lossy(&stdout_buf);
+                    anyhow::bail!("exec failed (exit {:?}): {}\nstdout: {}\nstderr: {}",
+                        status.code(), cmd, stdout.chars().take(500).collect::<String>(),
+                        stderr.chars().take(500).collect::<String>());
+                }
+                Ok(String::from_utf8_lossy(&stdout_buf).to_string())
             }
-        } else {
-            String::new()
-        };
-
-        if !status.success() {
-            anyhow::bail!("exec failed (exit {:?}): {}", status.code(), cmd);
+            Ok(Err(e)) => Err(e),
+            Err(_) => {
+                // Timeout — kill the child
+                anyhow::bail!("exec timed out (5 min): {}", cmd);
+            }
         }
-        Ok(stdout_data)
     }
 
-    async fn exec_stream(&self, cmd: &str, tx: mpsc::Sender<String>) -> Result<ExitStatus> {
+    async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut child = Command::new("limactl")
             .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
             .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
             .spawn()?;
 
-        let stdout = child.stdout.take().ok_or_else(|| anyhow!("No stdout"))?;
-        let mut reader = BufReader::new(stdout).lines();
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
 
-        while let Some(line) = reader.next_line().await? {
-            let _ = tx.send(line).await;
+        let tx2 = tx.clone();
+        // Stream stderr (where npm/apk write progress)
+        let stderr_task = tokio::spawn(async move {
+            if let Some(se) = stderr {
+                let mut reader = BufReader::new(se).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx2.send(line).await;
+                }
+            }
+        });
+
+        // Also stream stdout
+        let tx3 = tx.clone();
+        let stdout_task = tokio::spawn(async move {
+            let mut output = String::new();
+            if let Some(so) = stdout {
+                let mut reader = BufReader::new(so).lines();
+                while let Ok(Some(line)) = reader.next_line().await {
+                    let _ = tx3.send(line.clone()).await;
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+            output
+        });
+
+        let status = child.wait().await?;
+        // Give pipes a moment to flush
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        stderr_task.abort();
+        let output = stdout_task.await.unwrap_or_default();
+
+        if !status.success() {
+            anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
         }
-
-        Ok(child.wait().await?)
+        Ok(output)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {
