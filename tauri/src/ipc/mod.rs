@@ -176,6 +176,82 @@ pub async fn test_proxy(proxy_json: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Test connectivity to multiple endpoints, returning status for each
+#[derive(Serialize)]
+pub struct ConnTestResult {
+    pub endpoint: String,
+    pub ok: bool,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn test_connectivity(proxy_json: Option<String>) -> Result<Vec<ConnTestResult>, String> {
+    let client = if let Some(ref pj) = proxy_json {
+        if let Ok(proxy) = serde_json::from_str::<ProxyConfig>(pj) {
+            if proxy.enabled && !proxy.http_proxy.is_empty() {
+                let rp = reqwest::Proxy::all(&proxy.http_proxy).map_err(|e| e.to_string())?;
+                reqwest::Client::builder().proxy(rp).build().map_err(|e| e.to_string())?
+            } else {
+                reqwest::Client::new()
+            }
+        } else {
+            reqwest::Client::new()
+        }
+    } else {
+        reqwest::Client::new()
+    };
+
+    let endpoints = vec![
+        ("Alpine CDN", "https://dl-cdn.alpinelinux.org/alpine/latest-stable/"),
+        ("npm Registry", "https://registry.npmjs.org/"),
+        ("GitHub API", "https://api.github.com/"),
+        ("OpenClaw Registry", "https://registry.npmjs.org/openclaw"),
+    ];
+
+    let mut results = Vec::new();
+    for (name, url) in endpoints {
+        let res = client
+            .head(url)
+            .timeout(std::time::Duration::from_secs(5))
+            .send()
+            .await;
+        let (ok, msg) = match res {
+            Ok(r) if r.status().is_success() || r.status().is_redirection() => {
+                (true, format!("OK ({})", r.status()))
+            }
+            Ok(r) => (false, format!("HTTP {}", r.status())),
+            Err(e) => (false, e.to_string()),
+        };
+        results.push(ConnTestResult {
+            endpoint: name.to_string(),
+            ok,
+            message: msg,
+        });
+    }
+    Ok(results)
+}
+
+/// Detect system proxy settings from environment variables
+#[tauri::command]
+pub fn detect_system_proxy() -> Result<serde_json::Value, String> {
+    let http = std::env::var("http_proxy")
+        .or_else(|_| std::env::var("HTTP_PROXY"))
+        .unwrap_or_default();
+    let https = std::env::var("https_proxy")
+        .or_else(|_| std::env::var("HTTPS_PROXY"))
+        .unwrap_or_default();
+    let no_proxy = std::env::var("no_proxy")
+        .or_else(|_| std::env::var("NO_PROXY"))
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({
+        "detected": !http.is_empty() || !https.is_empty(),
+        "http_proxy": http,
+        "https_proxy": https,
+        "no_proxy": no_proxy,
+    }))
+}
+
 #[tauri::command]
 pub async fn create_default_config(user_mode: String) -> Result<(), String> {
     let mode = match user_mode.to_lowercase().as_str() {

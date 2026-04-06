@@ -15,15 +15,8 @@ export default defineConfig({
   build: {
     target: "esnext",
     outDir: "dist",
-    rollupOptions: {
-      external: [
-        "@tauri-apps/api",
-        "@tauri-apps/api/core",
-        "@tauri-apps/api/event",
-        "@tauri-apps/plugin-shell",
-        "@tauri-apps/plugin-notification",
-      ],
-    },
+    // DO NOT mark @tauri-apps as external — they must be bundled
+    // so the WebView can resolve them at runtime
   },
   resolve: {
     alias: {

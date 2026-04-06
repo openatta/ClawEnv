@@ -4,9 +4,31 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>ClawEnv</title>
+    <style>
+      body { margin: 0; background: #111827; color: white; font-family: system-ui; }
+      #error-overlay { display: none; position: fixed; inset: 0; background: #111827; padding: 2rem; z-index: 9999; white-space: pre-wrap; font-size: 14px; overflow: auto; }
+      #error-overlay.visible { display: block; }
+      #error-overlay h2 { color: #ef4444; }
+      #error-overlay pre { background: #1f2937; padding: 1rem; border-radius: 8px; overflow-x: auto; }
+    </style>
   </head>
   <body>
+    <div id="error-overlay"><h2>ClawEnv Error</h2><pre id="error-detail"></pre></div>
     <div id="root"></div>
+    <script>
+      window.onerror = function(msg, src, line, col, err) {
+        var el = document.getElementById('error-overlay');
+        var detail = document.getElementById('error-detail');
+        el.className = 'visible';
+        detail.textContent = msg + '\n\nSource: ' + src + ':' + line + ':' + col + '\n\n' + (err && err.stack || '');
+      };
+      window.addEventListener('unhandledrejection', function(e) {
+        var el = document.getElementById('error-overlay');
+        var detail = document.getElementById('error-detail');
+        el.className = 'visible';
+        detail.textContent = 'Unhandled Promise Rejection:\n\n' + (e.reason && e.reason.stack || e.reason || e);
+      });
+    </script>
     <script src="/src/index.tsx" type="module"></script>
   </body>
 </html>
