@@ -33,6 +33,21 @@ impl PodmanBackend {
         b
     }
 
+    /// Run podman command without capturing output (for long commands like build/start)
+    async fn podman_run(&self, args: &[&str]) -> Result<()> {
+        let status = Command::new("podman")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("podman {} failed (exit {:?})", args.join(" "), status.code());
+        }
+        Ok(())
+    }
+
+    /// Run podman command, capturing stdout. For short commands.
     async fn podman(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("podman")
             .args(args)
@@ -151,7 +166,7 @@ impl SandboxBackend for PodmanBackend {
 
                 let install_browser = if opts.install_browser { "true" } else { "false" };
 
-                self.podman(&[
+                self.podman_run(&[
                     "build",
                     "-t", &self.image_tag,
                     "--build-arg", &format!("OPENCLAW_VERSION={}", opts.claw_version),
@@ -172,7 +187,7 @@ impl SandboxBackend for PodmanBackend {
         let workspace = Self::workspace_dir(instance_name)?;
         tokio::fs::create_dir_all(&workspace).await?;
 
-        self.podman(&[
+        self.podman_run(&[
             "run", "-d",
             "--name", &self.container_name,
             "--userns=keep-id",
@@ -244,7 +259,7 @@ impl SandboxBackend for PodmanBackend {
         let instance_name = self.container_name.strip_prefix("clawenv-").unwrap_or(&self.container_name);
         let workspace = Self::workspace_dir(instance_name)?;
 
-        self.podman(&[
+        self.podman_run(&[
             "run", "-d",
             "--name", &self.container_name,
             "--userns=keep-id",

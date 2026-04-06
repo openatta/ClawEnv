@@ -188,29 +188,38 @@ async fn do_install(
     }
 
     // --- Step: Install Dependencies ---
-    send(tx, "Installing dependencies (git, curl, bash)...", 42, InstallStage::InstallDeps).await;
-    // Source proxy env if it was set
+    // Podman: packages are pre-installed in Containerfile, skip provisioning
+    // Lima/WSL2/Native: need to install packages after VM creation
+    let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
+    let is_podman = sandbox_type == SandboxType::PodmanAlpine;
     let proxy_prefix = if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
         ". /etc/profile.d/proxy.sh 2>/dev/null; "
     } else {
         ""
     };
-    backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache git curl bash 2>&1 || apk add --no-cache git curl bash 2>&1")).await?;
 
-    // Check Node.js
-    send(tx, "Checking Node.js availability...", 48, InstallStage::InstallDeps).await;
-    let has_node = backend.exec("which node 2>/dev/null").await.unwrap_or_default();
-    if has_node.trim().is_empty() {
-        send(tx, "Installing Node.js + npm...", 50, InstallStage::InstallDeps).await;
-        backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache nodejs npm 2>&1 || apk add --no-cache nodejs npm 2>&1")).await?;
+    if is_podman {
+        send(tx, "Dependencies pre-installed in container image", 50, InstallStage::InstallDeps).await;
     } else {
-        send(tx, "Node.js already available", 50, InstallStage::InstallDeps).await;
+        send(tx, "Installing dependencies (git, curl, bash)...", 42, InstallStage::InstallDeps).await;
+        backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache git curl bash 2>&1 || apk add --no-cache git curl bash 2>&1")).await?;
+
+        send(tx, "Checking Node.js availability...", 48, InstallStage::InstallDeps).await;
+        let has_node = backend.exec("which node 2>/dev/null").await.unwrap_or_default();
+        if has_node.trim().is_empty() {
+            send(tx, "Installing Node.js + npm...", 50, InstallStage::InstallDeps).await;
+            backend.exec(&format!("{proxy_prefix}sudo apk add --no-cache nodejs npm 2>&1 || apk add --no-cache nodejs npm 2>&1")).await?;
+        } else {
+            send(tx, "Node.js already available", 50, InstallStage::InstallDeps).await;
+        }
     }
 
     // --- Step: Install OpenClaw ---
-    send(tx, "Installing OpenClaw (this may take 1-2 minutes)...", 55, InstallStage::InstallOpenClaw).await;
     let installed = backend.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
-    if installed.trim().is_empty() {
+    if is_podman && !installed.trim().is_empty() {
+        send(tx, &format!("OpenClaw pre-installed: {}", installed.trim()), 65, InstallStage::InstallOpenClaw).await;
+    } else if installed.trim().is_empty() {
+        send(tx, "Installing OpenClaw (this may take 1-2 minutes)...", 55, InstallStage::InstallOpenClaw).await;
         // Use exec_with_progress for streaming npm output
         let (progress_tx, mut progress_rx) = mpsc::channel::<String>(64);
 
@@ -266,7 +275,6 @@ async fn do_install(
 
     // --- Step: Save Config ---
     send(tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
-    let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
     let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await
         .unwrap_or_else(|_| opts.claw_version.clone());
 

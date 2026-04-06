@@ -10,4 +10,4 @@ USER clawuser
 WORKDIR /home/clawuser
 VOLUME ["/workspace", "/home/clawuser/.openclaw"]
 EXPOSE 3000
-CMD ["openclaw", "start"]
+CMD ["openclaw", "gateway", "--port", "3000", "--allow-unconfigured"]
