@@ -43,22 +43,14 @@ export default function Home(props: {
   const [statusData, setStatusData] = createSignal<StatusDetail | null>(null);
   const [statusLoading, setStatusLoading] = createSignal(false);
 
-  let statusInterval: ReturnType<typeof setInterval> | null = null;
-
   async function openStatus(name: string) {
     setStatusFor(name);
     setStatusTab("processes");
     await refreshStatus(name);
-    // Auto-refresh every 5 seconds
-    if (statusInterval) clearInterval(statusInterval);
-    statusInterval = setInterval(() => {
-      if (statusFor()) refreshStatus(statusFor()!);
-    }, 5000);
   }
 
   function closeStatus() {
     setStatusFor(null);
-    if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
   }
 
   async function refreshStatus(name: string) {

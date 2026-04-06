@@ -43,16 +43,23 @@ impl InstanceMonitor {
     /// Uses HTTP probe on the gateway port — most reliable method.
     pub async fn check_health_with_port(backend: &dyn SandboxBackend, port: u16) -> InstanceHealth {
         // Primary: HTTP probe the gateway inside the VM
-        match backend.exec(&format!(
+        let curl_result = backend.exec(&format!(
             "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-        )).await {
+        )).await;
+        match &curl_result {
             Ok(out) => {
-                let code = out.trim().trim_matches('\'');
+                let raw = out.trim();
+                let code = raw.trim_matches('\'').trim();
+                tracing::debug!("Health check port {port}: raw='{}' code='{}'", raw, code);
                 if code.starts_with('2') || code.starts_with('3') || code == "401" || code == "403" {
-                    return InstanceHealth::Running; // HTTP response = gateway alive
+                    return InstanceHealth::Running;
                 }
+                tracing::warn!("Health check: unexpected HTTP code '{}' for port {port}", code);
             }
-            Err(_) => return InstanceHealth::Unreachable,
+            Err(e) => {
+                tracing::warn!("Health check exec failed for port {port}: {e}");
+                return InstanceHealth::Unreachable;
+            }
         }
         // Fallback: check if process exists via pidof (no self-match issue)
         match backend.exec("pidof node 2>/dev/null || echo ''").await {

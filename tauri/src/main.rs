@@ -10,6 +10,14 @@ use clawenv_core::monitor::InstanceMonitor;
 use tauri::Emitter;
 
 fn main() {
+    // Initialize logging — visible when run from terminal
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .init();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
