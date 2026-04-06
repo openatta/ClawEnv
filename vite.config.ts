@@ -18,6 +18,9 @@ export default defineConfig({
     // DO NOT mark @tauri-apps as external — they must be bundled
     // so the WebView can resolve them at runtime
   },
+  optimizeDeps: {
+    include: ["xterm", "@xterm/addon-fit"],
+  },
   resolve: {
     alias: {
       "@": "/src",

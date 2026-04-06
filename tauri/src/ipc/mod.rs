@@ -1,9 +1,20 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
 use clawenv_core::config::{ConfigManager, ProxyConfig, UserMode};
 use clawenv_core::launcher::{self, LaunchState};
 use clawenv_core::manager::{install, instance};
 use clawenv_core::sandbox::InstallMode;
+use once_cell::sync::Lazy;
 use serde::Serialize;
 use tauri::Emitter;
+
+// Global terminal sessions: child processes (for kill) and stdin handles (for write)
+static TERMINAL_CHILDREN: Lazy<Mutex<HashMap<String, tokio::process::Child>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+static TERMINAL_STDINS: Lazy<tokio::sync::Mutex<HashMap<String, tokio::process::ChildStdin>>> =
+    Lazy::new(|| tokio::sync::Mutex::new(HashMap::new()));
 
 #[tauri::command]
 pub async fn detect_launch_state() -> Result<LaunchState, String> {
@@ -582,6 +593,35 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
     Ok("API key format valid".into())
 }
 
+/// Install Chromium + noVNC in a running sandbox instance
+#[tauri::command]
+pub async fn install_chromium(
+    app: tauri::AppHandle,
+    name: String,
+) -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+
+    let _ = app.emit("chromium-install-progress", "Installing Chromium and dependencies (~630MB)...");
+
+    let result = backend.exec(
+        "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 || apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1"
+    ).await;
+
+    match result {
+        Ok(output) => {
+            let _ = app.emit("chromium-install-progress", "Chromium installed successfully");
+            tracing::info!("Chromium installed in '{}': {}", name, output.chars().take(200).collect::<String>());
+            Ok(())
+        }
+        Err(e) => {
+            let _ = app.emit("chromium-install-progress", &format!("Installation failed: {e}"));
+            Err(e.to_string())
+        }
+    }
+}
+
 /// Read the gateway auth token from inside the sandbox
 #[tauri::command]
 pub async fn get_gateway_token(name: String) -> Result<String, String> {
@@ -610,6 +650,154 @@ pub async fn save_bridge_config(bridge_json: String) -> Result<(), String> {
     let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
     config.config_mut().clawenv.bridge = bridge;
     config.save().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn start_terminal(
+    app: tauri::AppHandle,
+    instance_name: String,
+) -> Result<String, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &instance_name).map_err(|e| e.to_string())?;
+
+    // Determine shell command based on sandbox type
+    let (program, args) = match inst.sandbox_type {
+        clawenv_core::sandbox::SandboxType::LimaAlpine => (
+            "limactl",
+            vec!["shell".to_string(), format!("clawenv-{}", instance_name)],
+        ),
+        clawenv_core::sandbox::SandboxType::PodmanAlpine => (
+            "podman",
+            vec![
+                "exec".to_string(),
+                "-it".to_string(),
+                format!("clawenv-{}", instance_name),
+                "sh".to_string(),
+            ],
+        ),
+        clawenv_core::sandbox::SandboxType::Wsl2Alpine => (
+            "wsl",
+            vec![
+                "-d".to_string(),
+                format!("ClawEnv-Alpine-{}", instance_name),
+            ],
+        ),
+        clawenv_core::sandbox::SandboxType::Native => ("sh", vec![]),
+    };
+
+    let session_id = format!(
+        "term-{}-{}",
+        instance_name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+    );
+
+    let mut child = tokio::process::Command::new(program)
+        .args(&args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| e.to_string())?;
+
+    // Stream stdout to frontend
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let sid = session_id.clone();
+    let app2 = app.clone();
+
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        if let Some(mut so) = stdout {
+            let mut buf = [0u8; 4096];
+            loop {
+                match so.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let _ = app2.emit(
+                            "terminal-output",
+                            serde_json::json!({
+                                "session_id": sid,
+                                "data": data,
+                            }),
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    let sid2 = session_id.clone();
+    let app3 = app.clone();
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        if let Some(mut se) = stderr {
+            let mut buf = [0u8; 4096];
+            loop {
+                match se.read(&mut buf).await {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
+                        let _ = app3.emit(
+                            "terminal-output",
+                            serde_json::json!({
+                                "session_id": sid2,
+                                "data": data,
+                            }),
+                        );
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+    });
+
+    // Store stdin separately (behind tokio::sync::Mutex for async access)
+    let stdin = child.stdin.take();
+    TERMINAL_CHILDREN
+        .lock()
+        .unwrap()
+        .insert(session_id.clone(), child);
+    if let Some(stdin_handle) = stdin {
+        TERMINAL_STDINS
+            .lock()
+            .await
+            .insert(session_id.clone(), stdin_handle);
+    }
+
+    Ok(session_id)
+}
+
+#[tauri::command]
+pub async fn write_terminal(session_id: String, data: String) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+
+    let mut stdins = TERMINAL_STDINS.lock().await;
+    if let Some(stdin) = stdins.get_mut(&session_id) {
+        stdin
+            .write_all(data.as_bytes())
+            .await
+            .map_err(|e| e.to_string())?;
+        stdin.flush().await.map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn close_terminal(session_id: String) -> Result<(), String> {
+    // Remove stdin handle first
+    TERMINAL_STDINS.lock().await.remove(&session_id);
+    // Remove and kill child process (drop lock before await)
+    let child = TERMINAL_CHILDREN.lock().unwrap().remove(&session_id);
+    if let Some(mut child) = child {
+        let _ = child.kill().await;
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -273,6 +273,8 @@ export default function Settings() {
             </div>
           </section>
 
+          <BrowserInstallSection />
+
           <section>
             <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Approval Policy</h2>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-400 space-y-1">
@@ -306,6 +308,53 @@ function PermRow(props: { label: string; hint: string; value: string; onChange: 
       <input type="text" class={`w-full bg-gray-700 text-sm rounded px-2 py-1.5 border ${props.color === "red" ? "border-red-700/50" : "border-gray-600"}`}
         value={props.value} onInput={e => props.onChange(e.target.value)} />
     </div>
+  );
+}
+
+function BrowserInstallSection() {
+  const [installing, setInstalling] = createSignal(false);
+  const [installMsg, setInstallMsg] = createSignal("");
+
+  async function installChromium() {
+    setInstalling(true);
+    setInstallMsg("Installing Chromium (~630MB, this may take several minutes)...");
+    try {
+      await invoke("install_chromium", { name: "default" });
+      setInstallMsg("Chromium installed successfully!");
+    } catch (e) {
+      setInstallMsg(`Failed: ${e}`);
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  return (
+    <section class="mb-6">
+      <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Browser Automation</h2>
+      <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 space-y-3">
+        <p class="text-xs text-gray-400">
+          Chromium headless is required for web scraping, CDP automation, screenshots, and CAPTCHA handling.
+          It can be installed into any running sandbox instance.
+        </p>
+        <div class="flex items-center gap-3">
+          <button
+            class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+            disabled={installing()}
+            onClick={installChromium}
+          >
+            {installing() ? "Installing..." : "Install Chromium in default instance"}
+          </button>
+        </div>
+        <Show when={installMsg()}>
+          <div class={`text-xs ${installMsg().includes("Failed") ? "text-red-400" : installMsg().includes("success") ? "text-green-400" : "text-gray-400"}`}>
+            {installMsg()}
+          </div>
+        </Show>
+        <p class="text-[10px] text-gray-500">
+          Packages: chromium, xvfb-run, x11vnc, novnc, websockify, ttf-freefont (~630MB total)
+        </p>
+      </div>
+    </section>
   );
 }
 
