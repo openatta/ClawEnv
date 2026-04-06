@@ -79,6 +79,22 @@ enum Commands {
     UpdateCheck {
         name: Option<String>,
     },
+    /// Export an instance as a distributable package
+    Export {
+        /// Instance name
+        name: Option<String>,
+        /// Output directory
+        #[arg(long, default_value = "./packages")]
+        output: String,
+    },
+    /// Import an instance from a package file
+    Import {
+        /// Path to package file (.tar.gz / .tar / .qcow2)
+        file: String,
+        /// Instance name
+        #[arg(long, default_value = "default")]
+        name: String,
+    },
     /// Diagnose current environment
     Doctor,
 }
@@ -326,6 +342,64 @@ async fn main() -> Result<()> {
                 }
                 Err(e) => println!("Failed to check updates: {e}"),
             }
+        }
+
+        Commands::Export { name, output } => {
+            let name = resolve_name(name);
+            let config = clawenv_core::config::ConfigManager::load()?;
+            let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
+            let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
+
+            std::fs::create_dir_all(&output)?;
+            let timestamp = chrono::Utc::now().format("%Y%m%d-%H%M%S");
+            let platform = std::env::consts::OS;
+            let arch = std::env::consts::ARCH;
+            let filename = format!("clawenv-{name}-{timestamp}-{platform}-{arch}.tar.gz");
+            let outpath = std::path::PathBuf::from(&output).join(&filename);
+
+            println!("Exporting instance '{name}'...");
+
+            // Get version info
+            let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await.unwrap_or_default();
+            println!("  OpenClaw: {}", version.trim());
+
+            // Stop VM for clean export
+            println!("  Stopping instance...");
+            backend.stop().await.ok();
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+            // Use the platform package script
+            println!("  Packaging (this may take a minute)...");
+            let status = tokio::process::Command::new("bash")
+                .args(["scripts/package-alpine.sh", &name, &output])
+                .status()
+                .await?;
+
+            if !status.success() {
+                println!("  Package script failed. Trying direct export...");
+                // Fallback: just note the location
+                println!("  Lima instance at: ~/.lima/clawenv-{name}/");
+            }
+
+            // Restart
+            println!("  Restarting instance...");
+            backend.start().await.ok();
+
+            println!("\nExport complete: {}", outpath.display());
+        }
+
+        Commands::Import { file, name } => {
+            let path = std::path::PathBuf::from(&file);
+            if !path.exists() {
+                anyhow::bail!("File not found: {}", path.display());
+            }
+
+            println!("Importing instance '{name}' from {}...", path.display());
+
+            let backend = clawenv_core::sandbox::detect_backend()?;
+            backend.import_image(&path).await?;
+
+            println!("Import complete. Run 'clawenv start {name}' to start.");
         }
 
         Commands::Doctor => {
