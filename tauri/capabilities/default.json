@@ -8,6 +8,7 @@
     "core:event:allow-listen",
     "core:event:allow-emit",
     "shell:default",
+    "shell:allow-open",
     "notification:default",
     "notification:allow-request-permission",
     "notification:allow-notify",

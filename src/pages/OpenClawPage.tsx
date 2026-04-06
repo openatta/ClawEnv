@@ -1,5 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { open as shellOpen } from "@tauri-apps/plugin-shell";
 
 type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
 
@@ -73,7 +74,7 @@ export default function OpenClawPage(props: {
 
               <button
                 class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
-                onClick={() => window.open(`http://127.0.0.1:${activeInstance()!.gateway_port}`, "_blank")}
+                onClick={() => shellOpen(`http://127.0.0.1:${activeInstance()!.gateway_port}`)}
               >
                 Open OpenClaw Control Panel ↗
               </button>
