@@ -74,7 +74,20 @@ export default function OpenClawPage(props: {
 
               <button
                 class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
-                onClick={() => shellOpen(`http://127.0.0.1:${activeInstance()!.gateway_port}`)}
+                onClick={async () => {
+                  try {
+                    await shellOpen(`http://127.0.0.1:${activeInstance()!.gateway_port}`);
+                  } catch (e) {
+                    console.error("shellOpen failed:", e);
+                    // Fallback: try invoking a Tauri command
+                    try {
+                      await invoke("open_url_in_browser", { url: `http://127.0.0.1:${activeInstance()!.gateway_port}` });
+                    } catch {
+                      // Last resort
+                      alert(`Please open in browser: http://127.0.0.1:${activeInstance()!.gateway_port}`);
+                    }
+                  }
+                }}
               >
                 Open OpenClaw Control Panel ↗
               </button>

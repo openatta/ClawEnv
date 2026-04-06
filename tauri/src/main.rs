@@ -121,6 +121,7 @@ fn main() {
             ipc::system_check,
             ipc::install_prerequisites,
             ipc::test_api_key,
+            ipc::open_url_in_browser,
             ipc::create_default_config,
         ])
         .run(tauri::generate_context!())

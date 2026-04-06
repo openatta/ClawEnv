@@ -583,6 +583,36 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn open_url_in_browser(url: String) -> Result<(), String> {
+    // Fallback: use Rust std to open URL
+    #[cfg(target_os = "macos")]
+    {
+        tokio::process::Command::new("open")
+            .arg(&url)
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        tokio::process::Command::new("cmd")
+            .args(["/c", "start", &url])
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        tokio::process::Command::new("xdg-open")
+            .arg(&url)
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn create_default_config(user_mode: String) -> Result<(), String> {
     let mode = match user_mode.to_lowercase().as_str() {
         "developer" | "dev" => UserMode::Developer,

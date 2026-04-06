@@ -9,6 +9,14 @@
     "core:event:allow-emit",
     "shell:default",
     "shell:allow-open",
+    {
+      "identifier": "shell:allow-open",
+      "allow": [
+        { "url": "http://127.0.0.1:*" },
+        { "url": "http://localhost:*" },
+        { "url": "https://*" }
+      ]
+    },
     "notification:default",
     "notification:allow-request-permission",
     "notification:allow-notify",
