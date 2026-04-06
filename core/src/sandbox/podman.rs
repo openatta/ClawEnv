@@ -9,6 +9,7 @@ use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, SnapshotInfo,
 pub struct PodmanBackend {
     container_name: String,
     image_tag: String,
+    port: u16,
 }
 
 impl PodmanBackend {
@@ -16,12 +17,20 @@ impl PodmanBackend {
         Self {
             container_name: format!("clawenv-{instance_name}"),
             image_tag: format!("clawenv/openclaw:{version}"),
+            port: 3000,
         }
     }
 
     /// Create with default version tag
     pub fn with_defaults(instance_name: &str) -> Self {
         Self::new(instance_name, "latest")
+    }
+
+    /// Create with specific port (for multi-instance)
+    pub fn with_port(instance_name: &str, port: u16) -> Self {
+        let mut b = Self::new(instance_name, "latest");
+        b.port = port;
+        b
     }
 
     async fn podman(&self, args: &[&str]) -> Result<String> {
@@ -168,7 +177,7 @@ impl SandboxBackend for PodmanBackend {
             "--name", &self.container_name,
             "--userns=keep-id",
             "-v", &format!("{}:/workspace:Z", workspace.to_string_lossy()),
-            "-p", "127.0.0.1:3000:3000",
+            "-p", &format!("127.0.0.1:{}:3000", self.port),
             &self.image_tag,
         ]).await?;
 
@@ -240,7 +249,7 @@ impl SandboxBackend for PodmanBackend {
             "--name", &self.container_name,
             "--userns=keep-id",
             "-v", &format!("{}:/workspace:Z", workspace.to_string_lossy()),
-            "-p", "127.0.0.1:3000:3000",
+            "-p", &format!("127.0.0.1:{}:3000", self.port),
             &snapshot_image,
         ]).await?;
 

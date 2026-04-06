@@ -33,6 +33,15 @@ enum Commands {
         #[arg(long, default_value = "default")]
         name: String,
     },
+    /// Create a new instance (multi-instance support)
+    Create {
+        /// Instance name
+        #[arg(long)]
+        name: String,
+        /// Gateway port (auto-assigned if not specified)
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// List all instances
     List,
     /// Start an instance
@@ -172,6 +181,67 @@ async fn main() -> Result<()> {
             let mut config = clawenv_core::config::ConfigManager::load()?;
             clawenv_core::manager::instance::remove_instance(&mut config, &name).await?;
             println!("Instance '{name}' removed.");
+        }
+
+        Commands::Create { name, port } => {
+            use clawenv_core::config::{ConfigManager, UserMode, InstanceConfig, OpenClawConfig, ResourceConfig};
+            use clawenv_core::sandbox::SandboxType;
+
+            let mut config = ConfigManager::load()
+                .or_else(|_| ConfigManager::create_default(UserMode::Developer))?;
+
+            // Check if instance already exists
+            if config.instances().iter().any(|i| i.name == name) {
+                anyhow::bail!("Instance '{name}' already exists");
+            }
+
+            // Auto-assign port if not specified
+            let gateway_port = port.unwrap_or_else(|| {
+                let max_port = config.instances().iter()
+                    .map(|i| i.openclaw.gateway_port)
+                    .max()
+                    .unwrap_or(2999);
+                max_port + 1
+            });
+
+            println!("Creating instance '{name}' on port {gateway_port}...");
+
+            // Create sandbox
+            let sandbox_type = SandboxType::from_os();
+            let opts = clawenv_core::sandbox::SandboxOpts {
+                instance_name: name.clone(),
+                claw_version: "latest".into(),
+                alpine_version: "latest-stable".into(),
+                memory_mb: 512,
+                cpu_cores: 2,
+                install_browser: false,
+                install_mode: clawenv_core::sandbox::InstallMode::OnlineBuild,
+            };
+
+            let backend = clawenv_core::sandbox::detect_backend()?;
+            backend.create(&opts).await?;
+
+            // Save to config
+            config.config_mut().instances.push(InstanceConfig {
+                name: name.clone(),
+                claw_type: "openclaw".into(),
+                version: "pending".into(),
+                sandbox_type,
+                sandbox_id: format!("clawenv-{name}"),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_upgraded_at: String::new(),
+                openclaw: OpenClawConfig {
+                    gateway_port,
+                    webchat_enabled: true,
+                    channels: Default::default(),
+                },
+                resources: ResourceConfig::default(),
+                browser: Default::default(),
+            });
+            config.save()?;
+
+            println!("Instance '{name}' created (port {gateway_port}).");
+            println!("Run 'clawenv install --name {name}' to install OpenClaw.");
         }
 
         Commands::List => {

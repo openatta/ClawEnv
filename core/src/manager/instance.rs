@@ -11,7 +11,7 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
     match instance.sandbox_type {
         SandboxType::LimaAlpine => Ok(Box::new(LimaBackend::new(&instance.name))),
         SandboxType::Wsl2Alpine => Ok(Box::new(WslBackend::new(&instance.name))),
-        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_defaults(&instance.name))),
+        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(&instance.name, instance.openclaw.gateway_port))),
         SandboxType::Native => Ok(Box::new(native_backend(&instance.name))),
     }
 }
