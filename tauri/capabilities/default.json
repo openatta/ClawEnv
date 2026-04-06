@@ -1,0 +1,16 @@
+{
+  "identifier": "default",
+  "description": "Default permissions for ClawEnv",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "core:event:default",
+    "core:event:allow-listen",
+    "core:event:allow-emit",
+    "shell:default",
+    "notification:default",
+    "notification:allow-request-permission",
+    "notification:allow-notify",
+    "notification:allow-is-permission-granted"
+  ]
+}
