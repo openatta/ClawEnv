@@ -582,6 +582,18 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
     Ok("API key format valid".into())
 }
 
+/// Read the gateway auth token from inside the sandbox
+#[tauri::command]
+pub async fn get_gateway_token(name: String) -> Result<String, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let result = backend.exec(
+        "cat ~/.openclaw/openclaw.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'"
+    ).await.map_err(|e| e.to_string())?;
+    Ok(result.trim().to_string())
+}
+
 #[tauri::command]
 pub async fn open_url_in_browser(url: String) -> Result<(), String> {
     // Fallback: use Rust std to open URL

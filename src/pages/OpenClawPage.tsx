@@ -20,12 +20,29 @@ export default function OpenClawPage(props: {
     return "bg-red-500";
   }
 
+  const [gatewayToken, setGatewayToken] = createSignal("");
+
+  // Fetch gateway token when tab changes
+  async function fetchToken() {
+    const name = activeTab();
+    try {
+      const token = await invoke<string>("get_gateway_token", { name });
+      setGatewayToken(token);
+    } catch {
+      setGatewayToken("");
+    }
+  }
+  // Fetch on first render
+  fetchToken();
+
   async function openInBrowser() {
-    // Find port from instances array directly (not reactive accessor)
     const name = activeTab();
     const inst = props.instances.find((i) => i.name === name);
     const port = inst?.gateway_port ?? 3000;
-    const url = `http://127.0.0.1:${port}`;
+    const token = gatewayToken();
+    const url = token
+      ? `http://127.0.0.1:${port}/?token=${token}`
+      : `http://127.0.0.1:${port}`;
     try {
       await invoke("open_url_in_browser", { url });
     } catch (e) {
@@ -110,6 +127,8 @@ export default function OpenClawPage(props: {
                 <span>{activeInstance()?.sandbox_type}</span>
                 <span class="text-gray-400">Gateway</span>
                 <span class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</span>
+                <span class="text-gray-400">Token</span>
+                <span class="font-mono text-gray-300">{gatewayToken() || "loading..."}</span>
                 <span class="text-gray-400">Status</span>
                 <span class="text-green-400">● running</span>
               </div>
