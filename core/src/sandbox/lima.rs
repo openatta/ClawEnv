@@ -18,11 +18,10 @@ impl LimaBackend {
         }
     }
 
+    /// Run limactl and capture stdout (for commands that exit quickly like list, shell)
     async fn limactl(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("limactl")
             .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
             .output()
             .await?;
         if !out.status.success() {
@@ -30,6 +29,21 @@ impl LimaBackend {
             anyhow::bail!("limactl {} failed: {}", args.join(" "), stderr);
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// Run limactl without capturing output (for long-running commands like start)
+    /// Lima's hostagent inherits pipes and keeps them open, so .output() would hang.
+    async fn limactl_run(&self, args: &[&str]) -> Result<()> {
+        let status = Command::new("limactl")
+            .args(args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await?;
+        if !status.success() {
+            anyhow::bail!("limactl {} failed (exit code {:?})", args.join(" "), status.code());
+        }
+        Ok(())
     }
 
     /// Run limactl with streaming stderr output (for long operations like start)
@@ -171,7 +185,7 @@ impl SandboxBackend for LimaBackend {
                 // Then provision OpenClaw inside the running VM
                 tracing::info!("Creating Lima VM '{}' from template:alpine", self.vm_name);
 
-                self.limactl(
+                self.limactl_run(
                     &["start", "--name", &self.vm_name, "--tty=false", "template:alpine"],
                 ).await?;
 
@@ -196,8 +210,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn start(&self) -> Result<()> {
-        self.limactl(&["start", &self.vm_name]).await?;
-        Ok(())
+        self.limactl_run(&["start", &self.vm_name]).await
     }
 
     async fn stop(&self) -> Result<()> {
