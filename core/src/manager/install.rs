@@ -169,18 +169,38 @@ async fn do_install(
     heartbeat.abort();
     create_result?;
 
-    send(tx, "Sandbox VM ready", 45, InstallStage::CreateSandbox).await;
+    send(tx, "Sandbox VM ready, installing packages...", 45, InstallStage::CreateSandbox).await;
+
+    // 3b. Provision: install essential packages
+    send(tx, "Installing essential packages (git, curl)...", 48, InstallStage::CreateSandbox).await;
+    backend.exec("sudo apk add --no-cache git curl bash 2>/dev/null || true").await?;
+
+    // 3c. Provision: ensure Node.js
+    send(tx, "Checking Node.js...", 50, InstallStage::CreateSandbox).await;
+    let has_node = backend.exec("which node 2>/dev/null || echo ''").await.unwrap_or_default();
+    if has_node.trim().is_empty() {
+        send(tx, "Installing Node.js + npm...", 52, InstallStage::CreateSandbox).await;
+        backend.exec("sudo apk add --no-cache nodejs npm").await?;
+    }
+
+    // 3d. Provision: install OpenClaw
+    send(tx, "Installing OpenClaw (this may take 1-2 minutes)...", 55, InstallStage::CreateSandbox).await;
+    let installed = backend.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
+    if installed.trim().is_empty() {
+        backend.exec(&format!("sudo npm install -g openclaw@{}", opts.claw_version)).await?;
+    }
+    send(tx, "OpenClaw installed", 60, InstallStage::CreateSandbox).await;
 
     // 4. Apply proxy if configured
     let proxy_config = &config.config().clawenv.proxy;
     if proxy_config.enabled {
-        send(tx, "Configuring proxy...", 50, InstallStage::ConfigureProxy).await;
+        send(tx, "Configuring proxy...", 65, InstallStage::ConfigureProxy).await;
         proxy::apply_proxy(backend, proxy_config).await?;
     }
 
     // 5. Store API key in keychain and inject into sandbox (safely escaped)
     if let Some(ref api_key) = opts.api_key {
-        send(tx, "Storing API key securely...", 60, InstallStage::StoreApiKey).await;
+        send(tx, "Storing API key securely...", 70, InstallStage::StoreApiKey).await;
         keychain::store_api_key(&opts.instance_name, api_key)?;
         let escaped = shell_escape(api_key);
         backend
@@ -190,16 +210,16 @@ async fn do_install(
 
     // 6. Optional: install browser
     if opts.install_browser {
-        send(tx, "Installing Chromium + noVNC...", 70, InstallStage::InstallBrowser).await;
+        send(tx, "Installing Chromium + noVNC...", 75, InstallStage::InstallBrowser).await;
         backend
-            .exec("apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont")
+            .exec("sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont")
             .await?;
     }
 
     // 7. Start OpenClaw
-    send(tx, "Starting OpenClaw...", 80, InstallStage::StartOpenClaw).await;
-    backend.start().await?;
-    backend.exec("openclaw start --daemon").await?;
+    send(tx, "Starting OpenClaw...", 85, InstallStage::StartOpenClaw).await;
+    // VM is already running from create step, just start OpenClaw daemon
+    backend.exec("openclaw start --daemon 2>/dev/null || true").await?;
 
     // 8. Verify OpenClaw actually started
     let health = crate::monitor::InstanceMonitor::check_health(backend).await;

@@ -189,31 +189,14 @@ impl SandboxBackend for LimaBackend {
                     &["start", "--name", &self.vm_name, "--tty=false", "template:alpine"],
                 ).await?;
 
-                tracing::info!("Lima VM created, provisioning...");
+                tracing::info!("Lima VM '{}' created and running", self.vm_name);
 
-                // Ensure essential packages (most already in Alpine cloud image)
-                self.exec("sudo apk add --no-cache git curl bash 2>/dev/null || true").await?;
+                // Provisioning is done by install.rs (not here) so each step
+                // can send individual progress updates to the frontend.
 
-                // Check if Node.js is available, install if not
-                let has_node = self.exec("which node").await;
-                if has_node.is_err() || has_node.unwrap().trim().is_empty() {
-                    self.exec("sudo apk add --no-cache nodejs npm").await?;
-                }
-
-                // Install OpenClaw (skip if already installed at correct version)
-                let installed = self.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
-                if installed.trim().is_empty() || !installed.contains(&opts.claw_version) || opts.claw_version == "latest" {
-                    self.exec(&format!(
-                        "sudo npm install -g openclaw@{}",
-                        opts.claw_version
-                    )).await?;
-                }
-
-                // Optional: install browser if requested
+                // Optional: install browser if requested (also moved to install.rs)
                 if opts.install_browser {
-                    self.exec(
-                        "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
-                    ).await?;
+                    tracing::info!("Browser install will be handled by install flow");
                 }
             }
         }
