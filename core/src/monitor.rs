@@ -41,7 +41,15 @@ impl InstanceMonitor {
 
     /// Check the health of a single instance
     pub async fn check_health(backend: &dyn SandboxBackend) -> InstanceHealth {
-        match backend.exec("pgrep -f openclaw").await {
+        // Try `openclaw health` first (proper API check)
+        match backend.exec("openclaw health 2>/dev/null").await {
+            Ok(out) if out.to_lowercase().contains("ok") || out.to_lowercase().contains("running") || out.to_lowercase().contains("healthy") => {
+                return InstanceHealth::Running;
+            }
+            _ => {}
+        }
+        // Fallback: check if gateway process exists (avoid matching pgrep itself)
+        match backend.exec("pgrep -f 'openclaw gateway' 2>/dev/null || echo ''").await {
             Ok(out) if !out.trim().is_empty() => InstanceHealth::Running,
             Ok(_) => InstanceHealth::Stopped,
             Err(_) => InstanceHealth::Unreachable,

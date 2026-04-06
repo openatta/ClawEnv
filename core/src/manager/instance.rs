@@ -20,15 +20,20 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
     backend.start().await?;
-    backend.exec("openclaw start --daemon").await?;
-    tracing::info!("Instance '{}' started", instance.name);
+    let port = instance.openclaw.gateway_port;
+    backend.exec(&format!(
+        "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
+    )).await?;
+    // Wait for gateway to start
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    tracing::info!("Instance '{}' started on port {port}", instance.name);
     Ok(())
 }
 
 /// Stop an OpenClaw instance
 pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
-    backend.exec("openclaw stop").await.ok(); // best-effort stop openclaw
+    backend.exec("pkill -f 'openclaw gateway' 2>/dev/null || true").await.ok();
     backend.stop().await?;
     tracing::info!("Instance '{}' stopped", instance.name);
     Ok(())

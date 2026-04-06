@@ -51,6 +51,17 @@ pub fn list_instances() -> Result<Vec<InstanceInfo>, String> {
 }
 
 #[tauri::command]
+pub async fn get_instance_logs(name: String) -> Result<String, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    // Get gateway log + system log
+    let gateway_log = backend.exec("tail -50 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'").await.unwrap_or_default();
+    let process_info = backend.exec("ps aux 2>/dev/null | grep -E 'openclaw|node' | grep -v grep || echo 'No processes'").await.unwrap_or_default();
+    Ok(format!("=== Gateway Log ===\n{gateway_log}\n=== Processes ===\n{process_info}"))
+}
+
+#[tauri::command]
 pub async fn install_openclaw(
     app: tauri::AppHandle,
     instance_name: String,

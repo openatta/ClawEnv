@@ -7,14 +7,14 @@ type Lang = "zh-CN" | "en";
 const t: Record<Lang, Record<string, string>> = {
   "zh-CN": {
     home: "首页", instances: "实例", security: "安全状态",
-    stop: "停止", start: "启动", restart: "重启",
+    stop: "停止", start: "启动", restart: "重启", logs: "日志", close: "关闭",
     running: "运行中", stopped: "已停止", unreachable: "不可达",
     allUpToDate: "所有组件版本最新", noCve: "无已知 CVE",
     noInstances: "暂无实例",
   },
   en: {
     home: "Home", instances: "Instances", security: "Security",
-    stop: "Stop", start: "Start", restart: "Restart",
+    stop: "Stop", start: "Start", restart: "Restart", logs: "Logs", close: "Close",
     running: "running", stopped: "stopped", unreachable: "unreachable",
     allUpToDate: "All components up to date", noCve: "No known CVEs",
     noInstances: "No instances configured",
@@ -33,6 +33,22 @@ export default function Home(props: {
   const [lang, setLang] = createSignal<Lang>("zh-CN");
   const l = () => t[lang()];
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
+  const [logsFor, setLogsFor] = createSignal<string | null>(null);
+  const [logsContent, setLogsContent] = createSignal("");
+  const [logsLoading, setLogsLoading] = createSignal(false);
+
+  async function fetchLogs(name: string) {
+    setLogsFor(name);
+    setLogsLoading(true);
+    try {
+      const logs = await invoke<string>("get_instance_logs", { name });
+      setLogsContent(logs);
+    } catch (e) {
+      setLogsContent(`Error: ${e}`);
+    } finally {
+      setLogsLoading(false);
+    }
+  }
 
   async function handleStop(name: string) {
     setActionLoading(`stop-${name}`);
@@ -111,6 +127,10 @@ export default function Home(props: {
                       disabled={loading()} onClick={() => handleRestart(inst.name)}>
                       {loading() ? "..." : l().restart}
                     </button>
+                    <button class="px-3 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded ml-auto"
+                      onClick={() => fetchLogs(inst.name)}>
+                      {l().logs}
+                    </button>
                   </div>
                 </div>
               );
@@ -121,6 +141,30 @@ export default function Home(props: {
           )}
         </div>
       </section>
+
+      {/* Log panel */}
+      {logsFor() && (
+        <section class="mb-6">
+          <div class="flex items-center justify-between mb-2">
+            <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">
+              {l().logs}: {logsFor()}
+            </h2>
+            <div class="flex gap-2">
+              <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+                onClick={() => fetchLogs(logsFor()!)}>
+                Refresh
+              </button>
+              <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+                onClick={() => setLogsFor(null)}>
+                {l().close}
+              </button>
+            </div>
+          </div>
+          <div class="bg-gray-950 rounded border border-gray-700 p-3 max-h-64 overflow-y-auto font-mono text-xs text-gray-400 whitespace-pre-wrap">
+            {logsLoading() ? "Loading..." : logsContent() || "No logs available"}
+          </div>
+        </section>
+      )}
 
       <section class="mb-6">
         <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">{l().security}</h2>

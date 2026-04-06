@@ -256,7 +256,9 @@ async fn do_install(
 
     // --- Step: Start OpenClaw ---
     send(tx, "Starting OpenClaw daemon...", 85, InstallStage::StartOpenClaw).await;
-    backend.exec("openclaw start --daemon 2>/dev/null || true").await?;
+    backend.exec("nohup openclaw gateway --port 3000 --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &").await?;
+    // Wait for gateway to start
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     send(tx, "OpenClaw started", 88, InstallStage::StartOpenClaw).await;
 
     // --- Step: Save Config ---
