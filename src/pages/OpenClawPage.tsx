@@ -21,13 +21,14 @@ export default function OpenClawPage(props: {
   }
 
   async function openInBrowser() {
-    const inst = activeInstance();
-    if (!inst) return;
-    const url = `http://127.0.0.1:${inst.gateway_port}`;
+    // Find port from instances array directly (not reactive accessor)
+    const name = activeTab();
+    const inst = props.instances.find((i) => i.name === name);
+    const port = inst?.gateway_port ?? 3000;
+    const url = `http://127.0.0.1:${port}`;
     try {
       await invoke("open_url_in_browser", { url });
     } catch (e) {
-      // Show URL for manual copy
       prompt("Could not open browser. Copy this URL:", url);
     }
   }
