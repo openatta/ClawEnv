@@ -163,23 +163,29 @@ export default function Home(props: {
         </div>
       </section>
 
-      {/* Status Modal */}
+      {/* Status Modal — no click-outside-close */}
       <Show when={statusFor()}>
-        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-          onClick={(e) => { if (e.target === e.currentTarget) closeStatus(); }}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div class="bg-gray-800 border border-gray-700 rounded-xl w-[700px] h-[70vh] flex flex-col shadow-2xl">
             {/* Header */}
-            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
               <span class="font-medium">{l().status}: {statusFor()}</span>
               <div class="flex gap-2">
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
                   onClick={() => refreshStatus(statusFor()!)}>{l().refresh}</button>
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-                  onClick={closeStatus}>{l().close}</button>
+                  onClick={() => {
+                    const content = statusTab() === "processes" ? statusData()?.processes
+                      : statusTab() === "resources" ? statusData()?.resources
+                      : statusData()?.gateway_log;
+                    if (content) navigator.clipboard.writeText(content);
+                  }}>Copy</button>
+                <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
+                  onClick={closeStatus}>✕ {l().close}</button>
               </div>
             </div>
             {/* Tabs */}
-            <div class="flex border-b border-gray-700 px-2">
+            <div class="flex border-b border-gray-700 px-2 shrink-0">
               {(["processes", "resources", "logs"] as const).map((tab) => (
                 <button
                   class={`px-3 py-2 text-sm border-b-2 transition-colors ${
@@ -191,13 +197,13 @@ export default function Home(props: {
                 </button>
               ))}
             </div>
-            {/* Content */}
-            <div class="flex-1 overflow-y-auto p-4">
+            {/* Content — fixed height */}
+            <div class="flex-1 overflow-y-auto p-4 min-h-0">
               <Show when={statusLoading()}>
                 <div class="text-gray-400 text-sm">Loading...</div>
               </Show>
               <Show when={!statusLoading() && statusData()}>
-                <pre class="font-mono text-xs text-gray-300 whitespace-pre-wrap">
+                <pre class="font-mono text-xs text-gray-300 whitespace-pre-wrap select-text">
                   {statusTab() === "processes" && statusData()!.processes}
                   {statusTab() === "resources" && statusData()!.resources}
                   {statusTab() === "logs" && statusData()!.gateway_log}

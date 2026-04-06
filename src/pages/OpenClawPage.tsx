@@ -13,11 +13,6 @@ export default function OpenClawPage(props: {
   const activeHealth = () => props.healths[activeTab()] || "unreachable";
   const isRunning = () => activeHealth() === "running";
 
-  const openInBrowser = () => {
-    const inst = activeInstance();
-    if (inst) window.open(`http://127.0.0.1:${inst.gateway_port}`, "_blank");
-  };
-
   function healthColor(name: string): string {
     const h = props.healths[name] ?? "unknown";
     if (h === "running") return "bg-green-500";
@@ -33,13 +28,6 @@ export default function OpenClawPage(props: {
         <div class="flex items-center gap-2">
           <div class={`w-2 h-2 rounded-full ${healthColor(activeTab())}`} />
           <span class="text-sm text-gray-400">{activeHealth()}</span>
-          <button
-            class="ml-2 px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-            onClick={openInBrowser}
-            title="Open in browser"
-          >
-            &#8599;
-          </button>
         </div>
       </div>
 
@@ -71,28 +59,48 @@ export default function OpenClawPage(props: {
           <div class="text-gray-500">No instance selected</div>
         }>
           {isRunning() ? (
-            <div class="w-full h-full flex flex-col">
-              <iframe
-                src={`http://127.0.0.1:${activeInstance()!.gateway_port}`}
-                class="w-full flex-1 border-0"
-                title="OpenClaw Web UI"
-              />
-              <div class="px-3 py-1 text-xs text-gray-500 border-t border-gray-800 shrink-0">
-                Gateway: 127.0.0.1:{activeInstance()!.gateway_port}
-                {" | "}
-                Note: If blank, ensure Lima port forwarding is configured for VM access.
+            <div class="text-center max-w-lg">
+              {/* Running state — show open button */}
+              <div class="mb-6">
+                <span class="text-5xl">🦞</span>
+              </div>
+              <h2 class="text-xl font-bold mb-2">OpenClaw is Running</h2>
+              <p class="text-sm text-gray-400 mb-6">
+                Gateway is active on port {activeInstance()!.gateway_port}.
+                OpenClaw's web UI blocks iframe embedding (X-Frame-Options: DENY),
+                so it must be opened in an external browser.
+              </p>
+
+              <button
+                class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
+                onClick={() => window.open(`http://127.0.0.1:${activeInstance()!.gateway_port}`, "_blank")}
+              >
+                Open OpenClaw Control Panel ↗
+              </button>
+
+              <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500">
+                <div class="grid grid-cols-2 gap-y-1.5">
+                  <span class="text-gray-400">Instance</span>
+                  <span>{activeInstance()!.name}</span>
+                  <span class="text-gray-400">Version</span>
+                  <span>{activeInstance()!.version}</span>
+                  <span class="text-gray-400">Sandbox</span>
+                  <span>{activeInstance()!.sandbox_type}</span>
+                  <span class="text-gray-400">Gateway</span>
+                  <span class="font-mono">http://127.0.0.1:{activeInstance()!.gateway_port}</span>
+                  <span class="text-gray-400">Status</span>
+                  <span class="text-green-400">● {activeHealth()}</span>
+                </div>
               </div>
             </div>
           ) : (
             <div class="text-center text-gray-400 max-w-md">
               <div class="mb-4 opacity-30">
-                <svg viewBox="0 0 24 24" class="w-16 h-16 mx-auto">
-                  <path d="M12 2C8 2 5 4.5 5 8c0 2 1 3.5 2.5 4.5L6 17c-.5 1.5.5 3 2 3h8c1.5 0 2.5-1.5 2-3l-1.5-4.5C18 11.5 19 10 19 8c0-3.5-3-6-7-6z" fill="#ef4444" opacity="0.3" />
-                </svg>
+                <span class="text-6xl">🦞</span>
               </div>
               <p class="text-lg mb-2">OpenClaw is not running</p>
               <p class="text-sm text-gray-500 mb-4">
-                Instance "{activeTab()}" is {activeHealth().toLowerCase()}.
+                Instance "{activeTab()}" is {activeHealth()}.
               </p>
               <button
                 class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
@@ -103,7 +111,7 @@ export default function OpenClawPage(props: {
               >
                 Start Instance
               </button>
-              <div class="mt-6 text-left bg-gray-900 rounded p-3 text-xs text-gray-500">
+              <div class="mt-6 bg-gray-900 rounded p-3 text-left text-xs text-gray-500">
                 <div>Instance: {activeInstance()!.name}</div>
                 <div>Type: {activeInstance()!.sandbox_type}</div>
                 <div>Version: {activeInstance()!.version}</div>
