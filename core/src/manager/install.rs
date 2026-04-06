@@ -145,8 +145,39 @@ async fn do_install(
         install_mode: opts.install_mode.clone(),
     };
 
-    send(tx, "Creating sandbox environment...", 20, InstallStage::CreateSandbox).await;
-    backend.create(&sandbox_opts).await?;
+    send(tx, "Creating sandbox environment (this may take several minutes)...", 20, InstallStage::CreateSandbox).await;
+
+    // Run create in background with periodic progress updates
+    let create_result = {
+        let tx2 = tx.clone();
+        let sandbox_opts2 = sandbox_opts.clone();
+
+        // Progress heartbeat — sends updates every 10 seconds while create runs
+        let heartbeat = tokio::spawn({
+            let tx3 = tx2.clone();
+            async move {
+                let messages = [
+                    "Downloading Alpine Linux image...",
+                    "Booting virtual machine...",
+                    "Running provision scripts...",
+                    "Installing Node.js and npm...",
+                    "Installing OpenClaw...",
+                    "Finalizing sandbox setup...",
+                    "Still working, please wait...",
+                ];
+                for (i, msg) in messages.iter().cycle().enumerate() {
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                    let pct = std::cmp::min(20 + (i as u8 * 3), 45);
+                    send(&tx3, msg, pct, InstallStage::CreateSandbox).await;
+                }
+            }
+        });
+
+        let result = backend.create(&sandbox_opts).await;
+        heartbeat.abort(); // Stop heartbeat once create finishes
+        result
+    };
+    create_result?;
 
     // 4. Apply proxy if configured
     let proxy_config = &config.config().clawenv.proxy;
