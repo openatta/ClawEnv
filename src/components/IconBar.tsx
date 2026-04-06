@@ -16,9 +16,12 @@ const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
     </svg>
   ),
   openclaw: () => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
-      <circle cx="12" cy="12" r="10" />
-      <path d="M8 12l2 2 4-4" />
+    <svg viewBox="0 0 24 24" class="w-5 h-5">
+      {/* OpenClaw red claw icon */}
+      <path d="M12 2C8 2 5 4.5 5 8c0 2 1 3.5 2.5 4.5L6 17c-.5 1.5.5 3 2 3h8c1.5 0 2.5-1.5 2-3l-1.5-4.5C18 11.5 19 10 19 8c0-3.5-3-6-7-6z" fill="#ef4444" />
+      <circle cx="9" cy="7" r="1.2" fill="white" />
+      <circle cx="15" cy="7" r="1.2" fill="white" />
+      <path d="M8.5 12c1 1 3.5 1.5 7 0" stroke="white" stroke-width="1" fill="none" stroke-linecap="round" />
     </svg>
   ),
   settings: () => (

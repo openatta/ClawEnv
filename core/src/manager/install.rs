@@ -265,6 +265,9 @@ async fn do_install(
     let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await
         .unwrap_or_else(|_| opts.claw_version.clone());
 
+    // Remove any existing instance with same name (idempotent for retry)
+    config.config_mut().instances.retain(|i| i.name != opts.instance_name);
+
     config.config_mut().instances.push(InstanceConfig {
         name: opts.instance_name.clone(),
         claw_type: "openclaw".into(),
