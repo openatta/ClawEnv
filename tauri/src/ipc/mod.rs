@@ -232,6 +232,7 @@ pub async fn test_connectivity(
 
         let res = client
             .get(*url)
+            .header("User-Agent", "ClawEnv/0.1")
             .timeout(std::time::Duration::from_secs(8))
             .send()
             .await;
@@ -497,6 +498,27 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
         sandbox_available: backend_available,
         checks,
     })
+}
+
+/// Install sandbox prerequisites (Lima/Podman/WSL2) if not available
+#[tauri::command]
+pub async fn install_prerequisites(app: tauri::AppHandle) -> Result<(), String> {
+    use clawenv_core::sandbox::detect_backend;
+
+    let _ = app.emit("prereq-step", "Detecting sandbox backend...");
+    let backend = detect_backend().map_err(|e| e.to_string())?;
+
+    let available = backend.is_available().await.unwrap_or(false);
+    if available {
+        let _ = app.emit("prereq-step", &format!("{} is already installed", backend.name()));
+        return Ok(());
+    }
+
+    let _ = app.emit("prereq-step", &format!("{} not found, installing...", backend.name()));
+    backend.ensure_prerequisites().await.map_err(|e| e.to_string())?;
+    let _ = app.emit("prereq-step", &format!("{} installed successfully", backend.name()));
+
+    Ok(())
 }
 
 /// Test API key by making a request to OpenClaw API

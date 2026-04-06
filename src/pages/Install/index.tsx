@@ -410,32 +410,57 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
           {/* ===== Step 6: Installing ===== */}
           {step() === 6 && (
             <div class="flex flex-col h-full">
-              <h2 class="text-xl font-bold mb-3">Installing...</h2>
+              <h2 class="text-xl font-bold mb-3">
+                {installError() ? "Installation Failed" : installing() ? "Installing..." : "Ready to Install"}
+              </h2>
+
+              {/* Progress bar */}
               <div class="w-full bg-gray-800 rounded-full h-2 mb-1">
-                <div class="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${progress()}%` }} />
+                <div class={`h-2 rounded-full transition-all ${installError() ? "bg-red-600" : "bg-indigo-600"}`}
+                  style={{ width: `${progress()}%` }} />
               </div>
               <p class="text-xs text-gray-400 mb-3">{progressMessage() || "Preparing..."}</p>
 
-              {/* Stage checklist */}
-              <div class="grid grid-cols-2 gap-x-4 gap-y-0.5 mb-3">
+              {/* Install stages — scrollable list at top */}
+              <div class="bg-gray-800 rounded border border-gray-700 p-2 mb-3 max-h-40 overflow-y-auto">
                 <For each={INSTALL_STAGES}>
-                  {(s) => (
-                    <div class={`flex items-center gap-1.5 text-xs py-0.5 ${completedStages().has(s.key) ? "text-green-400" : currentStage() === s.key ? "text-indigo-400" : "text-gray-600"}`}>
-                      <span>{completedStages().has(s.key) ? "✓" : currentStage() === s.key ? "▶" : "○"}</span>
-                      {s.label}
-                    </div>
-                  )}
+                  {(s) => {
+                    const done = () => completedStages().has(s.key);
+                    const active = () => currentStage() === s.key && !done();
+                    const failed = () => installError() && active();
+                    return (
+                      <div class={`flex items-center gap-2 text-xs py-1 px-1 rounded ${
+                        active() ? "bg-gray-700/50" : ""
+                      } ${done() ? "text-green-400" : active() ? (failed() ? "text-red-400" : "text-indigo-300") : "text-gray-600"}`}>
+                        <span class="w-4 text-center shrink-0">
+                          {done() ? "✓" : failed() ? "✗" : active() ? "▶" : "○"}
+                        </span>
+                        <span class="flex-1">{s.label}</span>
+                        <Show when={active() && !failed()}>
+                          <span class="text-[10px] text-indigo-400 animate-pulse">running</span>
+                        </Show>
+                        <Show when={done()}>
+                          <span class="text-[10px] text-green-600">done</span>
+                        </Show>
+                        <Show when={failed()}>
+                          <span class="text-[10px] text-red-400">failed</span>
+                        </Show>
+                      </div>
+                    );
+                  }}
                 </For>
               </div>
 
-              {/* Log output */}
+              {/* Log output — fills remaining space */}
               <div class="flex-1 min-h-0">
                 <LogBox logs={installLogs()} height="h-full" />
               </div>
 
+              {/* Error display */}
               <Show when={installError()}>
-                <div class="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">{installError()}</div>
-                <button class="mt-1 px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded" onClick={startInstall}>Retry</button>
+                <div class="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">
+                  {installError()}
+                </div>
               </Show>
             </div>
           )}
@@ -472,6 +497,13 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                 disabled={!apiKey()}
                 onClick={() => goToStep(6)}>
                 Install
+              </button>
+            </Show>
+            {/* Step 6: Retry on error */}
+            <Show when={step() === 6 && installError()}>
+              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                onClick={startInstall}>
+                Retry
               </button>
             </Show>
             {/* Other steps */}

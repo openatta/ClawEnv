@@ -109,6 +109,7 @@ fn main() {
             ipc::test_connectivity,
             ipc::detect_system_proxy,
             ipc::system_check,
+            ipc::install_prerequisites,
             ipc::test_api_key,
             ipc::create_default_config,
         ])

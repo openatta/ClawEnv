@@ -1,15 +1,14 @@
 # ClawEnv Lima Template — Alpine Linux
 # cgroup v2 unified mode fix included (alpine-lima issue #1878)
+# {ARCH} is replaced at runtime with "aarch64" or "x86_64"
 
 vmType: vz
 os: Linux
-arch: host
+arch: "{ARCH}"
 
 images:
-  - location: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/aarch64/alpine-virt-3.21-aarch64.iso"
-    arch: aarch64
-  - location: "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/x86_64/alpine-virt-3.21-x86_64.iso"
-    arch: x86_64
+  - location: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/{ARCH}/alpine-virt-3.21.3-{ARCH}.iso"
+    arch: "{ARCH}"
 
 cpus: 2
 memory: "512MiB"
@@ -33,8 +32,10 @@ provision:
       set -e
 
       # Fix: cgroup v2 unified mode
-      sed -i 's/rc_cgroup_mode=.*/rc_cgroup_mode=unified/' /etc/conf.d/cgroups
-      rc-update add cgroups boot
+      if [ -f /etc/conf.d/cgroups ]; then
+        sed -i 's/rc_cgroup_mode=.*/rc_cgroup_mode=unified/' /etc/conf.d/cgroups
+        rc-update add cgroups boot 2>/dev/null || true
+      fi
 
       # Install runtime dependencies
       apk update

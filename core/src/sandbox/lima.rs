@@ -127,9 +127,25 @@ impl SandboxBackend for LimaBackend {
             }
             InstallMode::OnlineBuild => {
                 let template = include_str!("../../../assets/lima/clawenv-alpine.yaml");
+
+                // Detect architecture
+                let arch = match std::env::consts::ARCH {
+                    "aarch64" => "aarch64",
+                    "x86_64" => "x86_64",
+                    other => anyhow::bail!("Unsupported architecture: {other}"),
+                };
+
                 let rendered = template
                     .replace("{INSTANCE_NAME}", &opts.instance_name)
-                    .replace("{OPENCLAW_VERSION}", &opts.claw_version);
+                    .replace("{OPENCLAW_VERSION}", &opts.claw_version)
+                    .replace("{ARCH}", arch);
+
+                // Ensure workspace directory exists
+                let workspace_dir = dirs::home_dir()
+                    .ok_or_else(|| anyhow!("Cannot find home directory"))?
+                    .join(".clawenv/workspaces")
+                    .join(&opts.instance_name);
+                tokio::fs::create_dir_all(&workspace_dir).await?;
 
                 let templates_dir = Self::templates_dir()?;
                 tokio::fs::create_dir_all(&templates_dir).await?;
@@ -139,6 +155,7 @@ impl SandboxBackend for LimaBackend {
                 self.limactl(&[
                     "start",
                     "--name", &self.vm_name,
+                    "--tty=false",
                     &template_path.to_string_lossy(),
                 ]).await?;
 
