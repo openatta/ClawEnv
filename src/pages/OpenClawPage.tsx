@@ -20,6 +20,26 @@ export default function OpenClawPage(props: {
     return "bg-red-500";
   }
 
+  async function openInBrowser() {
+    const inst = activeInstance();
+    if (!inst) return;
+    const url = `http://127.0.0.1:${inst.gateway_port}`;
+    try {
+      await invoke("open_url_in_browser", { url });
+    } catch (e) {
+      // Show URL for manual copy
+      prompt("Could not open browser. Copy this URL:", url);
+    }
+  }
+
+  async function startInstance() {
+    try {
+      await invoke("start_instance", { name: activeTab() });
+    } catch (e) {
+      console.error("Failed to start:", e);
+    }
+  }
+
   return (
     <div class="h-full flex flex-col">
       {/* Top bar */}
@@ -55,77 +75,70 @@ export default function OpenClawPage(props: {
 
       {/* Content area */}
       <div class="flex-1 flex items-center justify-center bg-gray-950">
-        <Show when={activeInstance()} fallback={
+        {/* No instance */}
+        <Show when={!activeInstance()}>
           <div class="text-gray-500">No instance selected</div>
-        }>
-          {isRunning() ? (
-            <div class="text-center max-w-lg">
-              {/* Running state — show open button */}
-              <div class="mb-6">
-                <span class="text-5xl">🦞</span>
-              </div>
-              <h2 class="text-xl font-bold mb-2">OpenClaw is Running</h2>
-              <p class="text-sm text-gray-400 mb-6">
-                Gateway is active on port {activeInstance()!.gateway_port}.
-                OpenClaw's web UI blocks iframe embedding (X-Frame-Options: DENY),
-                so it must be opened in an external browser.
-              </p>
+        </Show>
 
-              <button
-                class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
-                onClick={async () => {
-                  const url = `http://127.0.0.1:${activeInstance()!.gateway_port}`;
-                  try {
-                    await invoke("open_url_in_browser", { url });
-                  } catch (e) {
-                    alert(`Please open manually: ${url}`);
-                  }
-                }}
-              >
-                Open OpenClaw Control Panel ↗
-              </button>
+        {/* Instance running */}
+        <Show when={activeInstance() && isRunning()}>
+          <div class="text-center max-w-lg">
+            <div class="mb-6">
+              <span class="text-5xl">🦞</span>
+            </div>
+            <h2 class="text-xl font-bold mb-2">OpenClaw is Running</h2>
+            <p class="text-sm text-gray-400 mb-6">
+              Gateway is active on port {activeInstance()?.gateway_port}.
+              Click below to open the control panel in your browser.
+            </p>
 
-              <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500">
-                <div class="grid grid-cols-2 gap-y-1.5">
-                  <span class="text-gray-400">Instance</span>
-                  <span>{activeInstance()!.name}</span>
-                  <span class="text-gray-400">Version</span>
-                  <span>{activeInstance()!.version}</span>
-                  <span class="text-gray-400">Sandbox</span>
-                  <span>{activeInstance()!.sandbox_type}</span>
-                  <span class="text-gray-400">Gateway</span>
-                  <span class="font-mono">http://127.0.0.1:{activeInstance()!.gateway_port}</span>
-                  <span class="text-gray-400">Status</span>
-                  <span class="text-green-400">● {activeHealth()}</span>
-                </div>
+            <button
+              class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
+              onClick={openInBrowser}
+            >
+              Open OpenClaw Control Panel ↗
+            </button>
+
+            <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500">
+              <div class="grid grid-cols-2 gap-y-1.5">
+                <span class="text-gray-400">Instance</span>
+                <span>{activeInstance()?.name}</span>
+                <span class="text-gray-400">Version</span>
+                <span>{activeInstance()?.version}</span>
+                <span class="text-gray-400">Sandbox</span>
+                <span>{activeInstance()?.sandbox_type}</span>
+                <span class="text-gray-400">Gateway</span>
+                <span class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</span>
+                <span class="text-gray-400">Status</span>
+                <span class="text-green-400">● running</span>
               </div>
             </div>
-          ) : (
-            <div class="text-center text-gray-400 max-w-md">
-              <div class="mb-4 opacity-30">
-                <span class="text-6xl">🦞</span>
-              </div>
-              <p class="text-lg mb-2">OpenClaw is not running</p>
-              <p class="text-sm text-gray-500 mb-4">
-                Instance "{activeTab()}" is {activeHealth()}.
-              </p>
-              <button
-                class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                onClick={async () => {
-                  try { await invoke("start_instance", { name: activeTab() }); }
-                  catch (e) { console.error("Failed to start:", e); }
-                }}
-              >
-                Start Instance
-              </button>
-              <div class="mt-6 bg-gray-900 rounded p-3 text-left text-xs text-gray-500">
-                <div>Instance: {activeInstance()!.name}</div>
-                <div>Type: {activeInstance()!.sandbox_type}</div>
-                <div>Version: {activeInstance()!.version}</div>
-                <div>Gateway: 127.0.0.1:{activeInstance()!.gateway_port}</div>
-              </div>
+          </div>
+        </Show>
+
+        {/* Instance not running */}
+        <Show when={activeInstance() && !isRunning()}>
+          <div class="text-center text-gray-400 max-w-md">
+            <div class="mb-4 opacity-30">
+              <span class="text-6xl">🦞</span>
             </div>
-          )}
+            <p class="text-lg mb-2">OpenClaw is not running</p>
+            <p class="text-sm text-gray-500 mb-4">
+              Instance "{activeTab()}" is {activeHealth()}.
+            </p>
+            <button
+              class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+              onClick={startInstance}
+            >
+              Start Instance
+            </button>
+            <div class="mt-6 bg-gray-900 rounded p-3 text-left text-xs text-gray-500">
+              <div>Instance: {activeInstance()?.name}</div>
+              <div>Type: {activeInstance()?.sandbox_type}</div>
+              <div>Version: {activeInstance()?.version}</div>
+              <div>Gateway: 127.0.0.1:{activeInstance()?.gateway_port}</div>
+            </div>
+          </div>
         </Show>
       </div>
     </div>
