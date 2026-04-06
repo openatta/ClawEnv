@@ -108,6 +108,8 @@ fn main() {
             ipc::test_proxy,
             ipc::test_connectivity,
             ipc::detect_system_proxy,
+            ipc::system_check,
+            ipc::test_api_key,
             ipc::create_default_config,
         ])
         .run(tauri::generate_context!())

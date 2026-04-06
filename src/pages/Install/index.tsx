@@ -2,37 +2,17 @@ import { createSignal, onCleanup, Show, For } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-type Instance = {
-  name: string;
-  sandbox_type: string;
-  version: string;
-  gateway_port: number;
-};
+type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
+type InstallProgress = { message: string; percent: number; stage: string };
+type ConnTestResult = { endpoint: string; ok: boolean; message: string };
+type SystemProxy = { detected: boolean; source: string; http_proxy: string; https_proxy: string; no_proxy: string };
+type CheckItem = { name: string; ok: boolean; detail: string };
+type SystemCheckInfo = { os: string; arch: string; memory_gb: number; disk_free_gb: number; sandbox_backend: string; sandbox_available: boolean; checks: CheckItem[] };
 
-type InstallProgress = {
-  message: string;
-  percent: number;
-  stage: string;
-};
-
-type ConnTestResult = {
-  endpoint: string;
-  ok: boolean;
-  message: string;
-};
-
-type SystemProxy = {
-  detected: boolean;
-  http_proxy: string;
-  https_proxy: string;
-  no_proxy: string;
-};
-
-// Install stages for checklist display
 const INSTALL_STAGES = [
   { key: "detect_platform", label: "Detect platform" },
   { key: "ensure_prerequisites", label: "Check prerequisites" },
-  { key: "create_sandbox", label: "Create sandbox environment" },
+  { key: "create_sandbox", label: "Create sandbox" },
   { key: "configure_proxy", label: "Configure proxy" },
   { key: "store_api_key", label: "Store API key" },
   { key: "install_browser", label: "Install browser" },
@@ -40,72 +20,73 @@ const INSTALL_STAGES = [
   { key: "save_config", label: "Save configuration" },
 ];
 
-export default function InstallWizard(props: {
-  onComplete: (instances: Instance[]) => void;
-}) {
+export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void }) {
   const [step, setStep] = createSignal(1);
   const totalSteps = 7;
 
-  // Step 2: System check
+  // Step 2
+  const [sysCheck, setSysCheck] = createSignal<SystemCheckInfo | null>(null);
+  const [sysCheckLog, setSysCheckLog] = createSignal<string[]>([]);
   const [checking, setChecking] = createSignal(false);
-  const [checkError, setCheckError] = createSignal("");
-  const [checkDone, setCheckDone] = createSignal(false);
 
-  // Step 3: Network / Proxy
+  // Step 3
   const [systemProxy, setSystemProxy] = createSignal<SystemProxy | null>(null);
-  const [proxyMode, setProxyMode] = createSignal<"none" | "system" | "custom">("none");
+  const [proxyMode, setProxyMode] = createSignal<"system" | "custom" | "none">("system");
   const [httpProxy, setHttpProxy] = createSignal("");
   const [httpsProxy, setHttpsProxy] = createSignal("");
   const [connTesting, setConnTesting] = createSignal(false);
   const [connResults, setConnResults] = createSignal<ConnTestResult[]>([]);
+  const [connLog, setConnLog] = createSignal<string[]>([]);
 
-  // Step 4: Install plan
+  // Step 4
   const [installMethod, setInstallMethod] = createSignal<"online" | "local">("online");
   const [localFilePath, setLocalFilePath] = createSignal("");
 
-  // Step 5: API Key
+  // Step 5
   const [apiKey, setApiKey] = createSignal("");
+  const [apiKeyTesting, setApiKeyTesting] = createSignal(false);
+  const [apiKeyResult, setApiKeyResult] = createSignal<{ ok: boolean; msg: string } | null>(null);
 
-  // Step 6: Progress
+  // Step 6
   const [progress, setProgress] = createSignal(0);
   const [progressMessage, setProgressMessage] = createSignal("");
   const [installing, setInstalling] = createSignal(false);
   const [installError, setInstallError] = createSignal("");
   const [installLogs, setInstallLogs] = createSignal<string[]>([]);
-  const [completedStages, setCompletedStages] = createSignal<Set<string>>(new Set());
+  const [completedStages, setCompletedStages] = createSignal<Set<string>>(new Set<string>());
   const [currentStage, setCurrentStage] = createSignal("");
 
   let unlistenProgress: UnlistenFn | null = null;
   let unlistenComplete: UnlistenFn | null = null;
   let unlistenFailed: UnlistenFn | null = null;
+  let unlistenConnStep: UnlistenFn | null = null;
 
-  onCleanup(() => {
-    unlistenProgress?.();
-    unlistenComplete?.();
-    unlistenFailed?.();
-  });
+  onCleanup(() => { unlistenProgress?.(); unlistenComplete?.(); unlistenFailed?.(); unlistenConnStep?.(); });
 
-  const stepLabels = [
-    "Welcome", "System Check", "Network", "Install Plan",
-    "API Key", "Installing", "Complete",
-  ];
+  const stepLabels = ["Welcome", "System Check", "Network", "Install Plan", "API Key", "Installing", "Complete"];
 
   // === Step 2: System Check ===
   async function runSystemCheck() {
     setChecking(true);
-    setCheckError("");
+    setSysCheckLog(["Detecting platform..."]);
     try {
-      await invoke("detect_launch_state");
-      setCheckDone(true);
+      setSysCheckLog(l => [...l, "Checking OS, memory, disk..."]);
+      const info = await invoke<SystemCheckInfo>("system_check");
+      setSysCheck(info);
+      for (const c of info.checks) {
+        setSysCheckLog(l => [...l, `${c.ok ? "✓" : "✗"} ${c.name}: ${c.detail}`]);
+      }
+      setSysCheckLog(l => [...l, "System check complete."]);
     } catch (e) {
-      setCheckError(String(e));
+      setSysCheckLog(l => [...l, `ERROR: ${e}`]);
     } finally {
       setChecking(false);
     }
   }
 
-  // === Step 3: Detect system proxy + test connectivity ===
-  async function detectSystemProxy() {
+  // === Step 3: Proxy & Connectivity ===
+  async function detectProxy() {
+    setConnLog(["Detecting system proxy..."]);
     try {
       const sp = await invoke<SystemProxy>("detect_system_proxy");
       setSystemProxy(sp);
@@ -113,80 +94,83 @@ export default function InstallWizard(props: {
         setProxyMode("system");
         setHttpProxy(sp.http_proxy);
         setHttpsProxy(sp.https_proxy);
+        setConnLog(l => [...l, `Found: ${sp.source}`, `  HTTP: ${sp.http_proxy}`, `  HTTPS: ${sp.https_proxy || "(same)"}`]);
+      } else {
+        setConnLog(l => [...l, "No system proxy detected.", "You can configure a custom proxy or use direct connection."]);
       }
-    } catch {
-      setSystemProxy({ detected: false, http_proxy: "", https_proxy: "", no_proxy: "" });
+    } catch (e) {
+      setConnLog(l => [...l, `Detection error: ${e}`]);
     }
   }
 
-  function getActiveProxy(): string | null {
-    if (proxyMode() === "none") return null;
-    if (proxyMode() === "system") return JSON.stringify({
-      enabled: true,
-      http_proxy: systemProxy()?.http_proxy || "",
-      https_proxy: systemProxy()?.https_proxy || "",
-      no_proxy: "localhost,127.0.0.1",
-      auth_required: false, auth_user: "",
-    });
-    return JSON.stringify({
-      enabled: true,
-      http_proxy: httpProxy(),
-      https_proxy: httpsProxy(),
-      no_proxy: "localhost,127.0.0.1",
-      auth_required: false, auth_user: "",
-    });
+  function getProxyJson(): string | null {
+    if (proxyMode() === "none") return JSON.stringify({ enabled: false, http_proxy: "", https_proxy: "", no_proxy: "localhost,127.0.0.1", auth_required: false, auth_user: "" });
+    if (proxyMode() === "system" && systemProxy()?.detected) return JSON.stringify({ enabled: true, http_proxy: systemProxy()!.http_proxy, https_proxy: systemProxy()!.https_proxy || systemProxy()!.http_proxy, no_proxy: systemProxy()!.no_proxy || "localhost,127.0.0.1", auth_required: false, auth_user: "" });
+    if (proxyMode() === "custom" && httpProxy()) return JSON.stringify({ enabled: true, http_proxy: httpProxy(), https_proxy: httpsProxy() || httpProxy(), no_proxy: "localhost,127.0.0.1", auth_required: false, auth_user: "" });
+    return null; // use system default
   }
 
   async function testConnectivity() {
     setConnTesting(true);
     setConnResults([]);
+    setConnLog(l => [...l, "", `--- Testing connectivity (mode: ${proxyMode()}) ---`]);
+
+    // Listen for step-by-step events
+    unlistenConnStep = await listen<{ endpoint: string; status: string; message?: string }>("conn-test-step", (ev) => {
+      const d = ev.payload;
+      if (d.status === "testing") {
+        setConnLog(l => [...l, `Testing ${d.endpoint}...`]);
+      } else {
+        setConnLog(l => [...l, `  ${d.status === "ok" ? "✓" : "✗"} ${d.endpoint}: ${d.message || ""}`]);
+      }
+    });
+
     try {
-      const proxy = proxyMode() !== "none" ? getActiveProxy() : null;
-      const results = await invoke<ConnTestResult[]>("test_connectivity", {
-        proxyJson: proxy,
-      });
+      const results = await invoke<ConnTestResult[]>("test_connectivity", { proxyJson: getProxyJson() });
       setConnResults(results);
+      const ok = results.filter(r => r.ok).length;
+      setConnLog(l => [...l, `Result: ${ok}/${results.length} endpoints reachable`]);
     } catch (e) {
-      setConnResults([{ endpoint: "Test", ok: false, message: String(e) }]);
+      setConnLog(l => [...l, `Test failed: ${e}`]);
     } finally {
       setConnTesting(false);
+      unlistenConnStep?.();
+    }
+  }
+
+  // === Step 5: API Key Test ===
+  async function testApiKey() {
+    setApiKeyTesting(true);
+    setApiKeyResult(null);
+    try {
+      const msg = await invoke<string>("test_api_key", { apiKey: apiKey() });
+      setApiKeyResult({ ok: true, msg });
+    } catch (e) {
+      setApiKeyResult({ ok: false, msg: String(e) });
+    } finally {
+      setApiKeyTesting(false);
     }
   }
 
   // === Step 6: Install ===
   async function startInstall() {
-    setInstalling(true);
-    setInstallError("");
-    setProgress(0);
-    setProgressMessage("Starting installation...");
-    setInstallLogs([]);
-    setCompletedStages(new Set<string>());
-    setCurrentStage("");
+    setInstalling(true); setInstallError(""); setProgress(0);
+    setProgressMessage("Starting..."); setInstallLogs([]);
+    setCompletedStages(new Set<string>()); setCurrentStage("");
 
     const TIMEOUT = 5 * 60 * 1000;
     let done = false;
+    function cleanup() { done = true; unlistenProgress?.(); unlistenComplete?.(); unlistenFailed?.(); }
+    const timer = setTimeout(() => { if (!done) { cleanup(); setInstalling(false); setInstallError("Installation timed out (5 min)"); } }, TIMEOUT);
 
-    function cleanup() {
-      done = true;
-      unlistenProgress?.();
-      unlistenComplete?.();
-      unlistenFailed?.();
-    }
-
-    const timer = setTimeout(() => {
-      if (!done) { cleanup(); setInstalling(false); setInstallError("Installation timed out (5 min)"); }
-    }, TIMEOUT);
-
-    unlistenProgress = await listen<InstallProgress>("install-progress", (event) => {
-      const p = event.payload;
-      setProgress(p.percent);
-      setProgressMessage(p.message);
-      setInstallLogs((prev) => [...prev, `[${p.percent}%] ${p.message}`]);
+    unlistenProgress = await listen<InstallProgress>("install-progress", (ev) => {
+      const p = ev.payload;
+      setProgress(p.percent); setProgressMessage(p.message);
+      setInstallLogs(l => [...l, `[${p.percent}%] ${p.message}`]);
       setCurrentStage(p.stage);
-      // Mark previous stages as complete
-      const idx = INSTALL_STAGES.findIndex((s) => s.key === p.stage);
+      const idx = INSTALL_STAGES.findIndex(s => s.key === p.stage);
       if (idx > 0) {
-        setCompletedStages((prev) => {
+        setCompletedStages(prev => {
           const next = new Set<string>(prev);
           for (let i = 0; i < idx; i++) next.add(INSTALL_STAGES[i].key);
           return next;
@@ -196,64 +180,61 @@ export default function InstallWizard(props: {
 
     unlistenComplete = await listen("install-complete", () => {
       clearTimeout(timer); cleanup(); setInstalling(false);
-      setCompletedStages(new Set<string>(INSTALL_STAGES.map((s) => s.key)));
-      setInstallLogs((prev) => [...prev, "[100%] Installation complete!"]);
-      setStep(7);
+      setCompletedStages(new Set<string>(INSTALL_STAGES.map(s => s.key)));
+      setInstallLogs(l => [...l, "✓ Installation complete!"]); setStep(7);
     });
 
-    unlistenFailed = await listen<string>("install-failed", (event) => {
+    unlistenFailed = await listen<string>("install-failed", (ev) => {
       clearTimeout(timer); cleanup(); setInstalling(false);
-      setInstallError(String(event.payload));
-      setInstallLogs((prev) => [...prev, `[ERROR] ${event.payload}`]);
+      setInstallError(String(ev.payload));
+      setInstallLogs(l => [...l, `✗ ERROR: ${ev.payload}`]);
     });
 
     try {
       await invoke("install_openclaw", {
-        instanceName: "default",
-        clawVersion: "latest",
-        apiKey: apiKey() || null,
-        useNative: false,
-        installBrowser: false,
-        gatewayPort: 3000,
+        instanceName: "default", clawVersion: "latest",
+        apiKey: apiKey() || null, useNative: false,
+        installBrowser: false, gatewayPort: 3000,
       });
-    } catch (e) {
-      clearTimeout(timer); cleanup(); setInstalling(false);
-      setInstallError(String(e));
-    }
+    } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
   }
 
   async function handleComplete() {
-    try {
-      const instances = await invoke<Instance[]>("list_instances");
-      props.onComplete(instances);
-    } catch { props.onComplete([]); }
+    try { const inst = await invoke<Instance[]>("list_instances"); props.onComplete(inst); }
+    catch { props.onComplete([]); }
   }
 
   function goToStep(s: number) {
     setStep(s);
-    if (s === 2 && !checkDone() && !checking()) runSystemCheck();
-    if (s === 3 && !systemProxy()) detectSystemProxy();
+    if (s === 2 && !sysCheck()) runSystemCheck();
+    if (s === 3 && !systemProxy()) detectProxy();
     if (s === 6 && !installing()) startInstall();
+  }
+
+  // Shared log output box component
+  function LogBox(p: { logs: string[]; height?: string }) {
+    return (
+      <div class={`bg-gray-950 rounded border border-gray-700 p-2 overflow-y-auto font-mono text-xs text-gray-400 ${p.height || "h-40"}`}>
+        <For each={p.logs}>
+          {(line) => <div class={line.includes("ERROR") || line.includes("✗") ? "text-red-400" : line.includes("✓") ? "text-green-400" : ""}>{line}</div>}
+        </For>
+        <Show when={p.logs.length === 0}><span class="text-gray-600">Waiting...</span></Show>
+      </div>
+    );
   }
 
   return (
     <div class="flex h-screen bg-gray-900 text-white">
       {/* Sidebar */}
-      <div class="w-52 bg-gray-950 border-r border-gray-800 p-5 shrink-0">
-        <div class="text-lg font-bold mb-6">Install</div>
-        <div class="space-y-2.5">
+      <div class="w-48 bg-gray-950 border-r border-gray-800 p-4 shrink-0">
+        <div class="text-base font-bold mb-5">Install</div>
+        <div class="space-y-2">
           {stepLabels.map((label, idx) => {
             const num = idx + 1;
             return (
-              <div class={`flex items-center gap-2.5 text-sm ${
-                step() === num ? "text-white font-medium"
-                : step() > num ? "text-green-500" : "text-gray-500"
-              }`}>
-                <div class={`w-5 h-5 rounded-full flex items-center justify-center text-xs border ${
-                  step() === num ? "border-indigo-500 bg-indigo-600"
-                  : step() > num ? "border-green-500 bg-green-600" : "border-gray-600"
-                }`}>
-                  {step() > num ? "\u2713" : num}
+              <div class={`flex items-center gap-2 text-xs ${step() === num ? "text-white font-medium" : step() > num ? "text-green-500" : "text-gray-500"}`}>
+                <div class={`w-5 h-5 rounded-full flex items-center justify-center text-[10px] border ${step() === num ? "border-indigo-500 bg-indigo-600" : step() > num ? "border-green-500 bg-green-600" : "border-gray-600"}`}>
+                  {step() > num ? "✓" : num}
                 </div>
                 {label}
               </div>
@@ -263,44 +244,50 @@ export default function InstallWizard(props: {
       </div>
 
       {/* Content */}
-      <div class="flex-1 flex flex-col p-6 overflow-hidden">
+      <div class="flex-1 flex flex-col p-5 overflow-hidden">
         <div class="flex-1 overflow-y-auto">
 
           {/* ===== Step 1: Welcome ===== */}
           {step() === 1 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">Welcome to ClawEnv</h2>
-              <p class="text-gray-400 mb-3">
-                ClawEnv will install OpenClaw in a secure, isolated sandbox on your system.
-              </p>
-              <p class="text-gray-400">This wizard will guide you through the setup.</p>
+              <h2 class="text-xl font-bold mb-3">Welcome to ClawEnv</h2>
+              <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-sm text-gray-300 space-y-2">
+                <p><strong>ClawEnv</strong> is a cross-platform installer and manager for <strong>OpenClaw</strong>, the open-source AI Agent framework.</p>
+                <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so OpenClaw runs safely without affecting your host OS.</p>
+                <p class="text-gray-400">What this wizard will do:</p>
+                <ul class="list-disc list-inside text-gray-400 space-y-1">
+                  <li>Check your system meets requirements (OS, memory, disk)</li>
+                  <li>Configure network & proxy settings</li>
+                  <li>Download and install OpenClaw in a sandbox</li>
+                  <li>Securely store your API key in system keychain</li>
+                </ul>
+                <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
+              </div>
             </div>
           )}
 
           {/* ===== Step 2: System Check ===== */}
           {step() === 2 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">System Check</h2>
-              <Show when={checking()}>
-                <p class="text-gray-400">Detecting system environment...</p>
-              </Show>
-              <Show when={checkError()}>
-                <p class="text-red-400 mt-2">Error: {checkError()}</p>
-                <button class="mt-2 px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 rounded" onClick={runSystemCheck}>
-                  Retry
-                </button>
-              </Show>
-              <Show when={checkDone() && !checking()}>
-                <div class="space-y-2">
-                  <div class="flex items-center gap-2 text-sm">
-                    <span class="text-green-400">&#x2714;</span>
-                    <span>Platform detected</span>
-                  </div>
-                  <div class="flex items-center gap-2 text-sm">
-                    <span class="text-green-400">&#x2714;</span>
-                    <span>System ready for installation</span>
-                  </div>
+              <h2 class="text-xl font-bold mb-3">System Check</h2>
+              <Show when={sysCheck()}>
+                <div class="space-y-1.5 mb-3">
+                  <For each={sysCheck()!.checks}>
+                    {(c) => (
+                      <div class={`flex items-center gap-2 text-sm ${c.ok ? "text-green-400" : "text-red-400"}`}>
+                        <span>{c.ok ? "✓" : "✗"}</span>
+                        <span class="w-36 text-gray-300">{c.name}</span>
+                        <span>{c.detail}</span>
+                      </div>
+                    )}
+                  </For>
                 </div>
+              </Show>
+              <LogBox logs={sysCheckLog()} />
+              <Show when={!checking() && sysCheck()}>
+                <button class="mt-2 px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded" onClick={runSystemCheck}>
+                  Re-check
+                </button>
               </Show>
             </div>
           )}
@@ -308,122 +295,92 @@ export default function InstallWizard(props: {
           {/* ===== Step 3: Network ===== */}
           {step() === 3 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">Network Settings</h2>
+              <h2 class="text-xl font-bold mb-3">Network Settings</h2>
 
-              {/* System proxy detection */}
-              <div class="bg-gray-800 rounded-lg p-3 mb-4 border border-gray-700">
-                <div class="text-sm font-medium mb-2">System Proxy</div>
-                <Show when={systemProxy()} fallback={<p class="text-sm text-gray-400">Detecting...</p>}>
+              {/* System proxy info */}
+              <div class="bg-gray-800 rounded p-3 mb-3 border border-gray-700 text-sm">
+                <Show when={systemProxy()}>
                   {systemProxy()!.detected ? (
-                    <div class="text-sm text-green-400">
-                      Detected: {systemProxy()!.http_proxy || systemProxy()!.https_proxy}
+                    <div>
+                      <span class="text-green-400">✓ System proxy detected</span>
+                      <span class="text-gray-400 ml-2">({systemProxy()!.source})</span>
+                      <div class="text-xs text-gray-400 mt-1 font-mono">{systemProxy()!.http_proxy}</div>
                     </div>
                   ) : (
-                    <div class="text-sm text-gray-500">
-                      No system proxy configured (HTTP_PROXY / HTTPS_PROXY not set)
-                    </div>
+                    <span class="text-gray-500">No system proxy detected</span>
                   )}
                 </Show>
               </div>
 
-              {/* Proxy mode selection */}
-              <div class="space-y-2 mb-4">
-                <label class="flex items-center gap-2 cursor-pointer text-sm">
-                  <input type="radio" name="proxy-mode" checked={proxyMode() === "none"}
-                    onChange={() => setProxyMode("none")} class="w-3.5 h-3.5" />
-                  <span>No proxy (direct connection)</span>
-                </label>
+              {/* Proxy mode */}
+              <div class="space-y-1.5 mb-3 text-sm">
                 <Show when={systemProxy()?.detected}>
-                  <label class="flex items-center gap-2 cursor-pointer text-sm">
-                    <input type="radio" name="proxy-mode" checked={proxyMode() === "system"}
-                      onChange={() => { setProxyMode("system"); setHttpProxy(systemProxy()!.http_proxy); setHttpsProxy(systemProxy()!.https_proxy); }}
-                      class="w-3.5 h-3.5" />
-                    <span>Use system proxy ({systemProxy()!.http_proxy})</span>
+                  <label class="flex items-center gap-2 cursor-pointer">
+                    <input type="radio" name="pm" checked={proxyMode() === "system"} onChange={() => { setProxyMode("system"); setHttpProxy(systemProxy()!.http_proxy); }} class="w-3.5 h-3.5" />
+                    Use system proxy
                   </label>
                 </Show>
-                <label class="flex items-center gap-2 cursor-pointer text-sm">
-                  <input type="radio" name="proxy-mode" checked={proxyMode() === "custom"}
-                    onChange={() => setProxyMode("custom")} class="w-3.5 h-3.5" />
-                  <span>Custom proxy</span>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name="pm" checked={proxyMode() === "custom"} onChange={() => setProxyMode("custom")} class="w-3.5 h-3.5" />
+                  Custom proxy
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name="pm" checked={proxyMode() === "none"} onChange={() => setProxyMode("none")} class="w-3.5 h-3.5" />
+                  No proxy (direct)
                 </label>
               </div>
 
-              {/* Custom proxy inputs */}
               <Show when={proxyMode() === "custom"}>
-                <div class="space-y-2 mb-4">
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1">HTTP Proxy</label>
-                    <input type="text" placeholder="http://proxy:8080" value={httpProxy()}
-                      onInput={(e) => setHttpProxy(e.currentTarget.value)}
-                      class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 w-80 text-sm" />
-                  </div>
-                  <div>
-                    <label class="block text-xs text-gray-400 mb-1">HTTPS Proxy (optional, defaults to HTTP)</label>
-                    <input type="text" placeholder="same as HTTP if empty" value={httpsProxy()}
-                      onInput={(e) => setHttpsProxy(e.currentTarget.value)}
-                      class="bg-gray-800 border border-gray-600 rounded px-3 py-1.5 w-80 text-sm" />
-                  </div>
+                <div class="space-y-2 mb-3">
+                  <input type="text" placeholder="http://proxy:8080" value={httpProxy()} onInput={e => setHttpProxy(e.currentTarget.value)}
+                    class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 w-72 text-sm" />
+                  <input type="text" placeholder="HTTPS (optional)" value={httpsProxy()} onInput={e => setHttpsProxy(e.currentTarget.value)}
+                    class="bg-gray-800 border border-gray-600 rounded px-2 py-1.5 w-72 text-sm" />
                 </div>
               </Show>
 
-              {/* Test Connectivity — always visible */}
-              <button
-                class="px-3 py-1.5 text-sm bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-50 mb-3"
-                disabled={connTesting()}
-                onClick={testConnectivity}
-              >
+              <button class="px-3 py-1.5 text-sm bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-50 mb-3"
+                disabled={connTesting()} onClick={testConnectivity}>
                 {connTesting() ? "Testing..." : "Test Connectivity"}
               </button>
 
-              {/* Test results */}
+              {/* Results */}
               <Show when={connResults().length > 0}>
-                <div class="bg-gray-950 rounded-lg border border-gray-700 p-3 text-sm font-mono">
+                <div class="mb-2">
                   <For each={connResults()}>
                     {(r) => (
-                      <div class="flex items-center gap-2 py-1">
-                        <span class={r.ok ? "text-green-400" : "text-red-400"}>
-                          {r.ok ? "\u2714" : "\u2718"}
-                        </span>
-                        <span class="w-40">{r.endpoint}</span>
-                        <span class={r.ok ? "text-gray-400" : "text-red-400"}>{r.message}</span>
+                      <div class="flex items-center gap-2 text-sm py-0.5">
+                        <span class={r.ok ? "text-green-400" : "text-red-400"}>{r.ok ? "���" : "✗"}</span>
+                        <span class="w-36">{r.endpoint}</span>
+                        <span class={r.ok ? "text-gray-400" : "text-red-400"} style="font-size:12px">{r.message}</span>
                       </div>
                     )}
                   </For>
                 </div>
               </Show>
+
+              {/* Log output */}
+              <LogBox logs={connLog()} height="h-32" />
             </div>
           )}
 
           {/* ===== Step 4: Install Plan ===== */}
           {step() === 4 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">Installation Plan</h2>
-              <p class="text-gray-400 mb-4">Choose installation method:</p>
-              <div class="space-y-3">
+              <h2 class="text-xl font-bold mb-3">Installation Plan</h2>
+              <div class="space-y-2">
                 <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
-                  <input type="radio" name="install-method" checked={installMethod() === "online"}
-                    onChange={() => setInstallMethod("online")} class="w-4 h-4" />
-                  <div>
-                    <div class="font-medium">Online Build</div>
-                    <div class="text-sm text-gray-400">Download and build from source (requires internet)</div>
-                  </div>
+                  <input type="radio" name="im" checked={installMethod() === "online"} onChange={() => setInstallMethod("online")} class="w-4 h-4" />
+                  <div><div class="font-medium text-sm">Online Build</div><div class="text-xs text-gray-400">Download and build from source</div></div>
                 </label>
                 <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
-                  <input type="radio" name="install-method" checked={installMethod() === "local"}
-                    onChange={() => setInstallMethod("local")} class="w-4 h-4" />
-                  <div>
-                    <div class="font-medium">Local File</div>
-                    <div class="text-sm text-gray-400">Use a pre-downloaded image</div>
-                  </div>
+                  <input type="radio" name="im" checked={installMethod() === "local"} onChange={() => setInstallMethod("local")} class="w-4 h-4" />
+                  <div><div class="font-medium text-sm">Local File</div><div class="text-xs text-gray-400">Use a pre-downloaded image</div></div>
                 </label>
               </div>
               <Show when={installMethod() === "local"}>
-                <div class="mt-3">
-                  <label class="block text-sm text-gray-400 mb-1">Image file path</label>
-                  <input type="text" placeholder="/path/to/image.tar.gz" value={localFilePath()}
-                    onInput={(e) => setLocalFilePath(e.currentTarget.value)}
-                    class="bg-gray-800 border border-gray-600 rounded px-3 py-2 w-96" />
-                </div>
+                <input type="text" placeholder="/path/to/image.tar.gz" value={localFilePath()} onInput={e => setLocalFilePath(e.currentTarget.value)}
+                  class="mt-3 bg-gray-800 border border-gray-600 rounded px-3 py-2 w-96 text-sm" />
               </Show>
             </div>
           )}
@@ -431,74 +388,54 @@ export default function InstallWizard(props: {
           {/* ===== Step 5: API Key ===== */}
           {step() === 5 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">API Key (Optional)</h2>
-              <p class="text-gray-400 mb-4">
-                Enter your OpenClaw API key. It will be stored securely in system keychain.
-                You can skip this and configure it later in Settings.
-              </p>
-              <input type="password" placeholder="sk-..." value={apiKey()}
-                onInput={(e) => setApiKey(e.currentTarget.value)}
-                class="bg-gray-800 border border-gray-600 rounded px-3 py-2 w-96" />
-              <p class="text-xs text-gray-500 mt-2">Stored in macOS Keychain / Windows Credential Manager</p>
+              <h2 class="text-xl font-bold mb-3">API Key</h2>
+              <p class="text-sm text-gray-400 mb-3">Enter your OpenClaw API key. Stored securely in system keychain.</p>
+              <div class="flex gap-2 items-center mb-2">
+                <input type="password" placeholder="sk-..." value={apiKey()} onInput={e => setApiKey(e.currentTarget.value)}
+                  class="bg-gray-800 border border-gray-600 rounded px-3 py-2 w-80 text-sm" />
+                <button class="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
+                  disabled={apiKeyTesting() || !apiKey()} onClick={testApiKey}>
+                  {apiKeyTesting() ? "..." : "Test"}
+                </button>
+              </div>
+              <Show when={apiKeyResult()}>
+                <div class={`text-sm ${apiKeyResult()!.ok ? "text-green-400" : "text-red-400"}`}>
+                  {apiKeyResult()!.ok ? "✓" : "✗"} {apiKeyResult()!.msg}
+                </div>
+              </Show>
+              <p class="text-xs text-gray-500 mt-3">You can skip this and configure it later in Settings.</p>
             </div>
           )}
 
           {/* ===== Step 6: Installing ===== */}
           {step() === 6 && (
             <div class="flex flex-col h-full">
-              <h2 class="text-2xl font-bold mb-4">Installing...</h2>
-
-              {/* Progress bar */}
-              <div class="w-full bg-gray-800 rounded-full h-2 mb-2">
-                <div class="bg-indigo-600 h-2 rounded-full transition-all"
-                  style={{ width: `${progress()}%` }} />
+              <h2 class="text-xl font-bold mb-3">Installing...</h2>
+              <div class="w-full bg-gray-800 rounded-full h-2 mb-1">
+                <div class="bg-indigo-600 h-2 rounded-full transition-all" style={{ width: `${progress()}%` }} />
               </div>
-              <p class="text-sm text-gray-400 mb-4">{progressMessage() || "Preparing..."}</p>
+              <p class="text-xs text-gray-400 mb-3">{progressMessage() || "Preparing..."}</p>
 
-              {/* Install stages checklist */}
-              <div class="grid grid-cols-2 gap-1 mb-4">
+              {/* Stage checklist */}
+              <div class="grid grid-cols-2 gap-x-4 gap-y-0.5 mb-3">
                 <For each={INSTALL_STAGES}>
-                  {(stage) => {
-                    const isDone = () => completedStages().has(stage.key);
-                    const isCurrent = () => currentStage() === stage.key && !isDone();
-                    return (
-                      <div class={`flex items-center gap-2 text-sm py-0.5 ${
-                        isDone() ? "text-green-400" : isCurrent() ? "text-indigo-400" : "text-gray-600"
-                      }`}>
-                        <span class="w-4 text-center">
-                          {isDone() ? "\u2714" : isCurrent() ? "\u25B6" : "\u25CB"}
-                        </span>
-                        {stage.label}
-                      </div>
-                    );
-                  }}
+                  {(s) => (
+                    <div class={`flex items-center gap-1.5 text-xs py-0.5 ${completedStages().has(s.key) ? "text-green-400" : currentStage() === s.key ? "text-indigo-400" : "text-gray-600"}`}>
+                      <span>{completedStages().has(s.key) ? "✓" : currentStage() === s.key ? "▶" : "○"}</span>
+                      {s.label}
+                    </div>
+                  )}
                 </For>
               </div>
 
-              {/* Real-time log output */}
+              {/* Log output */}
               <div class="flex-1 min-h-0">
-                <div class="bg-gray-950 rounded-lg border border-gray-700 p-3 h-full overflow-y-auto font-mono text-xs text-gray-400">
-                  <For each={installLogs()}>
-                    {(line) => (
-                      <div class={line.includes("ERROR") ? "text-red-400" : line.includes("100%") ? "text-green-400" : ""}>
-                        {line}
-                      </div>
-                    )}
-                  </For>
-                  <Show when={installLogs().length === 0}>
-                    <span class="text-gray-600">Waiting for output...</span>
-                  </Show>
-                </div>
+                <LogBox logs={installLogs()} height="h-full" />
               </div>
 
               <Show when={installError()}>
-                <div class="mt-3 p-3 bg-red-900/30 border border-red-700 rounded text-sm text-red-400">
-                  {installError()}
-                </div>
-                <button class="mt-2 px-3 py-1 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                  onClick={startInstall}>
-                  Retry
-                </button>
+                <div class="mt-2 p-2 bg-red-900/30 border border-red-700 rounded text-xs text-red-400">{installError()}</div>
+                <button class="mt-1 px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded" onClick={startInstall}>Retry</button>
               </Show>
             </div>
           )}
@@ -506,17 +443,11 @@ export default function InstallWizard(props: {
           {/* ===== Step 7: Complete ===== */}
           {step() === 7 && (
             <div>
-              <h2 class="text-2xl font-bold mb-4">Installation Complete!</h2>
-              <p class="text-gray-400 mb-4">
-                OpenClaw has been installed and is running in a secure sandbox.
-              </p>
-              <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+              <h2 class="text-xl font-bold mb-3">Installation Complete!</h2>
+              <p class="text-sm text-gray-400 mb-3">OpenClaw is running in a secure sandbox.</p>
+              <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
                 <For each={INSTALL_STAGES}>
-                  {(stage) => (
-                    <div class="flex items-center gap-2 text-sm text-green-400 py-0.5">
-                      <span>&#x2714;</span> {stage.label}
-                    </div>
-                  )}
+                  {(s) => <div class="flex items-center gap-2 text-xs text-green-400 py-0.5"><span>✓</span>{s.label}</div>}
                 </For>
               </div>
             </div>
@@ -524,41 +455,37 @@ export default function InstallWizard(props: {
         </div>
 
         {/* Navigation */}
-        <div class="flex justify-between pt-4 border-t border-gray-800 shrink-0">
-          <button
-            class="px-4 py-2 text-sm bg-gray-800 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+        <div class="flex justify-between pt-3 border-t border-gray-800 shrink-0">
+          <button class="px-4 py-1.5 text-sm bg-gray-800 hover:bg-gray-700 rounded disabled:opacity-50 disabled:cursor-not-allowed"
             disabled={step() === 1 || step() === 6 || step() === 7}
-            onClick={() => goToStep(Math.max(1, step() - 1))}
-          >
+            onClick={() => goToStep(step() - 1)}>
             Previous
           </button>
-
           <div class="flex gap-2">
-            {/* Skip button on API Key step */}
+            {/* Step 5: Skip & Install vs Install */}
             <Show when={step() === 5}>
-              <button
-                class="px-4 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                onClick={() => { setApiKey(""); goToStep(6); }}
-              >
-                Skip
+              <button class="px-4 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+                onClick={() => { setApiKey(""); goToStep(6); }}>
+                Skip & Install
+              </button>
+              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+                disabled={!apiKey()}
+                onClick={() => goToStep(6)}>
+                Install
               </button>
             </Show>
-
-            {step() < totalSteps && step() !== 6 ? (
-              <button
-                class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-                onClick={() => goToStep(step() + 1)}
-              >
-                {step() === 5 ? (apiKey() ? "Next" : "Skip & Install") : "Next"}
+            {/* Other steps */}
+            <Show when={step() < 5 && step() < totalSteps}>
+              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                onClick={() => goToStep(step() + 1)}>
+                Next
               </button>
-            ) : step() === 7 ? (
-              <button
-                class="px-4 py-2 text-sm bg-green-600 hover:bg-green-500 rounded"
-                onClick={handleComplete}
-              >
+            </Show>
+            <Show when={step() === 7}>
+              <button class="px-4 py-1.5 text-sm bg-green-600 hover:bg-green-500 rounded" onClick={handleComplete}>
                 Enter ClawEnv
               </button>
-            ) : null}
+            </Show>
           </div>
         </div>
       </div>

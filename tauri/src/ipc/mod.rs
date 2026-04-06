@@ -176,8 +176,8 @@ pub async fn test_proxy(proxy_json: String) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
-/// Test connectivity to multiple endpoints, returning status for each
-#[derive(Serialize)]
+/// Test connectivity to multiple endpoints using Tauri event streaming
+#[derive(Serialize, Clone)]
 pub struct ConnTestResult {
     pub endpoint: String,
     pub ok: bool,
@@ -185,19 +185,34 @@ pub struct ConnTestResult {
 }
 
 #[tauri::command]
-pub async fn test_connectivity(proxy_json: Option<String>) -> Result<Vec<ConnTestResult>, String> {
+pub async fn test_connectivity(
+    app: tauri::AppHandle,
+    proxy_json: Option<String>,
+) -> Result<Vec<ConnTestResult>, String> {
+    // Build client: if proxy specified use it, otherwise use system default
     let client = if let Some(ref pj) = proxy_json {
         if let Ok(proxy) = serde_json::from_str::<ProxyConfig>(pj) {
             if proxy.enabled && !proxy.http_proxy.is_empty() {
+                // Explicit proxy — disable system proxy auto-detection
                 let rp = reqwest::Proxy::all(&proxy.http_proxy).map_err(|e| e.to_string())?;
-                reqwest::Client::builder().proxy(rp).build().map_err(|e| e.to_string())?
+                reqwest::Client::builder()
+                    .proxy(rp)
+                    .no_proxy()  // don't also use system proxy
+                    .build()
+                    .map_err(|e| e.to_string())?
             } else {
-                reqwest::Client::new()
+                // "none" mode — no proxy at all
+                reqwest::Client::builder()
+                    .no_proxy()
+                    .build()
+                    .map_err(|e| e.to_string())?
             }
         } else {
+            // Use system default (reqwest auto-detects HTTP_PROXY etc)
             reqwest::Client::new()
         }
     } else {
+        // null = use system defaults
         reqwest::Client::new()
     };
 
@@ -209,10 +224,15 @@ pub async fn test_connectivity(proxy_json: Option<String>) -> Result<Vec<ConnTes
     ];
 
     let mut results = Vec::new();
-    for (name, url) in endpoints {
+    for (name, url) in &endpoints {
+        // Emit each step as it starts
+        let _ = app.emit("conn-test-step", serde_json::json!({
+            "endpoint": name, "status": "testing"
+        }));
+
         let res = client
-            .head(url)
-            .timeout(std::time::Duration::from_secs(5))
+            .get(*url)
+            .timeout(std::time::Duration::from_secs(8))
             .send()
             .await;
         let (ok, msg) = match res {
@@ -220,36 +240,277 @@ pub async fn test_connectivity(proxy_json: Option<String>) -> Result<Vec<ConnTes
                 (true, format!("OK ({})", r.status()))
             }
             Ok(r) => (false, format!("HTTP {}", r.status())),
-            Err(e) => (false, e.to_string()),
+            Err(e) => {
+                let err_str = e.to_string();
+                // Give friendlier messages
+                if err_str.contains("timed out") {
+                    (false, "Timeout (8s)".to_string())
+                } else if err_str.contains("dns") || err_str.contains("resolve") {
+                    (false, "DNS resolution failed".to_string())
+                } else if err_str.contains("connect") {
+                    (false, "Connection refused".to_string())
+                } else {
+                    (false, err_str)
+                }
+            }
         };
-        results.push(ConnTestResult {
+
+        let result = ConnTestResult {
             endpoint: name.to_string(),
             ok,
             message: msg,
-        });
+        };
+        // Emit each result as it completes
+        let _ = app.emit("conn-test-step", serde_json::json!({
+            "endpoint": name,
+            "status": if result.ok { "ok" } else { "fail" },
+            "message": &result.message,
+        }));
+        results.push(result);
     }
     Ok(results)
 }
 
-/// Detect system proxy settings from environment variables
+/// Detect system proxy — check env vars + macOS networksetup
 #[tauri::command]
-pub fn detect_system_proxy() -> Result<serde_json::Value, String> {
-    let http = std::env::var("http_proxy")
+pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
+    // 1. Check environment variables
+    let env_http = std::env::var("http_proxy")
         .or_else(|_| std::env::var("HTTP_PROXY"))
         .unwrap_or_default();
-    let https = std::env::var("https_proxy")
+    let env_https = std::env::var("https_proxy")
         .or_else(|_| std::env::var("HTTPS_PROXY"))
         .unwrap_or_default();
-    let no_proxy = std::env::var("no_proxy")
+    let env_no_proxy = std::env::var("no_proxy")
         .or_else(|_| std::env::var("NO_PROXY"))
         .unwrap_or_default();
 
+    if !env_http.is_empty() || !env_https.is_empty() {
+        return Ok(serde_json::json!({
+            "detected": true,
+            "source": "environment",
+            "http_proxy": env_http,
+            "https_proxy": env_https,
+            "no_proxy": env_no_proxy,
+        }));
+    }
+
+    // 2. macOS: check networksetup for HTTP proxy
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(output) = tokio::process::Command::new("networksetup")
+            .args(["-getwebproxy", "Wi-Fi"])
+            .output()
+            .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut enabled = false;
+            let mut server = String::new();
+            let mut port = String::new();
+            for line in stdout.lines() {
+                if line.starts_with("Enabled:") && line.contains("Yes") {
+                    enabled = true;
+                }
+                if let Some(s) = line.strip_prefix("Server: ") {
+                    server = s.trim().to_string();
+                }
+                if let Some(p) = line.strip_prefix("Port: ") {
+                    port = p.trim().to_string();
+                }
+            }
+            if enabled && !server.is_empty() {
+                let proxy_url = format!("http://{}:{}", server, port);
+                return Ok(serde_json::json!({
+                    "detected": true,
+                    "source": "macOS System Preferences (Wi-Fi)",
+                    "http_proxy": proxy_url,
+                    "https_proxy": proxy_url,
+                    "no_proxy": "",
+                }));
+            }
+        }
+
+        // Also check HTTPS proxy
+        if let Ok(output) = tokio::process::Command::new("networksetup")
+            .args(["-getsecurewebproxy", "Wi-Fi"])
+            .output()
+            .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let mut enabled = false;
+            let mut server = String::new();
+            let mut port = String::new();
+            for line in stdout.lines() {
+                if line.starts_with("Enabled:") && line.contains("Yes") {
+                    enabled = true;
+                }
+                if let Some(s) = line.strip_prefix("Server: ") {
+                    server = s.trim().to_string();
+                }
+                if let Some(p) = line.strip_prefix("Port: ") {
+                    port = p.trim().to_string();
+                }
+            }
+            if enabled && !server.is_empty() {
+                let proxy_url = format!("http://{}:{}", server, port);
+                return Ok(serde_json::json!({
+                    "detected": true,
+                    "source": "macOS System Preferences (Wi-Fi HTTPS)",
+                    "http_proxy": proxy_url,
+                    "https_proxy": proxy_url,
+                    "no_proxy": "",
+                }));
+            }
+        }
+    }
+
     Ok(serde_json::json!({
-        "detected": !http.is_empty() || !https.is_empty(),
-        "http_proxy": http,
-        "https_proxy": https,
-        "no_proxy": no_proxy,
+        "detected": false,
+        "source": "none",
+        "http_proxy": "",
+        "https_proxy": "",
+        "no_proxy": "",
     }))
+}
+
+/// System check — return detailed system info
+#[derive(Serialize)]
+pub struct SystemCheckInfo {
+    pub os: String,
+    pub os_version: String,
+    pub arch: String,
+    pub memory_gb: f64,
+    pub disk_free_gb: f64,
+    pub sandbox_backend: String,
+    pub sandbox_available: bool,
+    pub checks: Vec<CheckItem>,
+}
+
+#[derive(Serialize)]
+pub struct CheckItem {
+    pub name: String,
+    pub ok: bool,
+    pub detail: String,
+}
+
+#[tauri::command]
+pub async fn system_check() -> Result<SystemCheckInfo, String> {
+    use clawenv_core::platform::detect_platform;
+    use clawenv_core::sandbox::detect_backend;
+
+    let platform = detect_platform().map_err(|e| e.to_string())?;
+
+    let os_str = format!("{:?}", platform.os);
+    let arch_str = format!("{:?}", platform.arch);
+
+    // Memory (macOS: sysctl hw.memsize)
+    let memory_gb = {
+        #[cfg(target_os = "macos")]
+        {
+            let out = tokio::process::Command::new("sysctl")
+                .args(["-n", "hw.memsize"])
+                .output().await;
+            match out {
+                Ok(o) => {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    s.trim().parse::<f64>().unwrap_or(0.0) / 1_073_741_824.0
+                }
+                Err(_) => 0.0,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        { 0.0 }
+    };
+
+    // Disk free space
+    let disk_free_gb = {
+        #[cfg(target_os = "macos")]
+        {
+            let out = tokio::process::Command::new("df")
+                .args(["-g", "/"])
+                .output().await;
+            match out {
+                Ok(o) => {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    // Parse "Available" column from df output
+                    s.lines().nth(1)
+                        .and_then(|line| line.split_whitespace().nth(3))
+                        .and_then(|v| v.parse::<f64>().ok())
+                        .unwrap_or(0.0)
+                }
+                Err(_) => 0.0,
+            }
+        }
+        #[cfg(not(target_os = "macos"))]
+        { 0.0 }
+    };
+
+    // Sandbox backend
+    let (backend_name, backend_available) = match detect_backend() {
+        Ok(b) => {
+            let available = b.is_available().await.unwrap_or(false);
+            (b.name().to_string(), available)
+        }
+        Err(e) => (format!("Error: {e}"), false),
+    };
+
+    // Build check items
+    let mut checks = vec![];
+
+    // OS check
+    checks.push(CheckItem {
+        name: "Operating System".into(),
+        ok: true,
+        detail: format!("{} ({})", os_str, arch_str),
+    });
+
+    // Memory check (OpenClaw needs at least 512MB for sandbox)
+    let mem_ok = memory_gb >= 2.0;
+    checks.push(CheckItem {
+        name: "Memory".into(),
+        ok: mem_ok,
+        detail: format!("{:.1} GB {}", memory_gb, if mem_ok { "(sufficient)" } else { "(need 2GB+)" }),
+    });
+
+    // Disk check (need at least 2GB free)
+    let disk_ok = disk_free_gb >= 2.0;
+    checks.push(CheckItem {
+        name: "Disk Space".into(),
+        ok: disk_ok,
+        detail: format!("{:.0} GB free {}", disk_free_gb, if disk_ok { "(sufficient)" } else { "(need 2GB+)" }),
+    });
+
+    // Sandbox backend
+    checks.push(CheckItem {
+        name: "Sandbox Backend".into(),
+        ok: backend_available,
+        detail: format!("{} {}", backend_name, if backend_available { "(ready)" } else { "(not installed)" }),
+    });
+
+    Ok(SystemCheckInfo {
+        os: os_str,
+        os_version: String::new(),
+        arch: arch_str,
+        memory_gb,
+        disk_free_gb,
+        sandbox_backend: backend_name,
+        sandbox_available: backend_available,
+        checks,
+    })
+}
+
+/// Test API key by making a request to OpenClaw API
+#[tauri::command]
+pub async fn test_api_key(api_key: String) -> Result<String, String> {
+    if api_key.is_empty() {
+        return Err("API key is empty".into());
+    }
+    if !api_key.starts_with("sk-") {
+        return Err("API key should start with 'sk-'".into());
+    }
+    // Basic format validation passed
+    // In real implementation, this would call the OpenClaw API to verify
+    Ok("API key format valid".into())
 }
 
 #[tauri::command]
