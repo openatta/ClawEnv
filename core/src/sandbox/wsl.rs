@@ -217,13 +217,11 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Use tempfile approach to avoid pipe-inheritance hangs
-        let base_args = ["-d", &self.distro_name, "--", "sh", "-c"];
-        let (stdout, stderr, rc) = super::exec_helper::exec_via_tempfile(
-            "wsl", &base_args, cmd
-        ).await?;
+        // Plan C: spawn with pipes, join!(wait, read, read) with timeout
+        let args = ["-d", self.distro_name.as_str(), "--", "sh", "-c", cmd];
+        let (stdout, stderr, rc) = super::exec_helper::exec("wsl", &args).await?;
         if rc != 0 {
-            anyhow::bail!("exec in WSL sandbox failed (exit {rc}):\nstdout: {}\nstderr: {}",
+            anyhow::bail!("exec in WSL failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
                 stdout.chars().take(500).collect::<String>(),
                 stderr.chars().take(500).collect::<String>());
         }
@@ -231,14 +229,12 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        let base_args = ["-d", &self.distro_name, "--", "sh", "-c"];
-        let (stdout, rc) = super::exec_helper::exec_with_progress_via_tempfile(
-            "wsl", &base_args, cmd, tx
-        ).await?;
+        let args = ["-d", self.distro_name.as_str(), "--", "sh", "-c", cmd];
+        let (output, rc) = super::exec_helper::exec_with_progress("wsl", &args, tx).await?;
         if rc != 0 {
             anyhow::bail!("command failed in WSL (exit {rc}): {cmd}");
         }
-        Ok(stdout)
+        Ok(output)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {

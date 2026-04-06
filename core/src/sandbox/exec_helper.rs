@@ -1,189 +1,120 @@
-//! Unified exec helper for all sandbox backends.
+//! Plan C: Unified exec helper for all sandbox backends.
 //!
-//! Solves the pipe-inheritance problem: VM manager processes (Lima hostagent,
-//! WSL2 init, Podman conmon) can inherit stdout/stderr FDs from their parent
-//! (limactl/wsl/podman), keeping pipes open indefinitely and causing
-//! `.output().await` to hang forever.
-//!
-//! Solution: redirect command output to temp files inside the sandbox,
-//! then read them back. No pipes between host and sandbox.
+//! Uses `tokio::join!(wait, read_stdout, read_stderr)` with timeout
+//! on pipe reads. Works on all platforms — Lima, WSL2, Podman, Native.
 
 use anyhow::Result;
+use std::time::Duration;
+use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-/// Execute a command via a shell wrapper, redirecting output to temp files.
-/// `shell_cmd` is the host command (e.g., "limactl shell vm -- sh -c").
-/// `shell_args` are the args before the actual command.
-/// Returns (stdout, stderr, exit_code).
-pub async fn exec_via_tempfile(
-    program: &str,
-    base_args: &[&str],
-    cmd: &str,
-) -> Result<(String, String, i32)> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let out_file = format!("/tmp/.clawenv_exec_{stamp}");
+const READ_TIMEOUT_SECS: u64 = 30;
 
-    // Wrapper: run command, capture output + exit code to temp files
-    let wrapper = format!(
-        "({cmd}) > {out_file}.out 2> {out_file}.err; echo $? > {out_file}.rc",
-    );
-
-    // Execute with no pipes (prevents hang)
-    let mut args: Vec<&str> = base_args.to_vec();
-    args.push(&wrapper);
-
-    let status = Command::new(program)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await?;
-
-    // Read results back via separate commands
-    let read = |suffix: &str| {
-        let file = format!("{out_file}.{suffix}");
-        let prog = program.to_string();
-        let ba: Vec<String> = base_args.iter().map(|s| s.to_string()).collect();
-        async move {
-            let mut args: Vec<String> = ba;
-            args.push(format!("cat {file}"));
-            let out = Command::new(&prog)
-                .args(args.iter().map(|s| s.as_str()))
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .await?;
-            Ok::<String, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+/// Read from an async reader with a timeout.
+/// Returns whatever was read before timeout (may be partial).
+async fn read_with_timeout(mut reader: impl AsyncReadExt + Unpin, secs: u64) -> String {
+    let mut buf = Vec::new();
+    match tokio::time::timeout(Duration::from_secs(secs), reader.read_to_end(&mut buf)).await {
+        Ok(Ok(_)) => {}
+        Ok(Err(_)) => {}
+        Err(_) => {
+            tracing::warn!("exec pipe read timed out after {secs}s ({} bytes read)", buf.len());
         }
-    };
-
-    let stdout = read("out").await.unwrap_or_default();
-    let stderr = read("err").await.unwrap_or_default();
-    let rc_str = read("rc").await.unwrap_or_default();
-    let rc: i32 = rc_str.trim().parse().unwrap_or(-1);
-
-    // Cleanup temp files
-    let cleanup_cmd = format!("rm -f {out_file}.out {out_file}.err {out_file}.rc");
-    let mut cleanup_args: Vec<&str> = base_args.to_vec();
-    cleanup_args.push(&cleanup_cmd);
-    let _ = Command::new(program)
-        .args(&cleanup_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    Ok((stdout, stderr, rc))
+    }
+    String::from_utf8_lossy(&buf).to_string()
 }
 
-/// Stream command output by periodically tailing the temp file.
-pub async fn exec_with_progress_via_tempfile(
-    program: &str,
-    base_args: &[&str],
-    cmd: &str,
-    tx: &mpsc::Sender<String>,
-) -> Result<(String, i32)> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let out_file = format!("/tmp/.clawenv_exec_{stamp}");
-
-    let wrapper = format!(
-        "({cmd}) > {out_file}.out 2>&1; echo $? > {out_file}.rc",
-    );
-
-    let mut args: Vec<&str> = base_args.to_vec();
-    args.push(&wrapper);
-
-    // Start command (no pipes)
+/// Execute a command, returning (stdout, stderr, exit_code).
+/// Uses Plan C: spawn with pipes, join!(wait, read, read) with timeout.
+pub async fn exec(program: &str, args: &[&str]) -> Result<(String, String, i32)> {
     let mut child = Command::new(program)
-        .args(&args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()?;
 
-    // Tail output file periodically
-    let prog2 = program.to_string();
-    let ba2: Vec<String> = base_args.iter().map(|s| s.to_string()).collect();
-    let out_file2 = out_file.clone();
+    let stdout_h = child.stdout.take().unwrap();
+    let stderr_h = child.stderr.take().unwrap();
+
+    let (status_result, stdout, stderr) = tokio::join!(
+        child.wait(),
+        read_with_timeout(stdout_h, READ_TIMEOUT_SECS),
+        read_with_timeout(stderr_h, READ_TIMEOUT_SECS),
+    );
+
+    let code = match status_result {
+        Ok(s) => s.code().unwrap_or(-1),
+        Err(e) => {
+            tracing::error!("exec wait failed: {e}");
+            -1
+        }
+    };
+
+    Ok((stdout, stderr, code))
+}
+
+/// Execute with streaming progress — pipes stdout+stderr lines to a channel.
+pub async fn exec_with_progress(
+    program: &str,
+    args: &[&str],
+    tx: &mpsc::Sender<String>,
+) -> Result<(String, i32)> {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    // Stream stderr to channel
     let tx2 = tx.clone();
-    let tail_task = tokio::spawn(async move {
-        let mut last_size = 0usize;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-            let mut tail_args: Vec<String> = ba2.clone();
-            tail_args.push(format!("tail -c +{} {}.out 2>/dev/null", last_size + 1, out_file2));
-            let result = Command::new(&prog2)
-                .args(tail_args.iter().map(|s| s.as_str()))
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .await;
-            if let Ok(out) = result {
-                let new_content = String::from_utf8_lossy(&out.stdout);
-                if !new_content.is_empty() {
-                    last_size += new_content.len();
-                    for line in new_content.lines() {
-                        let trimmed = line.trim();
-                        if !trimmed.is_empty() {
-                            let _ = tx2.send(trimmed.to_string()).await;
-                        }
-                    }
-                }
+    let stderr_task = tokio::spawn(async move {
+        if let Some(se) = stderr {
+            let mut reader = BufReader::new(se).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx2.send(line).await;
             }
         }
     });
 
-    let status = child.wait().await?;
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    tail_task.abort();
-
-    // Read final output
-    let read_final = |suffix: &str| {
-        let file = format!("{out_file}.{suffix}");
-        let prog = program.to_string();
-        let ba: Vec<String> = base_args.iter().map(|s| s.to_string()).collect();
-        async move {
-            let mut args: Vec<String> = ba;
-            args.push(format!("cat {file}"));
-            let out = Command::new(&prog)
-                .args(args.iter().map(|s| s.as_str()))
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .output()
-                .await?;
-            Ok::<String, anyhow::Error>(String::from_utf8_lossy(&out.stdout).to_string())
+    // Stream stdout to channel + collect
+    let tx3 = tx.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut output = String::new();
+        if let Some(so) = stdout {
+            let mut reader = BufReader::new(so).lines();
+            while let Ok(Some(line)) = reader.next_line().await {
+                let _ = tx3.send(line.clone()).await;
+                output.push_str(&line);
+                output.push('\n');
+            }
         }
+        output
+    });
+
+    // Wait for process with global timeout
+    let wait_result = tokio::time::timeout(
+        Duration::from_secs(300), // 5 min max
+        child.wait(),
+    ).await;
+
+    // Give pipes a moment to flush
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stderr_task.abort();
+    let output = stdout_task.await.unwrap_or_default();
+
+    let code = match wait_result {
+        Ok(Ok(s)) => s.code().unwrap_or(-1),
+        Ok(Err(e)) => { tracing::error!("exec wait failed: {e}"); -1 }
+        Err(_) => { tracing::error!("exec timed out (5 min)"); -1 }
     };
 
-    let stdout = read_final("out").await.unwrap_or_default();
-    let rc_str = read_final("rc").await.unwrap_or_default();
-    let rc: i32 = rc_str.trim().parse().unwrap_or(-1);
-
-    // Send remaining output
-    for line in stdout.lines() {
-        let trimmed = line.trim();
-        if !trimmed.is_empty() {
-            let _ = tx.send(trimmed.to_string()).await;
-        }
-    }
-
-    // Cleanup
-    let cleanup_cmd = format!("rm -f {out_file}.out {out_file}.rc");
-    let mut cleanup_args: Vec<&str> = base_args.to_vec();
-    cleanup_args.push(&cleanup_cmd);
-    let _ = Command::new(program)
-        .args(&cleanup_args)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .await;
-
-    Ok((stdout, rc))
+    Ok((output, code))
 }

@@ -215,14 +215,11 @@ impl SandboxBackend for PodmanBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Use tempfile approach to avoid pipe-inheritance hangs (conmon process)
-        let cn = self.container_name.clone();
-        let base_args: Vec<&str> = vec!["exec", &cn, "sh", "-c"];
-        let (stdout, stderr, rc) = super::exec_helper::exec_via_tempfile(
-            "podman", &base_args, cmd
-        ).await?;
+        // Plan C: spawn with pipes, join!(wait, read, read) with timeout
+        let args = ["exec", &self.container_name.as_str(), "sh", "-c", cmd];
+        let (stdout, stderr, rc) = super::exec_helper::exec("podman", &args).await?;
         if rc != 0 {
-            anyhow::bail!("exec in Podman container failed (exit {rc}):\nstdout: {}\nstderr: {}",
+            anyhow::bail!("exec in Podman failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
                 stdout.chars().take(500).collect::<String>(),
                 stderr.chars().take(500).collect::<String>());
         }
@@ -230,15 +227,12 @@ impl SandboxBackend for PodmanBackend {
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        let cn = self.container_name.clone();
-        let base_args: Vec<&str> = vec!["exec", &cn, "sh", "-c"];
-        let (stdout, rc) = super::exec_helper::exec_with_progress_via_tempfile(
-            "podman", &base_args, cmd, tx
-        ).await?;
+        let args = ["exec", &self.container_name.as_str(), "sh", "-c", cmd];
+        let (output, rc) = super::exec_helper::exec_with_progress("podman", &args, tx).await?;
         if rc != 0 {
             anyhow::bail!("command failed in Podman (exit {rc}): {cmd}");
         }
-        Ok(stdout)
+        Ok(output)
     }
 
     async fn snapshot_create(&self, tag: &str) -> Result<()> {
