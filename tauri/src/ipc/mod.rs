@@ -71,8 +71,9 @@ pub async fn get_instance_status_detail(name: String) -> Result<InstanceStatusDe
         "echo '--- Memory ---' && free -m 2>/dev/null || cat /proc/meminfo 2>/dev/null | head -5; echo ''; echo '--- Disk ---' && df -h / 2>/dev/null; echo ''; echo '--- Uptime ---' && uptime 2>/dev/null"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
 
+    // Read the actual running gateway log (not the startup wrapper log)
     let gateway_log = backend.exec(
-        "tail -80 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log found'"
+        "cat /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -100 || tail -80 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log found'"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
 
     Ok(InstanceStatusDetail { processes, resources, gateway_log })
@@ -84,7 +85,7 @@ pub async fn get_instance_logs(name: String) -> Result<String, String> {
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
     let log = backend.exec(
-        "tail -100 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'"
+        "cat /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -100 || tail -100 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
     Ok(log)
 }

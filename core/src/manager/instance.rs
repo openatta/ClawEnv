@@ -21,10 +21,22 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
     backend.start().await?;
     let port = instance.openclaw.gateway_port;
+
+    // Check if gateway is already running on this port
+    let check = backend.exec(&format!(
+        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+    )).await.unwrap_or_default();
+    let code = check.trim().trim_matches('\'');
+
+    if code.starts_with('2') || code.starts_with('3') || code == "401" {
+        tracing::info!("Instance '{}' gateway already running on port {port}", instance.name);
+        return Ok(());
+    }
+
+    // Start gateway
     backend.exec(&format!(
         "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
     )).await?;
-    // Wait for gateway to start
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     tracing::info!("Instance '{}' started on port {port}", instance.name);
     Ok(())

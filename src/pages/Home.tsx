@@ -43,10 +43,22 @@ export default function Home(props: {
   const [statusData, setStatusData] = createSignal<StatusDetail | null>(null);
   const [statusLoading, setStatusLoading] = createSignal(false);
 
+  let statusInterval: ReturnType<typeof setInterval> | null = null;
+
   async function openStatus(name: string) {
     setStatusFor(name);
     setStatusTab("processes");
     await refreshStatus(name);
+    // Auto-refresh every 5 seconds
+    if (statusInterval) clearInterval(statusInterval);
+    statusInterval = setInterval(() => {
+      if (statusFor()) refreshStatus(statusFor()!);
+    }, 5000);
+  }
+
+  function closeStatus() {
+    setStatusFor(null);
+    if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
   }
 
   async function refreshStatus(name: string) {
@@ -162,8 +174,8 @@ export default function Home(props: {
       {/* Status Modal */}
       <Show when={statusFor()}>
         <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50"
-          onClick={(e) => { if (e.target === e.currentTarget) setStatusFor(null); }}>
-          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[700px] max-h-[80vh] flex flex-col shadow-2xl">
+          onClick={(e) => { if (e.target === e.currentTarget) closeStatus(); }}>
+          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[700px] h-[70vh] flex flex-col shadow-2xl">
             {/* Header */}
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700">
               <span class="font-medium">{l().status}: {statusFor()}</span>
@@ -171,7 +183,7 @@ export default function Home(props: {
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
                   onClick={() => refreshStatus(statusFor()!)}>{l().refresh}</button>
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-                  onClick={() => setStatusFor(null)}>{l().close}</button>
+                  onClick={closeStatus}>{l().close}</button>
               </div>
             </div>
             {/* Tabs */}
