@@ -189,14 +189,25 @@ impl SandboxBackend for LimaBackend {
                     &["start", "--name", &self.vm_name, "--tty=false", "template:alpine"],
                 ).await?;
 
-                tracing::info!("Lima VM created, installing OpenClaw...");
+                tracing::info!("Lima VM created, provisioning...");
 
-                // Install Node.js + OpenClaw inside the VM
-                self.exec("sudo apk update && sudo apk add --no-cache nodejs npm git curl bash ca-certificates").await?;
-                self.exec(&format!(
-                    "sudo npm install -g openclaw@{}",
-                    opts.claw_version
-                )).await?;
+                // Ensure essential packages (most already in Alpine cloud image)
+                self.exec("sudo apk add --no-cache git curl bash 2>/dev/null || true").await?;
+
+                // Check if Node.js is available, install if not
+                let has_node = self.exec("which node").await;
+                if has_node.is_err() || has_node.unwrap().trim().is_empty() {
+                    self.exec("sudo apk add --no-cache nodejs npm").await?;
+                }
+
+                // Install OpenClaw (skip if already installed at correct version)
+                let installed = self.exec("openclaw --version 2>/dev/null || echo ''").await.unwrap_or_default();
+                if installed.trim().is_empty() || !installed.contains(&opts.claw_version) || opts.claw_version == "latest" {
+                    self.exec(&format!(
+                        "sudo npm install -g openclaw@{}",
+                        opts.claw_version
+                    )).await?;
+                }
 
                 // Optional: install browser if requested
                 if opts.install_browser {
@@ -224,15 +235,46 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let out = Command::new("limactl")
+        // Use a two-phase approach:
+        // 1. Spawn with piped stdout, read with a timeout guard
+        // 2. If the command writes output we need, capture it
+        // For most exec calls, we just need the exit code.
+        //
+        // Lima's shell can keep pipes open (hostagent inheritance),
+        // so we use spawn + read_to_end with concurrent wait.
+        use tokio::io::AsyncReadExt;
+
+        let mut child = Command::new("limactl")
             .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
-            .output()
-            .await?;
-        if !out.status.success() {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            anyhow::bail!("exec in sandbox failed: {stderr}");
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()) // don't capture stderr to avoid pipe hang
+            .kill_on_drop(true)
+            .spawn()?;
+
+        let stdout_handle = child.stdout.take();
+
+        // Wait for process to exit first
+        let status = child.wait().await?;
+
+        // Then read whatever stdout is available (process is done, pipe should close)
+        let stdout_data = if let Some(mut so) = stdout_handle {
+            let mut buf = Vec::new();
+            // Use a short timeout for reading — if pipe doesn't close, give up
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                so.read_to_end(&mut buf),
+            ).await {
+                Ok(Ok(_)) => String::from_utf8_lossy(&buf).to_string(),
+                _ => String::new(),
+            }
+        } else {
+            String::new()
+        };
+
+        if !status.success() {
+            anyhow::bail!("exec failed (exit {:?}): {}", status.code(), cmd);
         }
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
+        Ok(stdout_data)
     }
 
     async fn exec_stream(&self, cmd: &str, tx: mpsc::Sender<String>) -> Result<ExitStatus> {
