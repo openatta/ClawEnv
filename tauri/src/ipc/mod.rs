@@ -594,6 +594,24 @@ pub async fn get_gateway_token(name: String) -> Result<String, String> {
     Ok(result.trim().to_string())
 }
 
+/// Get bridge server configuration
+#[tauri::command]
+pub fn get_bridge_config() -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let bridge = &config.config().clawenv.bridge;
+    serde_json::to_value(bridge).map_err(|e| e.to_string())
+}
+
+/// Update bridge server configuration
+#[tauri::command]
+pub async fn save_bridge_config(bridge_json: String) -> Result<(), String> {
+    let bridge: clawenv_core::config::BridgeConfig =
+        serde_json::from_str(&bridge_json).map_err(|e| e.to_string())?;
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+    config.config_mut().clawenv.bridge = bridge;
+    config.save().map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn open_url_in_browser(url: String) -> Result<(), String> {
     // Fallback: use Rust std to open URL

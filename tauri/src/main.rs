@@ -138,6 +138,8 @@ fn main() {
             ipc::install_prerequisites,
             ipc::test_api_key,
             ipc::get_gateway_token,
+            ipc::get_bridge_config,
+            ipc::save_bridge_config,
             ipc::open_url_in_browser,
             ipc::create_default_config,
         ])

@@ -17,6 +17,24 @@ pub struct BridgePermissions {
     pub require_approval: Vec<String>,
     #[serde(default = "default_auto_approve")]
     pub auto_approve: Vec<String>,
+    /// Shell mode: allow agents to execute arbitrary shell scripts
+    #[serde(default)]
+    pub shell_enabled: bool,
+    /// Shell program: bash (macOS/Linux), powershell (Windows)
+    #[serde(default = "default_shell_program")]
+    pub shell_program: String,
+    /// Require user approval for each shell command
+    #[serde(default = "default_true")]
+    pub shell_require_approval: bool,
+}
+
+fn default_true() -> bool { true }
+
+fn default_shell_program() -> String {
+    #[cfg(target_os = "windows")]
+    { return "powershell".into(); }
+    #[cfg(not(target_os = "windows"))]
+    { "bash".into() }
 }
 
 fn default_require_approval() -> Vec<String> {
@@ -37,6 +55,9 @@ impl Default for BridgePermissions {
             exec_deny: vec!["rm -rf".into(), "sudo".into(), "ssh".into()],
             require_approval: default_require_approval(),
             auto_approve: default_auto_approve(),
+            shell_enabled: false,
+            shell_program: default_shell_program(),
+            shell_require_approval: true,
         }
     }
 }
