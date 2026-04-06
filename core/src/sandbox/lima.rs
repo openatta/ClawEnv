@@ -167,43 +167,28 @@ impl SandboxBackend for LimaBackend {
                 self.import_image(&path).await?;
             }
             InstallMode::OnlineBuild => {
-                let template = include_str!("../../../assets/lima/clawenv-alpine.yaml");
+                // Use Lima's built-in Alpine template (has SSH + cloud-init pre-configured)
+                // Then provision OpenClaw inside the running VM
+                tracing::info!("Creating Lima VM '{}' from template://alpine", self.vm_name);
 
-                // Detect architecture
-                let arch = match std::env::consts::ARCH {
-                    "aarch64" => "aarch64",
-                    "x86_64" => "x86_64",
-                    other => anyhow::bail!("Unsupported architecture: {other}"),
-                };
+                self.limactl_stream(
+                    &["start", "--name", &self.vm_name, "--tty=false", "template://alpine"],
+                    None,
+                ).await?;
 
-                let rendered = template
-                    .replace("{INSTANCE_NAME}", &opts.instance_name)
-                    .replace("{OPENCLAW_VERSION}", &opts.claw_version)
-                    .replace("{ARCH}", arch);
+                tracing::info!("Lima VM created, installing OpenClaw...");
 
-                // Ensure workspace directory exists
-                let workspace_dir = dirs::home_dir()
-                    .ok_or_else(|| anyhow!("Cannot find home directory"))?
-                    .join(".clawenv/workspaces")
-                    .join(&opts.instance_name);
-                tokio::fs::create_dir_all(&workspace_dir).await?;
-
-                let templates_dir = Self::templates_dir()?;
-                tokio::fs::create_dir_all(&templates_dir).await?;
-                let template_path = templates_dir.join(format!("{}.yaml", self.vm_name));
-                tokio::fs::write(&template_path, &rendered).await?;
-
-                self.limactl(&[
-                    "start",
-                    "--name", &self.vm_name,
-                    "--tty=false",
-                    &template_path.to_string_lossy(),
-                ]).await?;
+                // Install Node.js + OpenClaw inside the VM
+                self.exec("sudo apk update && sudo apk add --no-cache nodejs npm git curl bash ca-certificates").await?;
+                self.exec(&format!(
+                    "sudo npm install -g openclaw@{}",
+                    opts.claw_version
+                )).await?;
 
                 // Optional: install browser if requested
                 if opts.install_browser {
                     self.exec(
-                        "apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
+                        "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
                     ).await?;
                 }
             }
@@ -228,7 +213,7 @@ impl SandboxBackend for LimaBackend {
 
     async fn exec(&self, cmd: &str) -> Result<String> {
         let out = Command::new("limactl")
-            .args(["shell", &self.vm_name, "--", "ash", "-c", cmd])
+            .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
             .output()
             .await?;
         if !out.status.success() {
@@ -242,7 +227,7 @@ impl SandboxBackend for LimaBackend {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
         let mut child = Command::new("limactl")
-            .args(["shell", &self.vm_name, "--", "ash", "-c", cmd])
+            .args(["shell", &self.vm_name, "--", "sh", "-c", cmd])
             .stdout(std::process::Stdio::piped())
             .spawn()?;
 

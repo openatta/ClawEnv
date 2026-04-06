@@ -129,7 +129,11 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
       const results = await invoke<ConnTestResult[]>("test_connectivity", { proxyJson: getProxyJson() });
       setConnResults(results);
       const ok = results.filter(r => r.ok).length;
-      setConnLog(l => [...l, `Result: ${ok}/${results.length} endpoints reachable`]);
+      setConnLog(l => [...l, "────────────────────────────",
+        `Summary: ${ok}/${results.length} endpoints reachable`,
+        ...results.map(r => `  ${r.ok ? "✓" : "✗"} ${r.endpoint}: ${r.message}`),
+        ok === results.length ? "All connectivity checks passed." : "Some endpoints are unreachable. Check your proxy settings.",
+      ]);
     } catch (e) {
       setConnLog(l => [...l, `Test failed: ${e}`]);
     } finally {
@@ -211,12 +215,26 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
     if (s === 6 && !installing()) startInstall();
   }
 
-  // Shared log output box component
+  // Shared log output box with auto-scroll
   function LogBox(p: { logs: string[]; height?: string }) {
+    let ref_el: HTMLDivElement | undefined;
+    // Auto-scroll to bottom when logs change
+    const scrollToBottom = () => {
+      if (ref_el) ref_el.scrollTop = ref_el.scrollHeight;
+    };
     return (
-      <div class={`bg-gray-950 rounded border border-gray-700 p-2 overflow-y-auto font-mono text-xs text-gray-400 ${p.height || "h-40"}`}>
+      <div ref={ref_el} class={`bg-gray-950 rounded border border-gray-700 p-2 overflow-y-auto font-mono text-xs text-gray-400 ${p.height || "h-40"}`}>
         <For each={p.logs}>
-          {(line) => <div class={line.includes("ERROR") || line.includes("✗") ? "text-red-400" : line.includes("✓") ? "text-green-400" : ""}>{line}</div>}
+          {(line) => {
+            // Schedule scroll after render
+            setTimeout(scrollToBottom, 10);
+            return <div class={
+              line.includes("ERROR") || line.includes("✗") || line.includes("fail") ? "text-red-400"
+              : line.includes("✓") || line.includes("OK") || line.includes("done") ? "text-green-400"
+              : line.startsWith("---") ? "text-gray-600"
+              : ""
+            }>{line}</div>;
+          }}
         </For>
         <Show when={p.logs.length === 0}><span class="text-gray-600">Waiting...</span></Show>
       </div>
@@ -248,23 +266,46 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
         <div class="flex-1 overflow-y-auto">
 
           {/* ===== Step 1: Welcome ===== */}
-          {step() === 1 && (
-            <div>
-              <h2 class="text-xl font-bold mb-3">Welcome to ClawEnv</h2>
-              <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-sm text-gray-300 space-y-2">
-                <p><strong>ClawEnv</strong> is a cross-platform installer and manager for <strong>OpenClaw</strong>, the open-source AI Agent framework.</p>
-                <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so OpenClaw runs safely without affecting your host OS.</p>
-                <p class="text-gray-400">What this wizard will do:</p>
-                <ul class="list-disc list-inside text-gray-400 space-y-1">
-                  <li>Check your system meets requirements (OS, memory, disk)</li>
-                  <li>Configure network & proxy settings</li>
-                  <li>Download and install OpenClaw in a sandbox</li>
-                  <li>Securely store your API key in system keychain</li>
-                </ul>
-                <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
+          {step() === 1 && (() => {
+            const [wLang, setWLang] = createSignal<"zh-CN" | "en">("zh-CN");
+            const zh = wLang() === "zh-CN";
+            return (
+              <div>
+                <div class="flex items-center justify-between mb-3">
+                  <h2 class="text-xl font-bold">{zh ? "欢迎使用 ClawEnv" : "Welcome to ClawEnv"}</h2>
+                  <div class="flex gap-1">
+                    <button class={`px-2 py-0.5 text-xs rounded ${zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setWLang("zh-CN")}>中文</button>
+                    <button class={`px-2 py-0.5 text-xs rounded ${!zh ? "bg-indigo-600" : "bg-gray-700"}`} onClick={() => setWLang("en")}>EN</button>
+                  </div>
+                </div>
+                <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-sm text-gray-300 space-y-2">
+                  {zh ? (<>
+                    <p><strong>ClawEnv</strong> 是 <strong>OpenClaw</strong>（开源 AI Agent 框架）的跨平台安装器与管理工具。</p>
+                    <p>它在您的系统上创建安全隔离的沙盒环境（Alpine Linux），让 OpenClaw 安全运行而不影响宿主系统。</p>
+                    <p class="text-gray-400">安装向导将：</p>
+                    <ul class="list-disc list-inside text-gray-400 space-y-1">
+                      <li>检查系统是否满足要求（操作系统、内存、磁盘空间）</li>
+                      <li>配置网络和代理设置</li>
+                      <li>下载并在沙盒中安装 OpenClaw</li>
+                      <li>安全地将 API Key 存储在系统钥匙串中</li>
+                    </ul>
+                    <p class="text-gray-500 text-xs mt-2">支持平台：macOS (Lima)、Windows (WSL2)、Linux (Podman)</p>
+                  </>) : (<>
+                    <p><strong>ClawEnv</strong> is a cross-platform installer and manager for <strong>OpenClaw</strong>, the open-source AI Agent framework.</p>
+                    <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so OpenClaw runs safely without affecting your host OS.</p>
+                    <p class="text-gray-400">This wizard will:</p>
+                    <ul class="list-disc list-inside text-gray-400 space-y-1">
+                      <li>Check your system meets requirements (OS, memory, disk)</li>
+                      <li>Configure network & proxy settings</li>
+                      <li>Download and install OpenClaw in a sandbox</li>
+                      <li>Securely store your API key in system keychain</li>
+                    </ul>
+                    <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
+                  </>)}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           {/* ===== Step 2: System Check ===== */}
           {step() === 2 && (
@@ -344,23 +385,8 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                 {connTesting() ? "Testing..." : "Test Connectivity"}
               </button>
 
-              {/* Results */}
-              <Show when={connResults().length > 0}>
-                <div class="mb-2">
-                  <For each={connResults()}>
-                    {(r) => (
-                      <div class="flex items-center gap-2 text-sm py-0.5">
-                        <span class={r.ok ? "text-green-400" : "text-red-400"}>{r.ok ? "���" : "✗"}</span>
-                        <span class="w-36">{r.endpoint}</span>
-                        <span class={r.ok ? "text-gray-400" : "text-red-400"} style="font-size:12px">{r.message}</span>
-                      </div>
-                    )}
-                  </For>
-                </div>
-              </Show>
-
               {/* Log output */}
-              <LogBox logs={connLog()} height="h-32" />
+              <LogBox logs={connLog()} height="h-52" />
             </div>
           )}
 

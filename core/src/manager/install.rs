@@ -145,39 +145,31 @@ async fn do_install(
         install_mode: opts.install_mode.clone(),
     };
 
-    send(tx, "Creating sandbox environment (this may take several minutes)...", 20, InstallStage::CreateSandbox).await;
+    send(tx, "Creating sandbox VM (this may take a few minutes)...", 20, InstallStage::CreateSandbox).await;
 
-    // Run create in background with periodic progress updates
-    let create_result = {
-        let tx2 = tx.clone();
-        let sandbox_opts2 = sandbox_opts.clone();
+    // Heartbeat — keeps UI alive during long VM creation
+    let tx_hb = tx.clone();
+    let heartbeat = tokio::spawn(async move {
+        let mut tick = 0u32;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+            tick += 1;
+            let pct = std::cmp::min(20 + tick as u8 * 2, 44);
+            let msg = match tick {
+                1..=2 => "Downloading Alpine Linux image...",
+                3..=4 => "Booting virtual machine...",
+                5..=8 => "Waiting for VM to become ready...",
+                _ => "Still working, please wait...",
+            };
+            send(&tx_hb, msg, pct, InstallStage::CreateSandbox).await;
+        }
+    });
 
-        // Progress heartbeat — sends updates every 10 seconds while create runs
-        let heartbeat = tokio::spawn({
-            let tx3 = tx2.clone();
-            async move {
-                let messages = [
-                    "Downloading Alpine Linux image...",
-                    "Booting virtual machine...",
-                    "Running provision scripts...",
-                    "Installing Node.js and npm...",
-                    "Installing OpenClaw...",
-                    "Finalizing sandbox setup...",
-                    "Still working, please wait...",
-                ];
-                for (i, msg) in messages.iter().cycle().enumerate() {
-                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
-                    let pct = std::cmp::min(20 + (i as u8 * 3), 45);
-                    send(&tx3, msg, pct, InstallStage::CreateSandbox).await;
-                }
-            }
-        });
-
-        let result = backend.create(&sandbox_opts).await;
-        heartbeat.abort(); // Stop heartbeat once create finishes
-        result
-    };
+    let create_result = backend.create(&sandbox_opts).await;
+    heartbeat.abort();
     create_result?;
+
+    send(tx, "Sandbox VM ready", 45, InstallStage::CreateSandbox).await;
 
     // 4. Apply proxy if configured
     let proxy_config = &config.config().clawenv.proxy;
