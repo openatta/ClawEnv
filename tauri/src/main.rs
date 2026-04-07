@@ -137,6 +137,8 @@ fn main() {
             ipc::system_check,
             ipc::install_prerequisites,
             ipc::test_api_key,
+            ipc::list_sandbox_vms,
+            ipc::get_sandbox_disk_usage,
             ipc::check_chromium_installed,
             ipc::install_chromium,
             ipc::get_gateway_token,

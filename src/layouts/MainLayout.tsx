@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import IconBar from "../components/IconBar";
 import Home from "../pages/Home";
 import OpenClawPage from "../pages/OpenClawPage";
+import SandboxPage from "../pages/SandboxPage";
 import Settings from "../pages/Settings";
 
 type Instance = {
@@ -13,7 +14,7 @@ type Instance = {
   gateway_port: number;
 };
 
-type Page = "home" | "openclaw" | "settings";
+type Page = "home" | "openclaw" | "sandbox" | "settings";
 
 export default function MainLayout(props: { instances: Instance[] }) {
   const [activePage, setActivePage] = createSignal<Page>("home");
@@ -60,6 +61,7 @@ export default function MainLayout(props: { instances: Instance[] }) {
         {activePage() === "openclaw" && (
           <OpenClawPage instances={props.instances} healths={healths()} />
         )}
+        {activePage() === "sandbox" && <SandboxPage />}
         {activePage() === "settings" && <Settings />}
       </main>
     </div>

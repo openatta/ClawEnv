@@ -1,8 +1,7 @@
 import { JSX } from "solid-js";
 
-type Page = "home" | "openclaw" | "settings";
+type Page = "home" | "openclaw" | "sandbox" | "settings";
 
-// SVG icon components (20x20, stroke-based)
 const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
   logo: () => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
@@ -10,7 +9,6 @@ const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
     </svg>
   ),
   home: () => (
-    // Dashboard grid icon
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
       <rect x="3" y="3" width="7" height="7" rx="1" />
       <rect x="14" y="3" width="7" height="7" rx="1" />
@@ -19,8 +17,18 @@ const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
     </svg>
   ),
   openclaw: () => (
-    // 🦞 OpenClaw lobster icon
     <span class="text-lg leading-none" style="font-size:20px">🦞</span>
+  ),
+  sandbox: () => (
+    // VM/container icon — server with layers
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
+      <rect x="2" y="2" width="20" height="8" rx="2" />
+      <rect x="2" y="14" width="20" height="8" rx="2" />
+      <circle cx="6" cy="6" r="1" fill="currentColor" />
+      <circle cx="6" cy="18" r="1" fill="currentColor" />
+      <line x1="10" y1="6" x2="18" y2="6" />
+      <line x1="10" y1="18" x2="18" y2="18" />
+    </svg>
   ),
   settings: () => (
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="w-5 h-5">
@@ -36,19 +44,20 @@ const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
   ),
 };
 
-const navItems: { id: Page; label: string; position: "top" | "bottom" }[] = [
-  { id: "home", label: "Home", position: "top" },
-  { id: "openclaw", label: "OpenClaw", position: "top" },
-  { id: "settings", label: "Settings", position: "bottom" },
+const topItems: { id: Page; label: string }[] = [
+  { id: "home", label: "Home" },
+  { id: "openclaw", label: "OpenClaw" },
+];
+
+const bottomItems: { id: Page; label: string }[] = [
+  { id: "sandbox", label: "Sandbox" },
+  { id: "settings", label: "Settings" },
 ];
 
 export default function IconBar(props: {
   activePage: Page;
   onNavigate: (page: Page) => void;
 }) {
-  const topItems = navItems.filter((i) => i.position === "top");
-  const bottomItems = navItems.filter((i) => i.position === "bottom");
-
   function NavBtn(p: { id: Page; label: string }) {
     const active = () => props.activePage === p.id;
     return (
@@ -88,10 +97,9 @@ export default function IconBar(props: {
         {topItems.map((item) => <NavBtn id={item.id} label={item.label} />)}
       </div>
 
-      {/* Bottom nav */}
+      {/* Bottom nav: Sandbox + Settings + User */}
       <div class="flex flex-col items-center gap-1">
         {bottomItems.map((item) => <NavBtn id={item.id} label={item.label} />)}
-        {/* User — greyed out placeholder */}
         <button
           class="w-10 h-10 rounded-lg flex items-center justify-center text-gray-600 cursor-not-allowed opacity-40"
           title="User login (coming soon)"

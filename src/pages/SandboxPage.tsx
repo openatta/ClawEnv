@@ -1,0 +1,144 @@
+import { createSignal, onMount, For, Show } from "solid-js";
+import { invoke } from "@tauri-apps/api/core";
+
+type SandboxVm = {
+  name: string;
+  status: string;
+  cpus: string;
+  memory: string;
+  disk: string;
+  managed: boolean; // true if name starts with "clawenv-"
+};
+
+export default function SandboxPage() {
+  const [vms, setVms] = createSignal<SandboxVm[]>([]);
+  const [loading, setLoading] = createSignal(true);
+  const [error, setError] = createSignal("");
+  const [diskUsage, setDiskUsage] = createSignal("");
+
+  async function refresh() {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await invoke<SandboxVm[]>("list_sandbox_vms");
+      setVms(result);
+      const usage = await invoke<string>("get_sandbox_disk_usage");
+      setDiskUsage(usage);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  onMount(refresh);
+
+  const managed = () => vms().filter((v) => v.managed);
+  const external = () => vms().filter((v) => !v.managed);
+
+  return (
+    <div class="h-full overflow-y-auto p-6">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-bold">Sandbox Infrastructure</h1>
+        <button
+          class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+          onClick={refresh}
+        >
+          Refresh
+        </button>
+      </div>
+
+      <Show when={error()}>
+        <div class="mb-4 p-3 bg-red-900/30 border border-red-700 rounded text-sm text-red-400">
+          {error()}
+        </div>
+      </Show>
+
+      <Show when={loading()}>
+        <div class="text-gray-400 text-sm">Loading sandbox status...</div>
+      </Show>
+
+      <Show when={!loading()}>
+        {/* Platform info */}
+        <section class="mb-6">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
+            Platform
+          </h2>
+          <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-300">
+            <div class="flex justify-between">
+              <span>Total VMs/Containers</span>
+              <span>{vms().length} ({managed().length} managed, {external().length} external)</span>
+            </div>
+            <Show when={diskUsage()}>
+              <div class="flex justify-between mt-1">
+                <span>Disk Usage</span>
+                <span class="text-gray-400">{diskUsage()}</span>
+              </div>
+            </Show>
+          </div>
+        </section>
+
+        {/* Managed VMs */}
+        <section class="mb-6">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
+            Managed (ClawEnv)
+          </h2>
+          <div class="space-y-2">
+            <For each={managed()} fallback={
+              <div class="text-gray-500 text-sm">No managed sandbox instances</div>
+            }>
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} />}
+            </For>
+          </div>
+        </section>
+
+        {/* External VMs */}
+        <section class="mb-6">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">
+            External (not managed by ClawEnv)
+          </h2>
+          <div class="space-y-2">
+            <For each={external()} fallback={
+              <div class="text-gray-500 text-sm">No external sandbox instances</div>
+            }>
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} />}
+            </For>
+          </div>
+        </section>
+      </Show>
+    </div>
+  );
+}
+
+function VmCard(props: { vm: SandboxVm; onRefresh: () => void }) {
+  const statusColor = () => {
+    if (props.vm.status.toLowerCase().includes("running")) return "bg-green-500";
+    if (props.vm.status.toLowerCase().includes("stopped")) return "bg-gray-500";
+    return "bg-yellow-500";
+  };
+
+  const borderColor = () => props.vm.managed ? "border-green-700/30" : "border-gray-700";
+
+  return (
+    <div class={`bg-gray-800 rounded-lg p-3 border ${borderColor()}`}>
+      <div class="flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <div class={`w-2 h-2 rounded-full ${statusColor()}`} />
+          <span class="font-medium text-sm">{props.vm.name}</span>
+          {props.vm.managed && (
+            <span class="text-[10px] px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded">managed</span>
+          )}
+          {!props.vm.managed && (
+            <span class="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-400 rounded">external</span>
+          )}
+        </div>
+        <span class="text-xs text-gray-400">{props.vm.status}</span>
+      </div>
+      <div class="flex gap-4 mt-2 text-xs text-gray-500">
+        <span>CPU: {props.vm.cpus}</span>
+        <span>RAM: {props.vm.memory}</span>
+        <span>Disk: {props.vm.disk}</span>
+      </div>
+    </div>
+  );
+}

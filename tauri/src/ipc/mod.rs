@@ -593,6 +593,107 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
     Ok("API key format valid".into())
 }
 
+/// List all sandbox VMs/containers on the current platform
+#[derive(Serialize)]
+pub struct SandboxVmInfo {
+    pub name: String,
+    pub status: String,
+    pub cpus: String,
+    pub memory: String,
+    pub disk: String,
+    pub managed: bool,
+}
+
+#[tauri::command]
+pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
+    let mut vms = Vec::new();
+
+    #[cfg(target_os = "macos")]
+    {
+        // Lima VMs
+        let output = tokio::process::Command::new("limactl")
+            .args(["list", "--format", "{{.Name}}\t{{.Status}}\t{{.CPUs}}\t{{.Memory}}\t{{.Disk}}"])
+            .output().await.map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if parts.len() >= 5 {
+                vms.push(SandboxVmInfo {
+                    name: parts[0].to_string(),
+                    status: parts[1].to_string(),
+                    cpus: parts[2].to_string(),
+                    memory: parts[3].to_string(),
+                    disk: parts[4].to_string(),
+                    managed: parts[0].starts_with("clawenv-"),
+                });
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Podman containers
+        let output = tokio::process::Command::new("podman")
+            .args(["ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Size}}"])
+            .output().await.map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines() {
+            let parts: Vec<&str> = line.split('\t').collect();
+            if !parts.is_empty() {
+                vms.push(SandboxVmInfo {
+                    name: parts.first().unwrap_or(&"").to_string(),
+                    status: parts.get(1).unwrap_or(&"").to_string(),
+                    cpus: "-".to_string(),
+                    memory: "-".to_string(),
+                    disk: parts.get(2).unwrap_or(&"-").to_string(),
+                    managed: parts.first().unwrap_or(&"").starts_with("clawenv-"),
+                });
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // WSL2 distros
+        let output = tokio::process::Command::new("wsl")
+            .args(["--list", "--verbose"])
+            .output().await.map_err(|e| e.to_string())?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        for line in stdout.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                let name = parts[0].trim_start_matches('*').trim();
+                vms.push(SandboxVmInfo {
+                    name: name.to_string(),
+                    status: parts[1].to_string(),
+                    cpus: "-".to_string(),
+                    memory: "-".to_string(),
+                    disk: "-".to_string(),
+                    managed: name.starts_with("ClawEnv"),
+                });
+            }
+        }
+    }
+
+    Ok(vms)
+}
+
+#[tauri::command]
+pub async fn get_sandbox_disk_usage() -> Result<String, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let output = tokio::process::Command::new("du")
+            .args(["-sh", &format!("{}/.lima", std::env::var("HOME").unwrap_or_default())])
+            .output().await.map_err(|e| e.to_string())?;
+        let s = String::from_utf8_lossy(&output.stdout);
+        Ok(s.split_whitespace().next().unwrap_or("unknown").to_string())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Ok("unknown".to_string())
+    }
+}
+
 /// Check if Chromium is installed in a sandbox instance
 #[tauri::command]
 pub async fn check_chromium_installed(name: String) -> Result<bool, String> {
