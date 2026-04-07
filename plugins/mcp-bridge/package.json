@@ -1,0 +1,20 @@
+{
+  "name": "@clawenv/mcp-bridge",
+  "version": "0.1.0",
+  "description": "MCP Server that exposes ClawEnv Bridge API as tools for OpenClaw agents",
+  "type": "module",
+  "main": "dist/index.mjs",
+  "scripts": {
+    "build": "tsc && node -e \"const fs=require('fs');fs.copyFileSync('dist/index.js','dist/index.mjs')\"",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.5.2",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}
