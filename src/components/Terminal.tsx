@@ -1,6 +1,4 @@
 import { onMount, onCleanup, createSignal } from "solid-js";
-import { Terminal } from "xterm";
-import { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
@@ -11,15 +9,21 @@ type Props = {
 
 export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
-  let term: Terminal | undefined;
-  let fitAddon: FitAddon | undefined;
   let sessionId: string | null = null;
   let unlisten: UnlistenFn | null = null;
+  let term: any = null;
+  let fitAddon: any = null;
   const [error, setError] = createSignal("");
+  const [status, setStatus] = createSignal("Initializing...");
 
-  onMount(async () => {
+  async function initTerminal() {
     try {
-      // Create xterm instance
+      // Dynamic import to avoid build-time issues
+      const { Terminal } = await import("xterm");
+      const { FitAddon } = await import("@xterm/addon-fit");
+
+      setStatus("Creating terminal...");
+
       term = new Terminal({
         theme: {
           background: "#0d1117",
@@ -37,13 +41,17 @@ export default function SandboxTerminal(props: Props) {
       fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
 
-      if (containerRef) {
-        term.open(containerRef);
-        // Delay fit to ensure container has dimensions
-        setTimeout(() => fitAddon?.fit(), 50);
+      if (!containerRef) {
+        setError("Container element not available");
+        return;
       }
 
-      // Listen for output from backend
+      term.open(containerRef);
+      setTimeout(() => { try { fitAddon?.fit(); } catch {} }, 100);
+
+      setStatus("Connecting to sandbox...");
+
+      // Listen for output
       unlisten = await listen<{ session_id: string; data: string }>(
         "terminal-output",
         (event) => {
@@ -53,33 +61,39 @@ export default function SandboxTerminal(props: Props) {
         }
       );
 
-      // Start terminal session
+      // Start session
       sessionId = await invoke<string>("start_terminal", {
         instanceName: props.instanceName,
       });
 
+      setStatus("Connected");
       term.writeln(`\x1b[32mConnected to sandbox: ${props.instanceName}\x1b[0m\r\n`);
 
-      // Forward user input to backend
-      term.onData((data) => {
+      // Forward user input
+      term.onData((data: string) => {
         if (sessionId) {
           invoke("write_terminal", { sessionId, data }).catch(() => {});
         }
       });
 
-      // Handle resize
+      // Resize
       const observer = new ResizeObserver(() => {
-        setTimeout(() => fitAddon?.fit(), 10);
+        setTimeout(() => { try { fitAddon?.fit(); } catch {} }, 10);
       });
-      if (containerRef) observer.observe(containerRef);
+      observer.observe(containerRef);
       onCleanup(() => observer.disconnect());
 
     } catch (e) {
-      setError(String(e));
-      if (term) {
-        term.writeln(`\x1b[31mConnection failed: ${e}\x1b[0m`);
-      }
+      const msg = String(e);
+      setError(msg);
+      setStatus("Failed");
+      console.error("Terminal init error:", e);
     }
+  }
+
+  onMount(() => {
+    // Delay slightly to ensure DOM is ready
+    setTimeout(initTerminal, 100);
   });
 
   onCleanup(() => {
@@ -87,7 +101,7 @@ export default function SandboxTerminal(props: Props) {
       invoke("close_terminal", { sessionId }).catch(() => {});
     }
     unlisten?.();
-    term?.dispose();
+    try { term?.dispose(); } catch {}
   });
 
   return (
@@ -103,7 +117,7 @@ export default function SandboxTerminal(props: Props) {
               <div class="w-3 h-3 rounded-full bg-green-500" />
             </div>
             <span class="text-xs text-gray-400 ml-2">
-              {props.instanceName} — sandbox terminal
+              {props.instanceName} — {status()}
             </span>
           </div>
           <button
@@ -114,8 +128,15 @@ export default function SandboxTerminal(props: Props) {
           </button>
         </div>
 
+        {/* Error display */}
+        {error() && (
+          <div class="px-4 py-2 bg-red-900/30 text-red-400 text-xs border-b border-red-700">
+            Error: {error()}
+          </div>
+        )}
+
         {/* Terminal container */}
-        <div ref={containerRef} class="flex-1 min-h-0" />
+        <div ref={containerRef} class="flex-1 min-h-0 p-1" />
       </div>
     </div>
   );

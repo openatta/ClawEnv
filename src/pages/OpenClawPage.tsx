@@ -117,21 +117,17 @@ export default function OpenClawPage(props: {
               Open OpenClaw Control Panel ↗
             </button>
 
-            <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500">
-              <div class="grid grid-cols-2 gap-y-1.5">
-                <span class="text-gray-400">Instance</span>
-                <span>{activeInstance()?.name}</span>
-                <span class="text-gray-400">Version</span>
-                <span>{activeInstance()?.version}</span>
-                <span class="text-gray-400">Sandbox</span>
-                <span>{activeInstance()?.sandbox_type}</span>
-                <span class="text-gray-400">Gateway</span>
-                <span class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</span>
-                <span class="text-gray-400">Token</span>
-                <span class="font-mono text-gray-300">{gatewayToken() || "loading..."}</span>
-                <span class="text-gray-400">Status</span>
-                <span class="text-green-400">● running</span>
-              </div>
+            <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500 max-w-xl w-full">
+              <table class="w-full">
+                <tbody>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Instance</td><td>{activeInstance()?.name}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Version</td><td>{activeInstance()?.version}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Gateway</td><td class="font-mono break-all">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "loading..."}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Status</td><td class="text-green-400">● running</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </Show>
