@@ -1,6 +1,8 @@
-import { createSignal, onMount, onCleanup, Show } from "solid-js";
+import { onMount, onCleanup, createSignal } from "solid-js";
+import { Terminal } from "xterm";
+import { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 type Props = {
   instanceName: string;
@@ -9,44 +11,74 @@ type Props = {
 
 export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
-  const [connected, setConnected] = createSignal(false);
-  const [error, setError] = createSignal("");
-  const [lines, setLines] = createSignal<string[]>([]);
-  const [inputValue, setInputValue] = createSignal("");
+  let term: Terminal | undefined;
+  let fitAddon: FitAddon | undefined;
   let sessionId: string | null = null;
-  let inputRef: HTMLInputElement | undefined;
-  let outputRef: HTMLDivElement | undefined;
-
-  // Auto-scroll
-  function scrollToBottom() {
-    if (outputRef) outputRef.scrollTop = outputRef.scrollHeight;
-  }
+  let unlisten: UnlistenFn | null = null;
+  const [error, setError] = createSignal("");
 
   onMount(async () => {
     try {
-      // Listen for output
-      const unlisten = await listen<{ session_id: string; data: string }>(
+      // Create xterm instance
+      term = new Terminal({
+        theme: {
+          background: "#0d1117",
+          foreground: "#c9d1d9",
+          cursor: "#58a6ff",
+          selectionBackground: "#264f78",
+        },
+        fontSize: 13,
+        fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
+        cursorBlink: true,
+        scrollback: 5000,
+        convertEol: true,
+      });
+
+      fitAddon = new FitAddon();
+      term.loadAddon(fitAddon);
+
+      if (containerRef) {
+        term.open(containerRef);
+        // Delay fit to ensure container has dimensions
+        setTimeout(() => fitAddon?.fit(), 50);
+      }
+
+      // Listen for output from backend
+      unlisten = await listen<{ session_id: string; data: string }>(
         "terminal-output",
         (event) => {
-          if (event.payload.session_id === sessionId) {
-            // Split data into lines and append
-            const newLines = event.payload.data.split('\n');
-            setLines((prev) => [...prev, ...newLines].slice(-500)); // Keep last 500 lines
-            setTimeout(scrollToBottom, 10);
+          if (event.payload.session_id === sessionId && term) {
+            term.write(event.payload.data);
           }
         }
       );
-      onCleanup(unlisten);
 
-      // Start session
+      // Start terminal session
       sessionId = await invoke<string>("start_terminal", {
         instanceName: props.instanceName,
       });
-      setConnected(true);
-      setLines(["Connected to sandbox: " + props.instanceName, ""]);
-      inputRef?.focus();
+
+      term.writeln(`\x1b[32mConnected to sandbox: ${props.instanceName}\x1b[0m\r\n`);
+
+      // Forward user input to backend
+      term.onData((data) => {
+        if (sessionId) {
+          invoke("write_terminal", { sessionId, data }).catch(() => {});
+        }
+      });
+
+      // Handle resize
+      const observer = new ResizeObserver(() => {
+        setTimeout(() => fitAddon?.fit(), 10);
+      });
+      if (containerRef) observer.observe(containerRef);
+      onCleanup(() => observer.disconnect());
+
     } catch (e) {
       setError(String(e));
+      if (term) {
+        term.writeln(`\x1b[31mConnection failed: ${e}\x1b[0m`);
+      }
     }
   });
 
@@ -54,30 +86,24 @@ export default function SandboxTerminal(props: Props) {
     if (sessionId) {
       invoke("close_terminal", { sessionId }).catch(() => {});
     }
+    unlisten?.();
+    term?.dispose();
   });
-
-  async function sendCommand() {
-    const cmd = inputValue();
-    if (!cmd.trim() || !sessionId) return;
-    setInputValue("");
-    setLines((prev) => [...prev, `$ ${cmd}`]);
-    try {
-      await invoke("write_terminal", { sessionId, data: cmd + "\n" });
-    } catch (e) {
-      setLines((prev) => [...prev, `Error: ${e}`]);
-    }
-    setTimeout(scrollToBottom, 50);
-  }
 
   return (
     <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div class="bg-gray-900 border border-gray-700 rounded-xl w-[800px] h-[520px] flex flex-col shadow-2xl">
+      <div class="bg-[#0d1117] border border-gray-700 rounded-xl w-[850px] h-[520px] flex flex-col shadow-2xl overflow-hidden">
         {/* Header */}
-        <div class="flex items-center justify-between px-4 py-2 border-b border-gray-700 shrink-0">
+        <div class="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0">
           <div class="flex items-center gap-2">
-            <div class={`w-2 h-2 rounded-full ${connected() ? "bg-green-500" : "bg-red-500"}`} />
-            <span class="text-sm font-medium text-gray-300">
-              Terminal: {props.instanceName}
+            <div class="flex gap-1.5">
+              <button class="w-3 h-3 rounded-full bg-red-500 hover:bg-red-400"
+                onClick={props.onClose} title="Close" />
+              <div class="w-3 h-3 rounded-full bg-yellow-500" />
+              <div class="w-3 h-3 rounded-full bg-green-500" />
+            </div>
+            <span class="text-xs text-gray-400 ml-2">
+              {props.instanceName} — sandbox terminal
             </span>
           </div>
           <button
@@ -88,38 +114,8 @@ export default function SandboxTerminal(props: Props) {
           </button>
         </div>
 
-        {/* Output area */}
-        <div
-          ref={outputRef}
-          class="flex-1 overflow-y-auto p-3 font-mono text-xs text-green-400 bg-black min-h-0"
-          onClick={() => inputRef?.focus()}
-        >
-          <Show when={error()}>
-            <div class="text-red-400 mb-2">Error: {error()}</div>
-          </Show>
-          {lines().map((line) => (
-            <div class={line.startsWith("$") ? "text-gray-300" : line.startsWith("Error") ? "text-red-400" : "text-green-400"}>
-              {line || "\u00A0"}
-            </div>
-          ))}
-        </div>
-
-        {/* Input area */}
-        <div class="flex items-center border-t border-gray-700 px-3 py-2 shrink-0 bg-gray-950">
-          <span class="text-green-400 font-mono text-xs mr-2">$</span>
-          <input
-            ref={inputRef}
-            type="text"
-            class="flex-1 bg-transparent text-green-400 font-mono text-xs outline-none"
-            placeholder={connected() ? "Type command and press Enter..." : "Connecting..."}
-            disabled={!connected()}
-            value={inputValue()}
-            onInput={(e) => setInputValue(e.currentTarget.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") sendCommand();
-            }}
-          />
-        </div>
+        {/* Terminal container */}
+        <div ref={containerRef} class="flex-1 min-h-0" />
       </div>
     </div>
   );

@@ -137,6 +137,7 @@ fn main() {
             ipc::system_check,
             ipc::install_prerequisites,
             ipc::test_api_key,
+            ipc::check_chromium_installed,
             ipc::install_chromium,
             ipc::get_gateway_token,
             ipc::get_bridge_config,

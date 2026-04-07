@@ -1,5 +1,6 @@
 import { createSignal, Show, For, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type BridgeConfig = {
   enabled: boolean;
@@ -314,33 +315,42 @@ function PermRow(props: { label: string; hint: string; value: string; onChange: 
 function BrowserInstallSection() {
   const [showModal, setShowModal] = createSignal(false);
   const [installing, setInstalling] = createSignal(false);
+  const [installed, setInstalled] = createSignal<boolean | null>(null);
   const [logs, setLogs] = createSignal<string[]>([]);
   const [done, setDone] = createSignal(false);
   let logRef: HTMLDivElement | undefined;
+
+  // Check on mount
+  onMount(async () => {
+    try {
+      const result = await invoke<boolean>("check_chromium_installed", { name: "default" });
+      setInstalled(result);
+    } catch {
+      setInstalled(null);
+    }
+  });
 
   async function installChromium() {
     setShowModal(true);
     setInstalling(true);
     setDone(false);
-    setLogs(["Starting Chromium installation...", "Packages: chromium, xvfb-run, x11vnc, novnc, websockify, ttf-freefont", "Expected size: ~630MB (152 packages)", ""]);
+    setLogs(["Checking current status...", ""]);
 
-    // Heartbeat while installing
-    const heartbeat = setInterval(() => {
-      if (installing()) {
-        setLogs((l) => [...l, "Still installing, please wait..."]);
-        if (logRef) logRef.scrollTop = logRef.scrollHeight;
-      }
-    }, 15000);
+    // Listen for streaming progress
+    const unlisten = await listen<string>("chromium-install-progress", (event) => {
+      setLogs((l) => [...l, event.payload]);
+      if (logRef) setTimeout(() => { if (logRef) logRef.scrollTop = logRef.scrollHeight; }, 10);
+    });
 
     try {
       await invoke("install_chromium", { name: "default" });
-      setLogs((l) => [...l, "", "✓ Chromium installed successfully!"]);
+      setInstalled(true);
     } catch (e) {
-      setLogs((l) => [...l, "", `✗ Installation failed: ${e}`]);
+      setLogs((l) => [...l, `✗ Error: ${e}`]);
     } finally {
       setInstalling(false);
       setDone(true);
-      clearInterval(heartbeat);
+      unlisten();
       if (logRef) logRef.scrollTop = logRef.scrollHeight;
     }
   }
@@ -353,14 +363,30 @@ function BrowserInstallSection() {
           <p class="text-xs text-gray-400">
             Chromium headless is required for web scraping, CDP automation, screenshots, and CAPTCHA handling.
           </p>
+
+          {/* Status */}
+          <div class="text-sm">
+            {installed() === true && (
+              <span class="text-green-400">✓ Chromium is installed</span>
+            )}
+            {installed() === false && (
+              <span class="text-yellow-400">○ Chromium is not installed</span>
+            )}
+            {installed() === null && (
+              <span class="text-gray-500">Checking...</span>
+            )}
+          </div>
+
           <button
-            class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+            class={`px-4 py-1.5 text-sm rounded ${
+              installed() ? "bg-gray-600 hover:bg-gray-500" : "bg-indigo-600 hover:bg-indigo-500"
+            }`}
             onClick={installChromium}
           >
-            Install Chromium in default instance
+            {installed() ? "Reinstall / Update Chromium" : "Install Chromium (~630MB)"}
           </button>
           <p class="text-[10px] text-gray-500">
-            ~630MB (152 packages including GUI libraries)
+            Packages: chromium + GUI libs + noVNC. Resumes from previous partial install.
           </p>
         </div>
       </section>
@@ -368,24 +394,35 @@ function BrowserInstallSection() {
       {/* Install Progress Modal */}
       <Show when={showModal()}>
         <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[600px] h-[400px] flex flex-col shadow-2xl">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[650px] h-[420px] flex flex-col shadow-2xl">
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
               <span class="font-medium text-sm">
-                {installing() ? "Installing Chromium..." : done() ? "Installation Complete" : "Install Chromium"}
+                {installing() ? "Installing Chromium..." : done() ? "Complete" : "Install Chromium"}
               </span>
-              <Show when={done()}>
-                <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
-                  onClick={() => setShowModal(false)}>✕ Close</button>
-              </Show>
+              <div class="flex gap-2">
+                <Show when={done() && !installing()}>
+                  <button class="px-3 py-0.5 text-xs bg-gray-600 hover:bg-gray-500 rounded"
+                    onClick={installChromium}>Retry</button>
+                </Show>
+                <Show when={!installing()}>
+                  <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
+                    onClick={() => setShowModal(false)}>✕ Close</button>
+                </Show>
+              </div>
             </div>
             <div class="flex-1 overflow-y-auto p-3 font-mono text-xs bg-gray-950 min-h-0" ref={logRef}>
               {logs().map((line) => (
-                <div class={line.includes("✓") ? "text-green-400" : line.includes("✗") ? "text-red-400" : line.startsWith("Still") ? "text-gray-500" : "text-gray-400"}>
+                <div class={
+                  line.includes("✓") || line.includes("OK:") ? "text-green-400"
+                  : line.includes("✗") || line.includes("ERROR") ? "text-red-400"
+                  : line.includes("Installing") || line.includes("Fetching") ? "text-indigo-300"
+                  : "text-gray-400"
+                }>
                   {line || "\u00A0"}
                 </div>
               ))}
               <Show when={installing()}>
-                <div class="text-indigo-400 animate-pulse mt-1">Installing packages...</div>
+                <div class="text-indigo-400 animate-pulse mt-1">Working...</div>
               </Show>
             </div>
           </div>

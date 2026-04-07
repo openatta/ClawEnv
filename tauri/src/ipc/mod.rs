@@ -593,6 +593,19 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
     Ok("API key format valid".into())
 }
 
+/// Check if Chromium is installed in a sandbox instance
+#[tauri::command]
+pub async fn check_chromium_installed(name: String) -> Result<bool, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let result = backend.exec("which chromium 2>/dev/null || which chromium-browser 2>/dev/null || echo ''").await;
+    match result {
+        Ok(out) => Ok(!out.trim().is_empty()),
+        Err(_) => Ok(false),
+    }
+}
+
 /// Install Chromium + noVNC in a running sandbox instance
 #[tauri::command]
 pub async fn install_chromium(
@@ -603,20 +616,39 @@ pub async fn install_chromium(
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
 
-    let _ = app.emit("chromium-install-progress", "Installing Chromium and dependencies (~630MB)...");
+    // Check if already installed
+    let already = backend.exec("which chromium 2>/dev/null || which chromium-browser 2>/dev/null || echo ''").await.unwrap_or_default();
+    if !already.trim().is_empty() {
+        let _ = app.emit("chromium-install-progress", "Chromium is already installed!");
+        return Ok(());
+    }
 
-    let result = backend.exec(
-        "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 || apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1"
+    let _ = app.emit("chromium-install-progress", "Installing Chromium and dependencies (~630MB)...");
+    let _ = app.emit("chromium-install-progress", "Note: apk will resume from any previously downloaded packages.");
+
+    // Use exec_with_progress for streaming output
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+    let app2 = app.clone();
+    tokio::spawn(async move {
+        while let Some(line) = rx.recv().await {
+            let _ = app2.emit("chromium-install-progress", &line);
+        }
+    });
+
+    let result = backend.exec_with_progress(
+        "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 || apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1",
+        &tx,
     ).await;
+    drop(tx);
 
     match result {
         Ok(output) => {
-            let _ = app.emit("chromium-install-progress", "Chromium installed successfully");
+            let _ = app.emit("chromium-install-progress", "✓ Chromium installed successfully!");
             tracing::info!("Chromium installed in '{}': {}", name, output.chars().take(200).collect::<String>());
             Ok(())
         }
         Err(e) => {
-            let _ = app.emit("chromium-install-progress", &format!("Installation failed: {e}"));
+            let _ = app.emit("chromium-install-progress", &format!("✗ Installation failed: {e}"));
             Err(e.to_string())
         }
     }
