@@ -693,27 +693,30 @@ pub async fn start_terminal(
     let inst = instance::get_instance(&config, &instance_name).map_err(|e| e.to_string())?;
 
     // Determine shell command based on sandbox type
-    // Note: no PTY available from Rust pipes, so use explicit prompt via PS1
-    // and non-interactive shell with a read-eval loop
+    // Use SSH -tt for Lima (forces PTY allocation = proper terminal with echo/prompt)
+    // For Podman, use podman exec -it which also allocates PTY
     let (program, args) = match inst.sandbox_type {
-        clawenv_core::sandbox::SandboxType::LimaAlpine => (
-            "limactl",
-            vec![
-                "shell".to_string(),
-                format!("clawenv-{}", instance_name),
-                "--".to_string(),
-                "sh".to_string(),
-                "-i".to_string(), // interactive mode for prompt
-            ],
-        ),
+        clawenv_core::sandbox::SandboxType::LimaAlpine => {
+            // Use Lima's SSH config for proper PTY terminal
+            let vm_name = format!("clawenv-{}", instance_name);
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+            let ssh_config = format!("{}/.lima/{}/ssh.config", home, vm_name);
+            let host = format!("lima-{}", vm_name);
+
+            ("ssh", vec![
+                "-tt".to_string(),              // Force PTY allocation
+                "-F".to_string(),               // Use Lima's SSH config
+                ssh_config,
+                host,
+            ])
+        }
         clawenv_core::sandbox::SandboxType::PodmanAlpine => (
             "podman",
             vec![
                 "exec".to_string(),
-                "-i".to_string(), // interactive but no TTY
+                "-it".to_string(),
                 format!("clawenv-{}", instance_name),
                 "sh".to_string(),
-                "-i".to_string(),
             ],
         ),
         clawenv_core::sandbox::SandboxType::Wsl2Alpine => (
@@ -721,9 +724,6 @@ pub async fn start_terminal(
             vec![
                 "-d".to_string(),
                 format!("ClawEnv-Alpine-{}", instance_name),
-                "--".to_string(),
-                "sh".to_string(),
-                "-i".to_string(),
             ],
         ),
         clawenv_core::sandbox::SandboxType::Native => ("sh", vec!["-i".to_string()]),
