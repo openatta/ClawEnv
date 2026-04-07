@@ -246,8 +246,9 @@ pub async fn start_bridge(port: u16, permissions: BridgePermissions) -> anyhow::
         .route("/api/exec", post(exec_handler))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}")).await?;
-    tracing::info!("Bridge server listening on 127.0.0.1:{port}");
+    // Bind to 0.0.0.0 so sandbox VMs can reach the bridge via host IP
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
+    tracing::info!("Bridge server listening on 0.0.0.0:{port}");
     axum::serve(listener, app).await?;
     Ok(())
 }
