@@ -69,7 +69,10 @@ export default function SandboxTerminal(props: Props) {
       console.log("[Terminal] session started:", sessionId);
 
       setStatus("Connected");
-      // Don't write anything to terminal — let SSH PTY handle all output
+
+      // Wait for SSH prompt to appear before accepting input
+      // Prevents stray characters from being sent during connection setup
+      await new Promise((r) => setTimeout(r, 500));
 
       // Forward user input
       term.onData((data: string) => {
