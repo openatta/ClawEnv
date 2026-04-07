@@ -152,6 +152,7 @@ async fn main() -> Result<()> {
                 claw_version: version,
                 install_mode,
                 install_browser: browser,
+                install_mcp_bridge: true,
                 api_key: None,
                 use_native: mode == "native",
                 gateway_port: port,

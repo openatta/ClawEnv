@@ -44,6 +44,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
   // Step 4
   const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native">("online");
   const [localFilePath, setLocalFilePath] = createSignal("");
+  const [installMcpBridge, setInstallMcpBridge] = createSignal(true); // default ON
   const [installBrowser, setInstallBrowser] = createSignal(false);
 
   // Step 5
@@ -207,7 +208,8 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
       await invoke("install_openclaw", {
         instanceName: "default", clawVersion: "latest",
         apiKey: apiKey() || null, useNative: installMethod() === "native",
-        installBrowser: installBrowser(), gatewayPort: 3000,
+        installBrowser: installBrowser(), installMcpBridge: installMcpBridge(),
+        gatewayPort: 3000,
       });
     } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
   }
@@ -425,22 +427,44 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                   class="mt-3 bg-gray-800 border border-gray-600 rounded px-3 py-2 w-96 text-sm" />
               </Show>
 
-              {/* Browser Automation option */}
-              <div class="mt-4 p-3 bg-gray-800 rounded border border-gray-700">
-                <label class="flex items-start gap-3 cursor-pointer">
-                  <input type="checkbox" checked={installBrowser()} onChange={e => setInstallBrowser(e.currentTarget.checked)}
-                    class="w-4 h-4 mt-0.5 shrink-0" />
-                  <div>
-                    <div class="text-sm font-medium">Browser Automation (Chromium Headless)</div>
-                    <div class="text-xs text-gray-400 mt-1">
-                      Required for web scraping, screenshots, CDP automation, and CAPTCHA handling.
-                      Includes Chromium + noVNC for interactive sessions.
+              {/* Optional components */}
+              <div class="mt-4 space-y-3">
+                {/* MCP Bridge Plugin — default ON */}
+                <div class="p-3 bg-gray-800 rounded border border-green-700/30">
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" checked={installMcpBridge()} onChange={e => setInstallMcpBridge(e.currentTarget.checked)}
+                      class="w-4 h-4 mt-0.5 shrink-0" />
+                    <div>
+                      <div class="text-sm font-medium">MCP Bridge Plugin <span class="text-green-400 text-xs">(recommended)</span></div>
+                      <div class="text-xs text-gray-400 mt-1">
+                        Enables OpenClaw agents to access host machine files, commands, and tools
+                        through a secure, permission-controlled bridge.
+                      </div>
+                      {!installMcpBridge() && (
+                        <div class="text-xs text-yellow-500 mt-1">
+                          ⚠ Without this plugin, agents cannot access programs or data on your host machine.
+                        </div>
+                      )}
                     </div>
-                    <div class="text-xs text-yellow-500 mt-1">
-                      ⚠ Adds ~630MB (152 packages including GUI libraries). Can be installed later from Settings.
+                  </label>
+                </div>
+
+                {/* Browser Automation — default OFF */}
+                <div class="p-3 bg-gray-800 rounded border border-gray-700">
+                  <label class="flex items-start gap-3 cursor-pointer">
+                    <input type="checkbox" checked={installBrowser()} onChange={e => setInstallBrowser(e.currentTarget.checked)}
+                      class="w-4 h-4 mt-0.5 shrink-0" />
+                    <div>
+                      <div class="text-sm font-medium">Browser Automation (Chromium Headless)</div>
+                      <div class="text-xs text-gray-400 mt-1">
+                        Required for web scraping, screenshots, CDP automation, and CAPTCHA handling.
+                      </div>
+                      <div class="text-xs text-yellow-500 mt-1">
+                        ⚠ Adds ~630MB. Can be installed later from Settings.
+                      </div>
                     </div>
-                  </div>
-                </label>
+                  </label>
+                </div>
               </div>
             </div>
           )}

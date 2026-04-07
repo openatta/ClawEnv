@@ -31,6 +31,7 @@ pub struct InstallOptions {
     pub claw_version: String,
     pub install_mode: InstallMode,
     pub install_browser: bool,
+    pub install_mcp_bridge: bool,
     pub api_key: Option<String>,
     pub use_native: bool,
     pub gateway_port: u16,
@@ -43,6 +44,7 @@ impl Default for InstallOptions {
             claw_version: "latest".into(),
             install_mode: InstallMode::OnlineBuild,
             install_browser: false,
+            install_mcp_bridge: true, // default ON
             api_key: None,
             use_native: false,
             gateway_port: 3000,
@@ -302,11 +304,36 @@ async fn configure_instance(
         send(tx, "Browser components installed", 80, InstallStage::InstallBrowser).await;
     }
 
+    // --- Step: Install MCP Bridge Plugin ---
+    if opts.install_mcp_bridge {
+        send(tx, "Installing MCP Bridge plugin...", 82, InstallStage::StartOpenClaw).await;
+        // Embed the MCP bridge JS at compile time
+        let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
+        // Write to workspace directory in sandbox
+        backend.exec("mkdir -p /workspace/mcp-bridge 2>/dev/null || mkdir -p ~/mcp-bridge").await?;
+        // Use heredoc to write the file content
+        let escaped = mcp_js.replace('\'', "'\\''");
+        backend.exec(&format!(
+            "cat > ~/mcp-bridge/index.mjs << 'MCPEOF'\n{mcp_js}\nMCPEOF"
+        )).await?;
+        // Register with OpenClaw MCP config
+        let gateway_token = backend.exec(
+            "cat ~/.openclaw/openclaw.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'"
+        ).await.unwrap_or_default();
+        let token = gateway_token.trim();
+        if !token.is_empty() {
+            backend.exec(&format!(
+                "OPENCLAW_GATEWAY_URL=ws://127.0.0.1:{port} OPENCLAW_GATEWAY_TOKEN={token} openclaw mcp set clawenv '{{\"command\":\"node\",\"args\":[\"/home/clawenv/mcp-bridge/index.mjs\"]}}' 2>/dev/null || true",
+                port = opts.gateway_port, token = token
+            )).await?;
+        }
+        send(tx, "MCP Bridge plugin installed", 84, InstallStage::StartOpenClaw).await;
+    }
+
     // --- Step: Start OpenClaw ---
     send(tx, "Starting OpenClaw daemon...", 85, InstallStage::StartOpenClaw).await;
     let port = opts.gateway_port;
     backend.exec(&format!("nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &")).await?;
-    // Wait for gateway to start
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     send(tx, "OpenClaw started", 88, InstallStage::StartOpenClaw).await;
 

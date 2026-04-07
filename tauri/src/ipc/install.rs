@@ -12,6 +12,7 @@ pub async fn install_openclaw(
     api_key: Option<String>,
     use_native: bool,
     install_browser: bool,
+    install_mcp_bridge: Option<bool>,
     gateway_port: u16,
 ) -> Result<(), String> {
     let opts = install::InstallOptions {
@@ -19,6 +20,7 @@ pub async fn install_openclaw(
         claw_version,
         install_mode: InstallMode::OnlineBuild,
         install_browser,
+        install_mcp_bridge: install_mcp_bridge.unwrap_or(true),
         api_key,
         use_native,
         gateway_port,
