@@ -169,8 +169,8 @@ function VmCard(props: {
       {/* Resource info */}
       <div class="flex gap-4 mt-2 text-xs text-gray-500">
         <span>CPU: {props.vm.cpus}</span>
-        <span>RAM: {props.vm.memory}</span>
-        <span>Disk: {props.vm.disk}</span>
+        <span>RAM: {fmtSize(props.vm.memory)}</span>
+        <span>Disk: {fmtSize(props.vm.disk)}</span>
         <Show when={props.vm.dir_size && props.vm.dir_size !== "-"}>
           <span>Used: {props.vm.dir_size}</span>
         </Show>
@@ -190,7 +190,8 @@ function VmCard(props: {
           </button>
         )}
 
-        <Show when={isRunning()}>
+        {/* Terminal only for managed + running */}
+        <Show when={isRunning() && props.vm.managed}>
           <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
             onClick={() => props.onTerminal(instanceName())}>
             Terminal
@@ -215,4 +216,20 @@ function VmCard(props: {
       </div>
     </div>
   );
+}
+
+/** Format size: "4294967296"→"4.0 GB", "4GiB"��"4 GB", "100GiB"��"100 GB" */
+function fmtSize(s: string): string {
+  if (!s || s === "-") return "-";
+  const m = s.match(/^([\d.]+)\s*(GiB|MiB|KiB|GB|MB|KB|TB)/i);
+  if (m) {
+    const v = parseFloat(m[1]);
+    const u = m[2].replace("iB", "B");
+    return `${v} ${u}`;
+  }
+  const b = parseInt(s);
+  if (isNaN(b)) return s;
+  if (b >= 1073741824) return `${(b / 1073741824).toFixed(1)} GB`;
+  if (b >= 1048576) return `${(b / 1048576).toFixed(0)} MB`;
+  return s;
 }
