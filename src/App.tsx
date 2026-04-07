@@ -57,7 +57,8 @@ export default function App() {
 
       <Match when={state().type === "upgrade_available"}>
         {(() => {
-          const s = state() as { type: "upgrade_available"; instances: Instance[] };
+          const s = state();
+          if (s.type !== "upgrade_available") return null;
           return (
             <>
               <MainLayout instances={s.instances} />
@@ -74,7 +75,11 @@ export default function App() {
       </Match>
 
       <Match when={state().type === "ready"}>
-        <MainLayout instances={(state() as any).instances} />
+        {(() => {
+          const s = state();
+          if (s.type !== "ready") return null;
+          return <MainLayout instances={s.instances} />;
+        })()}
       </Match>
     </Switch>
   );

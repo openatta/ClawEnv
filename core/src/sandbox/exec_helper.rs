@@ -35,8 +35,10 @@ pub async fn exec(program: &str, args: &[&str]) -> Result<(String, String, i32)>
         .kill_on_drop(true)
         .spawn()?;
 
-    let stdout_h = child.stdout.take().unwrap();
-    let stderr_h = child.stderr.take().unwrap();
+    let stdout_h = child.stdout.take()
+        .ok_or_else(|| anyhow::anyhow!("stdout pipe not available"))?;
+    let stderr_h = child.stderr.take()
+        .ok_or_else(|| anyhow::anyhow!("stderr pipe not available"))?;
 
     let (status_result, stdout, stderr) = tokio::join!(
         child.wait(),

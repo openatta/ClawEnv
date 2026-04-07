@@ -166,16 +166,72 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
-        if !self.is_available().await? {
-            tracing::info!("Lima not found, installing via Homebrew...");
+        if self.is_available().await? {
+            return Ok(());
+        }
+
+        tracing::info!("Lima not found, attempting to install...");
+
+        // Strategy 1: Try Homebrew (if available)
+        let has_brew = Command::new("which")
+            .arg("brew")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await
+            .map(|s| s.success())
+            .unwrap_or(false);
+
+        if has_brew {
+            tracing::info!("Homebrew found, installing Lima via brew...");
             let status = Command::new("brew")
                 .args(["install", "lima"])
                 .status()
                 .await?;
-            if !status.success() {
-                anyhow::bail!("Failed to install Lima via Homebrew");
+            if status.success() {
+                return Ok(());
             }
+            tracing::warn!("Homebrew install failed, trying direct download...");
         }
+
+        // Strategy 2: Direct binary download from GitHub releases
+        tracing::info!("Downloading Lima binary directly from GitHub...");
+        let arch = match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            "x86_64" => "x86_64",
+            other => anyhow::bail!("Unsupported architecture for Lima: {other}"),
+        };
+
+        let url = format!(
+            "https://github.com/lima-vm/lima/releases/latest/download/lima-{arch}-apple-darwin.tar.gz"
+        );
+
+        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+        let install_dir = format!("{home}/.local");
+        tokio::fs::create_dir_all(&install_dir).await?;
+
+        // Download and extract
+        let status = Command::new("sh")
+            .args(["-c", &format!(
+                "curl -fsSL '{url}' | tar xz -C '{install_dir}'"
+            )])
+            .status()
+            .await?;
+
+        if !status.success() {
+            anyhow::bail!(
+                "Failed to install Lima. Please install manually:\n\
+                 - macOS: brew install lima\n\
+                 - Or download from: https://github.com/lima-vm/lima/releases"
+            );
+        }
+
+        // Add to PATH hint
+        let bin_path = format!("{install_dir}/bin");
+        if !std::env::var("PATH").unwrap_or_default().contains(&bin_path) {
+            tracing::info!("Lima installed to {bin_path}. Add to PATH: export PATH=\"{bin_path}:$PATH\"");
+        }
+
         Ok(())
     }
 

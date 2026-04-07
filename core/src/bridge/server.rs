@@ -186,10 +186,10 @@ async fn file_list_handler(
         .map_err(|e| err_json(format!("Failed to list directory: {e}")))?;
 
     while let Ok(Some(entry)) = dir.next_entry().await {
-        let meta = entry.metadata().await.unwrap_or_else(|_| {
-            // fallback: shouldn't happen often
-            std::fs::metadata(entry.path()).unwrap()
-        });
+        let meta = match entry.metadata().await {
+            Ok(m) => m,
+            Err(_) => continue, // Skip entries with unreadable metadata (broken symlinks)
+        };
         entries.push(DirEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),

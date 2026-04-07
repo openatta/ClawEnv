@@ -1026,7 +1026,9 @@ pub async fn close_terminal(session_id: String) -> Result<(), String> {
     // Remove stdin handle first
     TERMINAL_STDINS.lock().await.remove(&session_id);
     // Remove and kill child process (drop lock before await)
-    let child = TERMINAL_CHILDREN.lock().unwrap().remove(&session_id);
+    let child = TERMINAL_CHILDREN.lock()
+        .map_err(|e| format!("Terminal state corrupted: {e}"))?
+        .remove(&session_id);
     if let Some(mut child) = child {
         let _ = child.kill().await;
     }

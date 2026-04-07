@@ -168,8 +168,31 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
-        // TODO: list tar.gz files in snapshot dir
-        Ok(vec![])
+        let snap_dir = self.snapshot_dir();
+        let mut snapshots = vec![];
+        if snap_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&snap_dir).await?;
+            while let Some(entry) = entries.next_entry().await? {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) == Some("gz") {
+                    let tag = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let metadata = entry.metadata().await?;
+                    snapshots.push(SnapshotInfo {
+                        tag,
+                        created_at: metadata.modified()
+                            .ok()
+                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                            .map(|d| chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
+                            .unwrap_or_else(chrono::Utc::now),
+                        size_bytes: metadata.len(),
+                    });
+                }
+            }
+        }
+        Ok(snapshots)
     }
 
     async fn stats(&self) -> Result<ResourceStats> {

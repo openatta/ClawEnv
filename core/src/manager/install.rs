@@ -126,6 +126,23 @@ async fn do_install(
         install_mode: opts.install_mode.clone(),
     };
 
+    let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
+
+    provision_sandbox(opts, backend, &sandbox_opts, tx).await?;
+    install_dependencies(opts, backend, config, sandbox_type, tx).await?;
+    configure_instance(opts, backend, tx).await?;
+    save_instance_config(opts, config, backend, sandbox_type, tx).await?;
+
+    Ok(())
+}
+
+/// VM creation + boot verification
+async fn provision_sandbox(
+    _opts: &InstallOptions,
+    backend: &dyn SandboxBackend,
+    sandbox_opts: &SandboxOpts,
+    tx: &mpsc::Sender<InstallProgress>,
+) -> Result<()> {
     // --- Step: Create VM (skip if already exists) ---
     let vm_exists = backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false);
 
@@ -149,7 +166,7 @@ async fn do_install(
                 send(&tx_hb, msg, pct, InstallStage::CreateVm).await;
             }
         });
-        backend.create(&sandbox_opts).await?;
+        backend.create(sandbox_opts).await?;
         heartbeat.abort();
     }
 
@@ -177,6 +194,17 @@ async fn do_install(
     // Log workspace mount info (Lima's template:alpine mounts home directory by default)
     send(tx, "Workspace directory mounted at /Users/konghan/.clawenv/workspaces/default", 37, InstallStage::BootVm).await;
 
+    Ok(())
+}
+
+/// Proxy config + apk add + node check + openclaw install
+async fn install_dependencies(
+    opts: &InstallOptions,
+    backend: &dyn SandboxBackend,
+    config: &mut ConfigManager,
+    sandbox_type: SandboxType,
+    tx: &mpsc::Sender<InstallProgress>,
+) -> Result<()> {
     // --- Step: Configure Proxy (BEFORE installing packages!) ---
     let proxy_config = &config.config().clawenv.proxy;
     if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
@@ -190,7 +218,6 @@ async fn do_install(
     // --- Step: Install Dependencies ---
     // Podman: packages are pre-installed in Containerfile, skip provisioning
     // Lima/WSL2/Native: need to install packages after VM creation
-    let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
     let is_podman = sandbox_type == SandboxType::PodmanAlpine;
     let proxy_prefix = if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
         ". /etc/profile.d/proxy.sh 2>/dev/null; "
@@ -248,6 +275,15 @@ async fn do_install(
         send(tx, &format!("OpenClaw already installed: {}", installed.trim()), 65, InstallStage::InstallOpenClaw).await;
     }
 
+    Ok(())
+}
+
+/// API key storage + browser install + gateway start
+async fn configure_instance(
+    opts: &InstallOptions,
+    backend: &dyn SandboxBackend,
+    tx: &mpsc::Sender<InstallProgress>,
+) -> Result<()> {
     // --- Step: Store API Key ---
     if let Some(ref api_key) = opts.api_key {
         send(tx, "Storing API key in keychain...", 70, InstallStage::StoreApiKey).await;
@@ -260,19 +296,31 @@ async fn do_install(
     // --- Step: Install Browser (optional) ---
     if opts.install_browser {
         send(tx, "Installing Chromium + noVNC...", 75, InstallStage::InstallBrowser).await;
-        backend.exec(&format!(
-            "{proxy_prefix}sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1"
-        )).await?;
+        backend.exec(
+            "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1"
+        ).await?;
         send(tx, "Browser components installed", 80, InstallStage::InstallBrowser).await;
     }
 
     // --- Step: Start OpenClaw ---
     send(tx, "Starting OpenClaw daemon...", 85, InstallStage::StartOpenClaw).await;
-    backend.exec("nohup openclaw gateway --port 3000 --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &").await?;
+    let port = opts.gateway_port;
+    backend.exec(&format!("nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &")).await?;
     // Wait for gateway to start
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     send(tx, "OpenClaw started", 88, InstallStage::StartOpenClaw).await;
 
+    Ok(())
+}
+
+/// Config persistence
+async fn save_instance_config(
+    opts: &InstallOptions,
+    config: &mut ConfigManager,
+    backend: &dyn SandboxBackend,
+    sandbox_type: SandboxType,
+    tx: &mpsc::Sender<InstallProgress>,
+) -> Result<()> {
     // --- Step: Save Config ---
     send(tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
     let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await
