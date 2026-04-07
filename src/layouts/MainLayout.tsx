@@ -12,6 +12,7 @@ type Instance = {
   sandbox_type: string;
   version: string;
   gateway_port: number;
+  ttyd_port: number;
 };
 
 type Page = "home" | "openclaw" | "sandbox" | "settings";

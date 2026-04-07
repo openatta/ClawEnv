@@ -233,6 +233,7 @@ async fn main() -> Result<()> {
                 last_upgraded_at: String::new(),
                 openclaw: OpenClawConfig {
                     gateway_port,
+                    ttyd_port: gateway_port + 4681,
                     webchat_enabled: true,
                     channels: Default::default(),
                 },

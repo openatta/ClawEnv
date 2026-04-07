@@ -2,7 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import SandboxTerminal from "../components/Terminal";
 
-type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
+type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
 type Lang = "zh-CN" | "en";
 type StatusDetail = { processes: string; resources: string; gateway_log: string };
 
@@ -226,6 +226,7 @@ export default function Home(props: {
       {terminalFor() && (
         <SandboxTerminal
           instanceName={terminalFor()!}
+          ttydPort={props.instances.find(i => i.name === terminalFor())?.ttyd_port ?? 7681}
           onClose={() => setTerminalFor(null)}
         />
       )}

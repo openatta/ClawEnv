@@ -1,29 +1,26 @@
 import { onMount, onCleanup, createSignal } from "solid-js";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { AttachAddon } from "@xterm/addon-attach";
 
 type Props = {
   instanceName: string;
+  ttydPort?: number;
   onClose: () => void;
 };
 
 export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
-  let sessionId: string | null = null;
-  let unlisten: UnlistenFn | null = null;
-  let term: Terminal | null = null;
-  let fitAddon: FitAddon | null = null;
+  let term: Terminal | undefined;
+  let ws: WebSocket | undefined;
+  const [status, setStatus] = createSignal("Connecting...");
   const [error, setError] = createSignal("");
-  const [status, setStatus] = createSignal("Initializing...");
 
-  async function initTerminal() {
-    console.log("[Terminal] initTerminal start");
+  onMount(() => {
+    const port = props.ttydPort ?? 7681;
+    const wsUrl = `ws://127.0.0.1:${port}/ws`;
+
     try {
-      setStatus("Creating terminal...");
-      console.log("[Terminal] creating Terminal instance");
-
       term = new Terminal({
         theme: {
           background: "#0d1117",
@@ -35,87 +32,58 @@ export default function SandboxTerminal(props: Props) {
         fontFamily: "'Menlo', 'Monaco', 'Courier New', monospace",
         cursorBlink: true,
         scrollback: 5000,
-        convertEol: true,
       });
 
-      fitAddon = new FitAddon();
+      const fitAddon = new FitAddon();
       term.loadAddon(fitAddon);
 
-      if (!containerRef) {
-        setError("Container element not available");
-        return;
+      if (containerRef) {
+        term.open(containerRef);
+        setTimeout(() => fitAddon.fit(), 50);
       }
 
-      term.open(containerRef);
-      setTimeout(() => { try { fitAddon?.fit(); } catch {} }, 100);
+      // Connect via WebSocket to ttyd
+      setStatus(`Connecting to ${wsUrl}...`);
+      ws = new WebSocket(wsUrl);
 
-      setStatus("Connecting to sandbox...");
-
-      // Listen for output
-      unlisten = await listen<{ session_id: string; data: string }>(
-        "terminal-output",
-        (event) => {
-          if (event.payload.session_id === sessionId && term) {
-            term.write(event.payload.data);
-          }
+      ws.onopen = () => {
+        setStatus("Connected");
+        if (term && ws) {
+          const attachAddon = new AttachAddon(ws);
+          term.loadAddon(attachAddon);
         }
-      );
+      };
 
-      // Start session
-      console.log("[Terminal] invoking start_terminal for:", props.instanceName);
-      sessionId = await invoke<string>("start_terminal", {
-        instanceName: props.instanceName,
-      });
-      console.log("[Terminal] session started:", sessionId);
+      ws.onerror = () => {
+        setError(`WebSocket error. Is ttyd running on port ${port}?`);
+        setStatus("Error");
+      };
 
-      setStatus("Connected");
+      ws.onclose = () => {
+        setStatus("Disconnected");
+        term?.writeln("\r\n\x1b[31mConnection closed\x1b[0m");
+      };
 
-      // Wait for SSH prompt to appear before accepting input
-      // Prevents stray characters from being sent during connection setup
-      await new Promise((r) => setTimeout(r, 500));
-
-      // Forward user input
-      term.onData((data: string) => {
-        if (sessionId) {
-          invoke("write_terminal", { sessionId, data }).catch(() => {});
-        }
-      });
-
-      // Resize
+      // Resize handling
       const observer = new ResizeObserver(() => {
-        setTimeout(() => { try { fitAddon?.fit(); } catch {} }, 10);
+        setTimeout(() => fitAddon.fit(), 10);
       });
-      observer.observe(containerRef);
+      if (containerRef) observer.observe(containerRef);
       onCleanup(() => observer.disconnect());
 
     } catch (e) {
-      const msg = String(e);
-      setError(msg);
-      setStatus("Failed");
-      console.error("Terminal init error:", e);
+      setError(String(e));
     }
-  }
-
-  onMount(() => {
-    console.log("[Terminal] onMount, instanceName:", props.instanceName);
-    setTimeout(() => {
-      console.log("[Terminal] calling initTerminal, containerRef:", !!containerRef);
-      initTerminal();
-    }, 100);
   });
 
   onCleanup(() => {
-    if (sessionId) {
-      invoke("close_terminal", { sessionId }).catch(() => {});
-    }
-    unlisten?.();
-    try { term?.dispose(); } catch {}
+    ws?.close();
+    term?.dispose();
   });
 
   return (
     <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
       <div class="bg-[#0d1117] border border-gray-700 rounded-xl w-[850px] h-[520px] flex flex-col shadow-2xl overflow-hidden">
-        {/* Header */}
         <div class="flex items-center justify-between px-4 py-2 bg-gray-900 border-b border-gray-700 shrink-0">
           <div class="flex items-center gap-2">
             <div class="flex gap-1.5">
@@ -128,22 +96,14 @@ export default function SandboxTerminal(props: Props) {
               {props.instanceName} — {status()}
             </span>
           </div>
-          <button
-            class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium text-white"
-            onClick={props.onClose}
-          >
-            ✕ Close
-          </button>
+          <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium text-white"
+            onClick={props.onClose}>✕ Close</button>
         </div>
-
-        {/* Error display */}
         {error() && (
           <div class="px-4 py-2 bg-red-900/30 text-red-400 text-xs border-b border-red-700">
-            Error: {error()}
+            {error()}
           </div>
         )}
-
-        {/* Terminal container */}
         <div ref={containerRef} class="flex-1 min-h-0 p-1" />
       </div>
     </div>

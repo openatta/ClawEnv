@@ -118,46 +118,78 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
     let os_str = format!("{:?}", platform.os);
     let arch_str = format!("{:?}", platform.arch);
 
-    // Memory (macOS: sysctl hw.memsize)
+    // Memory detection (cross-platform)
     let memory_gb = {
         #[cfg(target_os = "macos")]
         {
             let out = tokio::process::Command::new("sysctl")
                 .args(["-n", "hw.memsize"])
                 .output().await;
-            match out {
-                Ok(o) => {
-                    let s = String::from_utf8_lossy(&o.stdout);
-                    s.trim().parse::<f64>().unwrap_or(0.0) / 1_073_741_824.0
-                }
-                Err(_) => 0.0,
-            }
+            out.ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()
+            }).unwrap_or(0.0) / 1_073_741_824.0
         }
-        #[cfg(not(target_os = "macos"))]
-        { 0.0 }
+        #[cfg(target_os = "linux")]
+        {
+            // /proc/meminfo: MemTotal: 16384000 kB
+            let out = tokio::fs::read_to_string("/proc/meminfo").await;
+            out.ok().and_then(|s| {
+                s.lines().find(|l| l.starts_with("MemTotal"))
+                    .and_then(|l| l.split_whitespace().nth(1))
+                    .and_then(|v| v.parse::<f64>().ok())
+            }).unwrap_or(0.0) / 1_048_576.0 // kB to GB
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let out = tokio::process::Command::new("wmic")
+                .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
+                .output().await;
+            out.ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines().find(|l| l.contains("="))
+                    .and_then(|l| l.split('=').nth(1))
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+            }).unwrap_or(0.0) / 1_073_741_824.0
+        }
     };
 
-    // Disk free space
+    // Disk free space (cross-platform)
     let disk_free_gb = {
         #[cfg(target_os = "macos")]
         {
             let out = tokio::process::Command::new("df")
                 .args(["-g", "/"])
                 .output().await;
-            match out {
-                Ok(o) => {
-                    let s = String::from_utf8_lossy(&o.stdout);
-                    // Parse "Available" column from df output
-                    s.lines().nth(1)
-                        .and_then(|line| line.split_whitespace().nth(3))
-                        .and_then(|v| v.parse::<f64>().ok())
-                        .unwrap_or(0.0)
-                }
-                Err(_) => 0.0,
-            }
+            out.ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines().nth(1)
+                    .and_then(|l| l.split_whitespace().nth(3))
+                    .and_then(|v| v.parse::<f64>().ok())
+            }).unwrap_or(0.0)
         }
-        #[cfg(not(target_os = "macos"))]
-        { 0.0 }
+        #[cfg(target_os = "linux")]
+        {
+            let out = tokio::process::Command::new("df")
+                .args(["--output=avail", "-BG", "/"])
+                .output().await;
+            out.ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines().nth(1)
+                    .and_then(|l| l.trim().trim_end_matches('G').parse::<f64>().ok())
+            }).unwrap_or(0.0)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let out = tokio::process::Command::new("wmic")
+                .args(["LogicalDisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value"])
+                .output().await;
+            out.ok().and_then(|o| {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines().find(|l| l.contains("="))
+                    .and_then(|l| l.split('=').nth(1))
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+            }).unwrap_or(0.0) / 1_073_741_824.0
+        }
     };
 
     // Sandbox backend

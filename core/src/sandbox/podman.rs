@@ -102,15 +102,49 @@ impl SandboxBackend for PodmanBackend {
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
-        if !self.is_available().await? {
-            anyhow::bail!(
-                "Podman is not installed. Please install Podman:\n\
-                 - Fedora/RHEL: sudo dnf install podman\n\
-                 - Ubuntu/Debian: sudo apt install podman\n\
-                 - Arch: sudo pacman -S podman\n\
-                 See https://podman.io/docs/installation for details."
-            );
+        if self.is_available().await? {
+            return Ok(());
         }
+
+        tracing::info!("Podman not found, attempting to install...");
+
+        // Detect package manager and try auto-install
+        let pkg_managers = [
+            ("apt-get", &["install", "-y", "podman"][..]),
+            ("dnf", &["install", "-y", "podman"][..]),
+            ("pacman", &["-S", "--noconfirm", "podman"][..]),
+            ("zypper", &["install", "-y", "podman"][..]),
+        ];
+
+        for (pm, args) in &pkg_managers {
+            let has_pm = Command::new("which")
+                .arg(pm)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status().await
+                .map(|s| s.success()).unwrap_or(false);
+
+            if has_pm {
+                tracing::info!("Found {pm}, installing podman...");
+                let status = Command::new("sudo")
+                    .arg(pm)
+                    .args(*args)
+                    .status().await?;
+                if status.success() && self.is_available().await? {
+                    return Ok(());
+                }
+                tracing::warn!("{pm} install failed, trying next...");
+            }
+        }
+
+        anyhow::bail!(
+            "Could not install Podman automatically.\n\
+             Please install manually:\n\
+             - Fedora/RHEL: sudo dnf install podman\n\
+             - Ubuntu/Debian: sudo apt install podman\n\
+             - Arch: sudo pacman -S podman\n\
+             See https://podman.io/docs/installation"
+        );
         Ok(())
     }
 

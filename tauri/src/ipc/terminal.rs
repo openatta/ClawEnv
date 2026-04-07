@@ -1,3 +1,6 @@
+// Legacy SSH terminal - kept for developer CLI access.
+// The UI now uses ttyd WebSocket (direct xterm.js connection).
+
 use std::collections::HashMap;
 use std::sync::Mutex;
 

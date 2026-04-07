@@ -1,7 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 
-type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
+type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
 
 export default function OpenClawPage(props: {
   instances: Instance[];

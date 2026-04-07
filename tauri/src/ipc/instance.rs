@@ -30,6 +30,7 @@ pub struct InstanceInfo {
     pub sandbox_type: String,
     pub version: String,
     pub gateway_port: u16,
+    pub ttyd_port: u16,
 }
 
 #[tauri::command]
@@ -44,6 +45,7 @@ pub fn list_instances() -> Result<Vec<InstanceInfo>, String> {
             sandbox_type: format!("{:?}", inst.sandbox_type),
             version: inst.version.clone(),
             gateway_port: inst.openclaw.gateway_port,
+            ttyd_port: inst.openclaw.ttyd_port,
         })
         .collect())
 }

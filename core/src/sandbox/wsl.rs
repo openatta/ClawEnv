@@ -102,16 +102,39 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
-        if !self.is_available().await? {
-            anyhow::bail!(
-                "WSL2 is not available. Please enable WSL2 on your system:\n\
+        if self.is_available().await? {
+            return Ok(());
+        }
+
+        // Check if WSL is installed but needs WSL2 default
+        let wsl_check = Command::new("wsl")
+            .args(["--status"])
+            .output().await;
+
+        let msg = match wsl_check {
+            Ok(out) if out.status.success() => {
+                // WSL exists but maybe not WSL2
+                "WSL is installed but may not be configured for WSL2.\n\
+                 Please run in PowerShell (Administrator):\n\
+                   wsl --set-default-version 2"
+                    .to_string()
+            }
+            _ => {
+                // WSL not installed at all
+                "WSL2 is not installed on your system.\n\
+                 \n\
+                 To install (requires Administrator + restart):\n\
                  1. Open PowerShell as Administrator\n\
                  2. Run: wsl --install\n\
                  3. Restart your computer\n\
-                 See https://learn.microsoft.com/en-us/windows/wsl/install for details."
-            );
-        }
-        Ok(())
+                 4. Run ClawEnv again\n\
+                 \n\
+                 See https://learn.microsoft.com/en-us/windows/wsl/install"
+                    .to_string()
+            }
+        };
+
+        anyhow::bail!("{msg}");
     }
 
     async fn create(&self, opts: &SandboxOpts) -> Result<()> {

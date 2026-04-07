@@ -304,6 +304,18 @@ async fn configure_instance(
         send(tx, "Browser components installed", 80, InstallStage::InstallBrowser).await;
     }
 
+    // --- Step: Install terminal services (ttyd + openssh) ---
+    send(tx, "Installing terminal services...", 81, InstallStage::StartOpenClaw).await;
+    backend.exec("sudo apk add --no-cache ttyd openssh 2>&1 || apk add --no-cache ttyd openssh 2>&1").await?;
+    // Generate SSH host keys if not present
+    backend.exec("sudo ssh-keygen -A 2>/dev/null || true").await?;
+    // Start ttyd on port 7681 (WebSocket terminal)
+    let ttyd_port = opts.gateway_port + 4681; // e.g. 3000 -> 7681
+    backend.exec(&format!(
+        "nohup ttyd -p {ttyd_port} -W /bin/sh > /tmp/ttyd.log 2>&1 &"
+    )).await?;
+    send(tx, "Terminal services ready", 83, InstallStage::StartOpenClaw).await;
+
     // --- Step: Install MCP Bridge Plugin ---
     if opts.install_mcp_bridge {
         send(tx, "Installing MCP Bridge plugin...", 82, InstallStage::StartOpenClaw).await;
@@ -366,6 +378,7 @@ async fn save_instance_config(
         last_upgraded_at: String::new(),
         openclaw: OpenClawConfig {
             gateway_port: opts.gateway_port,
+            ttyd_port: opts.gateway_port + 4681,
             webchat_enabled: true,
             channels: Default::default(),
         },

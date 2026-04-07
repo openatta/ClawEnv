@@ -107,6 +107,8 @@ pub struct InstanceConfig {
 pub struct OpenClawConfig {
     #[serde(default = "default_gateway_port")]
     pub gateway_port: u16,
+    #[serde(default = "default_ttyd_port")]
+    pub ttyd_port: u16,
     #[serde(default)]
     pub webchat_enabled: bool,
     #[serde(default)]
@@ -174,6 +176,7 @@ fn default_keychain_backend() -> String { "system".into() }
 fn default_no_proxy() -> String { "localhost,127.0.0.1".into() }
 fn default_claw_type() -> String { "openclaw".into() }
 fn default_gateway_port() -> u16 { 3000 }
+fn default_ttyd_port() -> u16 { 7681 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
@@ -242,6 +245,7 @@ impl Default for OpenClawConfig {
     fn default() -> Self {
         Self {
             gateway_port: 3000,
+            ttyd_port: default_ttyd_port(),
             webchat_enabled: false,
             channels: ChannelsConfig::default(),
         }

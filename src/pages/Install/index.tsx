@@ -2,7 +2,7 @@ import { createSignal, onCleanup, Show, For } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number };
+type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
 type InstallProgress = { message: string; percent: number; stage: string };
 type ConnTestResult = { endpoint: string; ok: boolean; message: string };
 type SystemProxy = { detected: boolean; source: string; http_proxy: string; https_proxy: string; no_proxy: string };
