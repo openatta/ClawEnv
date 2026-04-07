@@ -740,11 +740,13 @@ pub async fn start_terminal(
 
     tracing::info!("Starting terminal: {} {:?}", program, args);
 
+    // SSH -tt merges stdout and stderr into one PTY stream.
+    // Use stderr as null to avoid duplicate output.
     let mut child = tokio::process::Command::new(program)
         .args(&args)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null()) // PTY output goes to stdout only
         .kill_on_drop(true)
         .spawn()
         .map_err(|e| {
@@ -752,11 +754,10 @@ pub async fn start_terminal(
             e.to_string()
         })?;
 
-    tracing::info!("Terminal spawned, session_id: {}", session_id);
+    tracing::info!("Terminal spawned: {} {:?}, session_id: {}", program, args, session_id);
 
-    // Stream stdout to frontend
+    // Stream stdout (the PTY stream) to frontend
     let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
     let sid = session_id.clone();
     let app2 = app.clone();
 
@@ -773,31 +774,6 @@ pub async fn start_terminal(
                             "terminal-output",
                             serde_json::json!({
                                 "session_id": sid,
-                                "data": data,
-                            }),
-                        );
-                    }
-                    Err(_) => break,
-                }
-            }
-        }
-    });
-
-    let sid2 = session_id.clone();
-    let app3 = app.clone();
-    tokio::spawn(async move {
-        use tokio::io::AsyncReadExt;
-        if let Some(mut se) = stderr {
-            let mut buf = [0u8; 4096];
-            loop {
-                match se.read(&mut buf).await {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        let data = String::from_utf8_lossy(&buf[..n]).to_string();
-                        let _ = app3.emit(
-                            "terminal-output",
-                            serde_json::json!({
-                                "session_id": sid2,
                                 "data": data,
                             }),
                         );

@@ -69,7 +69,7 @@ export default function SandboxTerminal(props: Props) {
       console.log("[Terminal] session started:", sessionId);
 
       setStatus("Connected");
-      term.writeln(`\x1b[32mConnected to sandbox: ${props.instanceName}\x1b[0m\r\n`);
+      // Don't write anything to terminal — let SSH PTY handle all output
 
       // Forward user input
       term.onData((data: string) => {
