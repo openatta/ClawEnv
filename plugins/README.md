@@ -1,38 +1,75 @@
 # ClawEnv Plugins
 
-This directory will contain OpenClaw plugins that extend ClawEnv's
-Bridge Server as a remote MCP (Model Context Protocol) service.
+## mcp-bridge — MCP Server for Host Access
 
-## Planned Structure
+An MCP (Model Context Protocol) server that exposes ClawEnv's Bridge API
+as tools for AI agents running inside sandboxes.
+
+### Architecture
 
 ```
-plugins/
-├── mcp-bridge/          # Bridge Server as MCP remote tool provider
-│   ├── Cargo.toml
-│   └── src/
-│       ├── main.rs      # MCP server entry
-│       ├── tools/       # Tool implementations
-│       │   ├── file.rs  # File read/write/list tools
-│       │   ├── exec.rs  # Command execution tool
-│       │   └── web.rs   # Web browsing tool
-│       └── auth.rs      # Permission & auth management
-├── openclaw-skills/     # OpenClaw skill templates
-│   ├── web-scraper/
-│   ├── data-analyzer/
-│   └── email-sender/
-└── README.md
+Sandbox (Lima/Podman/WSL2)              Host Machine
+┌──────────────────────┐           ┌──────────────────┐
+│  OpenClaw Agent      │           │  ClawEnv App     │
+│       │              │           │       │          │
+│       ▼              │           │  Bridge Server   │
+│  mcp-bridge          │  HTTP     │  :3100           │
+│  (MCP stdio server)  │─────────►│  /api/file/*     │
+│                      │           │  /api/exec       │
+└──────────────────────┘           └──────────────────┘
 ```
 
-## MCP Bridge
+### Tools Provided
 
-The MCP Bridge exposes ClawEnv's Bridge Server APIs as MCP tools,
-allowing OpenClaw agents running inside sandboxes to:
+| Tool | Description | Bridge Endpoint |
+|------|-------------|-----------------|
+| `file_read` | Read host file | POST /api/file/read |
+| `file_write` | Write host file | POST /api/file/write |
+| `file_list` | List host directory | POST /api/file/list |
+| `exec` | Execute host command | POST /api/exec |
+| `browser_open` | Open URL in host browser | POST /api/exec (open cmd) |
 
-- Read/write files on the host (with permission control)
-- Execute commands on the host (with approval workflow)
-- Browse the web via host's network
-- Access host's clipboard, notifications, etc.
+### Build & Usage
 
-## Development
+```bash
+# Build (from plugins/mcp-bridge/)
+cd plugins/mcp-bridge
+cargo build --release
 
-Coming in v0.4+. See docs/12-multi-instance.md for architecture.
+# Run inside sandbox (OpenClaw connects via MCP stdio)
+./target/release/clawenv-mcp-bridge --bridge-url http://host.lima.internal:3100
+```
+
+### OpenClaw Integration
+
+Add to OpenClaw's MCP config:
+```json
+{
+  "mcpServers": {
+    "clawenv": {
+      "command": "/path/to/clawenv-mcp-bridge",
+      "args": ["--bridge-url", "http://host.lima.internal:3100"]
+    }
+  }
+}
+```
+
+### Host URL by Platform
+
+| Platform | Bridge URL |
+|----------|-----------|
+| Lima (macOS) | `http://host.lima.internal:3100` |
+| Podman (Linux) | `http://host.containers.internal:3100` |
+| WSL2 (Windows) | `http://$(cat /etc/resolv.conf \| grep nameserver \| awk '{print $2}'):3100` |
+
+### Prerequisites
+
+- ClawEnv Bridge Server enabled (Settings → Bridge → Enable)
+- Permission rules configured in Bridge settings
+
+### Security
+
+All tool calls go through Bridge Server's permission engine:
+- File access: glob whitelist/deny patterns
+- Command exec: allow/deny command lists
+- Operations requiring approval: HTTP 403 (approval UI in Phase 4)
