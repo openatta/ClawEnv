@@ -601,6 +601,7 @@ pub struct SandboxVmInfo {
     pub cpus: String,
     pub memory: String,
     pub disk: String,
+    pub dir_size: String,
     pub managed: bool,
 }
 
@@ -610,20 +611,32 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
 
     #[cfg(target_os = "macos")]
     {
-        // Lima VMs
+        let home = std::env::var("HOME").unwrap_or_default();
         let output = tokio::process::Command::new("limactl")
-            .args(["list", "--format", "{{.Name}}\t{{.Status}}\t{{.CPUs}}\t{{.Memory}}\t{{.Disk}}"])
+            .args(["list", "--format", "{{.Name}}\t{{.Status}}\t{{.CPUs}}\t{{.Memory}}\t{{.Disk}}\t{{.Dir}}"])
             .output().await.map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
             if parts.len() >= 5 {
+                // Get actual disk usage of the VM directory
+                let dir = parts.get(5).unwrap_or(&"");
+                let dir_size = if !dir.is_empty() {
+                    let expanded = dir.replace("~", &home);
+                    let du = tokio::process::Command::new("du")
+                        .args(["-sh", &expanded])
+                        .output().await.ok();
+                    du.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("-").to_string())
+                        .unwrap_or("-".to_string())
+                } else { "-".to_string() };
+
                 vms.push(SandboxVmInfo {
                     name: parts[0].to_string(),
                     status: parts[1].to_string(),
                     cpus: parts[2].to_string(),
                     memory: parts[3].to_string(),
                     disk: parts[4].to_string(),
+                    dir_size,
                     managed: parts[0].starts_with("clawenv-"),
                 });
             }
@@ -646,6 +659,7 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
                     cpus: "-".to_string(),
                     memory: "-".to_string(),
                     disk: parts.get(2).unwrap_or(&"-").to_string(),
+                    dir_size: "-".to_string(),
                     managed: parts.first().unwrap_or(&"").starts_with("clawenv-"),
                 });
             }
@@ -669,6 +683,7 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
                     cpus: "-".to_string(),
                     memory: "-".to_string(),
                     disk: "-".to_string(),
+                    dir_size: "-".to_string(),
                     managed: name.starts_with("ClawEnv"),
                 });
             }
@@ -692,6 +707,69 @@ pub async fn get_sandbox_disk_usage() -> Result<String, String> {
     {
         Ok("unknown".to_string())
     }
+}
+
+/// Perform an action on a sandbox VM (start/stop/delete)
+#[tauri::command]
+pub async fn sandbox_vm_action(vm_name: String, action: String) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        let args = match action.as_str() {
+            "start" => vec!["start", &vm_name],
+            "stop" => vec!["stop", &vm_name],
+            "delete" => vec!["delete", "--force", &vm_name],
+            _ => return Err(format!("Unknown action: {action}")),
+        };
+        let status = tokio::process::Command::new("limactl")
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("limactl {} {} failed", action, vm_name));
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let args = match action.as_str() {
+            "start" => vec!["start".to_string(), vm_name.clone()],
+            "stop" => vec!["stop".to_string(), vm_name.clone()],
+            "delete" => vec!["rm".to_string(), "-f".to_string(), vm_name.clone()],
+            _ => return Err(format!("Unknown action: {action}")),
+        };
+        let status = tokio::process::Command::new("podman")
+            .args(&args)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await.map_err(|e| e.to_string())?;
+        if !status.success() {
+            return Err(format!("podman {} {} failed", action, vm_name));
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        match action.as_str() {
+            "start" => {
+                tokio::process::Command::new("wsl")
+                    .args(["--distribution", &vm_name])
+                    .stdout(std::process::Stdio::null())
+                    .status().await.map_err(|e| e.to_string())?;
+            }
+            "stop" => {
+                tokio::process::Command::new("wsl")
+                    .args(["--terminate", &vm_name])
+                    .status().await.map_err(|e| e.to_string())?;
+            }
+            "delete" => {
+                tokio::process::Command::new("wsl")
+                    .args(["--unregister", &vm_name])
+                    .status().await.map_err(|e| e.to_string())?;
+            }
+            _ => return Err(format!("Unknown action: {action}")),
+        }
+    }
+    tracing::info!("Sandbox VM action: {} on {}", action, vm_name);
+    Ok(())
 }
 
 /// Check if Chromium is installed in a sandbox instance
