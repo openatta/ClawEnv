@@ -1,6 +1,8 @@
 import { onMount, onCleanup, createSignal } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { Terminal } from "xterm";
+import { FitAddon } from "@xterm/addon-fit";
 
 type Props = {
   instanceName: string;
@@ -11,18 +13,16 @@ export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
   let sessionId: string | null = null;
   let unlisten: UnlistenFn | null = null;
-  let term: any = null;
-  let fitAddon: any = null;
+  let term: Terminal | null = null;
+  let fitAddon: FitAddon | null = null;
   const [error, setError] = createSignal("");
   const [status, setStatus] = createSignal("Initializing...");
 
   async function initTerminal() {
+    console.log("[Terminal] initTerminal start");
     try {
-      // Dynamic import to avoid build-time issues
-      const { Terminal } = await import("xterm");
-      const { FitAddon } = await import("@xterm/addon-fit");
-
       setStatus("Creating terminal...");
+      console.log("[Terminal] creating Terminal instance");
 
       term = new Terminal({
         theme: {
@@ -62,9 +62,11 @@ export default function SandboxTerminal(props: Props) {
       );
 
       // Start session
+      console.log("[Terminal] invoking start_terminal for:", props.instanceName);
       sessionId = await invoke<string>("start_terminal", {
         instanceName: props.instanceName,
       });
+      console.log("[Terminal] session started:", sessionId);
 
       setStatus("Connected");
       term.writeln(`\x1b[32mConnected to sandbox: ${props.instanceName}\x1b[0m\r\n`);
@@ -92,8 +94,11 @@ export default function SandboxTerminal(props: Props) {
   }
 
   onMount(() => {
-    // Delay slightly to ensure DOM is ready
-    setTimeout(initTerminal, 100);
+    console.log("[Terminal] onMount, instanceName:", props.instanceName);
+    setTimeout(() => {
+      console.log("[Terminal] calling initTerminal, containerRef:", !!containerRef);
+      initTerminal();
+    }, 100);
   });
 
   onCleanup(() => {

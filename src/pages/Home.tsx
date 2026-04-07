@@ -223,12 +223,12 @@ export default function Home(props: {
       </Show>
 
       {/* Terminal Modal */}
-      <Show when={terminalFor()}>
+      {terminalFor() && (
         <SandboxTerminal
           instanceName={terminalFor()!}
           onClose={() => setTerminalFor(null)}
         />
-      </Show>
+      )}
     </div>
   );
 }

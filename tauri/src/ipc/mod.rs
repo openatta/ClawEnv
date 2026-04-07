@@ -693,18 +693,27 @@ pub async fn start_terminal(
     let inst = instance::get_instance(&config, &instance_name).map_err(|e| e.to_string())?;
 
     // Determine shell command based on sandbox type
+    // Note: no PTY available from Rust pipes, so use explicit prompt via PS1
+    // and non-interactive shell with a read-eval loop
     let (program, args) = match inst.sandbox_type {
         clawenv_core::sandbox::SandboxType::LimaAlpine => (
             "limactl",
-            vec!["shell".to_string(), format!("clawenv-{}", instance_name)],
+            vec![
+                "shell".to_string(),
+                format!("clawenv-{}", instance_name),
+                "--".to_string(),
+                "sh".to_string(),
+                "-i".to_string(), // interactive mode for prompt
+            ],
         ),
         clawenv_core::sandbox::SandboxType::PodmanAlpine => (
             "podman",
             vec![
                 "exec".to_string(),
-                "-it".to_string(),
+                "-i".to_string(), // interactive but no TTY
                 format!("clawenv-{}", instance_name),
                 "sh".to_string(),
+                "-i".to_string(),
             ],
         ),
         clawenv_core::sandbox::SandboxType::Wsl2Alpine => (
@@ -712,9 +721,12 @@ pub async fn start_terminal(
             vec![
                 "-d".to_string(),
                 format!("ClawEnv-Alpine-{}", instance_name),
+                "--".to_string(),
+                "sh".to_string(),
+                "-i".to_string(),
             ],
         ),
-        clawenv_core::sandbox::SandboxType::Native => ("sh", vec![]),
+        clawenv_core::sandbox::SandboxType::Native => ("sh", vec!["-i".to_string()]),
     };
 
     let session_id = format!(
@@ -726,6 +738,8 @@ pub async fn start_terminal(
             .as_millis()
     );
 
+    tracing::info!("Starting terminal: {} {:?}", program, args);
+
     let mut child = tokio::process::Command::new(program)
         .args(&args)
         .stdin(std::process::Stdio::piped())
@@ -733,7 +747,12 @@ pub async fn start_terminal(
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| {
+            tracing::error!("Failed to spawn terminal: {e}");
+            e.to_string()
+        })?;
+
+    tracing::info!("Terminal spawned, session_id: {}", session_id);
 
     // Stream stdout to frontend
     let stdout = child.stdout.take();
