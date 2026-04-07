@@ -312,49 +312,86 @@ function PermRow(props: { label: string; hint: string; value: string; onChange: 
 }
 
 function BrowserInstallSection() {
+  const [showModal, setShowModal] = createSignal(false);
   const [installing, setInstalling] = createSignal(false);
-  const [installMsg, setInstallMsg] = createSignal("");
+  const [logs, setLogs] = createSignal<string[]>([]);
+  const [done, setDone] = createSignal(false);
+  let logRef: HTMLDivElement | undefined;
 
   async function installChromium() {
+    setShowModal(true);
     setInstalling(true);
-    setInstallMsg("Installing Chromium (~630MB, this may take several minutes)...");
+    setDone(false);
+    setLogs(["Starting Chromium installation...", "Packages: chromium, xvfb-run, x11vnc, novnc, websockify, ttf-freefont", "Expected size: ~630MB (152 packages)", ""]);
+
+    // Heartbeat while installing
+    const heartbeat = setInterval(() => {
+      if (installing()) {
+        setLogs((l) => [...l, "Still installing, please wait..."]);
+        if (logRef) logRef.scrollTop = logRef.scrollHeight;
+      }
+    }, 15000);
+
     try {
       await invoke("install_chromium", { name: "default" });
-      setInstallMsg("Chromium installed successfully!");
+      setLogs((l) => [...l, "", "✓ Chromium installed successfully!"]);
     } catch (e) {
-      setInstallMsg(`Failed: ${e}`);
+      setLogs((l) => [...l, "", `✗ Installation failed: ${e}`]);
     } finally {
       setInstalling(false);
+      setDone(true);
+      clearInterval(heartbeat);
+      if (logRef) logRef.scrollTop = logRef.scrollHeight;
     }
   }
 
   return (
-    <section class="mb-6">
-      <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Browser Automation</h2>
-      <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 space-y-3">
-        <p class="text-xs text-gray-400">
-          Chromium headless is required for web scraping, CDP automation, screenshots, and CAPTCHA handling.
-          It can be installed into any running sandbox instance.
-        </p>
-        <div class="flex items-center gap-3">
+    <>
+      <section class="mb-6">
+        <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Browser Automation</h2>
+        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 space-y-3">
+          <p class="text-xs text-gray-400">
+            Chromium headless is required for web scraping, CDP automation, screenshots, and CAPTCHA handling.
+          </p>
           <button
-            class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
-            disabled={installing()}
+            class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
             onClick={installChromium}
           >
-            {installing() ? "Installing..." : "Install Chromium in default instance"}
+            Install Chromium in default instance
           </button>
+          <p class="text-[10px] text-gray-500">
+            ~630MB (152 packages including GUI libraries)
+          </p>
         </div>
-        <Show when={installMsg()}>
-          <div class={`text-xs ${installMsg().includes("Failed") ? "text-red-400" : installMsg().includes("success") ? "text-green-400" : "text-gray-400"}`}>
-            {installMsg()}
+      </section>
+
+      {/* Install Progress Modal */}
+      <Show when={showModal()}>
+        <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[600px] h-[400px] flex flex-col shadow-2xl">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
+              <span class="font-medium text-sm">
+                {installing() ? "Installing Chromium..." : done() ? "Installation Complete" : "Install Chromium"}
+              </span>
+              <Show when={done()}>
+                <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
+                  onClick={() => setShowModal(false)}>✕ Close</button>
+              </Show>
+            </div>
+            <div class="flex-1 overflow-y-auto p-3 font-mono text-xs bg-gray-950 min-h-0" ref={logRef}>
+              {logs().map((line) => (
+                <div class={line.includes("✓") ? "text-green-400" : line.includes("✗") ? "text-red-400" : line.startsWith("Still") ? "text-gray-500" : "text-gray-400"}>
+                  {line || "\u00A0"}
+                </div>
+              ))}
+              <Show when={installing()}>
+                <div class="text-indigo-400 animate-pulse mt-1">Installing packages...</div>
+              </Show>
+            </div>
           </div>
-        </Show>
-        <p class="text-[10px] text-gray-500">
-          Packages: chromium, xvfb-run, x11vnc, novnc, websockify, ttf-freefont (~630MB total)
-        </p>
-      </div>
-    </section>
+        </div>
+      </Show>
+    </>
   );
 }
 
