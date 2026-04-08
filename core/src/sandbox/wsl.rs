@@ -17,7 +17,6 @@ impl WslBackend {
         }
     }
 
-    /// Base directory for WSL distro storage
     fn distro_dir(&self) -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -25,7 +24,6 @@ impl WslBackend {
             .join(&self.distro_name))
     }
 
-    /// Directory for snapshot storage
     fn snapshot_dir(&self) -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -33,7 +31,6 @@ impl WslBackend {
             .join(&self.distro_name))
     }
 
-    /// Cache directory for downloaded rootfs images
     fn cache_dir() -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -52,7 +49,6 @@ impl WslBackend {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    /// Download Alpine minirootfs for WSL import
     async fn download_alpine_rootfs(alpine_version: &str) -> Result<PathBuf> {
         use std::io::Write;
 
@@ -106,28 +102,29 @@ impl SandboxBackend for WslBackend {
             return Ok(());
         }
 
-        // Check if WSL is installed but needs WSL2 default
         let wsl_check = Command::new("wsl")
             .args(["--status"])
             .output().await;
 
         let msg = match wsl_check {
             Ok(out) if out.status.success() => {
-                // WSL exists but maybe not WSL2
                 "WSL is installed but may not be configured for WSL2.\n\
                  Please run in PowerShell (Administrator):\n\
                    wsl --set-default-version 2"
                     .to_string()
             }
             _ => {
-                // WSL not installed at all
+                // WSL2 not installed — need system restart after install
                 "WSL2 is not installed on your system.\n\
                  \n\
-                 To install (requires Administrator + restart):\n\
+                 To install (requires Administrator + system restart):\n\
                  1. Open PowerShell as Administrator\n\
                  2. Run: wsl --install\n\
                  3. Restart your computer\n\
                  4. Run ClawEnv again\n\
+                 \n\
+                 Note: A system restart is required after WSL2 installation.\n\
+                 ClawEnv cannot proceed until WSL2 is available.\n\
                  \n\
                  See https://learn.microsoft.com/en-us/windows/wsl/install"
                     .to_string()
@@ -147,7 +144,6 @@ impl SandboxBackend for WslBackend {
                 let rootfs_path = match source {
                     ImageSource::LocalFile { path } => path.clone(),
                     ImageSource::Remote { url, checksum_sha256 } => {
-                        // Download and verify the image
                         use std::io::Write;
                         let cache_dir = Self::cache_dir()?;
                         tokio::fs::create_dir_all(&cache_dir).await?;
@@ -162,15 +158,10 @@ impl SandboxBackend for WslBackend {
                                 anyhow::bail!("Download failed: HTTP {}", resp.status());
                             }
                             let bytes = resp.bytes().await?;
-
-                            // Verify checksum
                             let hash = sha256_hex(&bytes);
                             if hash != *checksum_sha256 {
-                                anyhow::bail!(
-                                    "Checksum mismatch: expected {checksum_sha256}, got {hash}"
-                                );
+                                anyhow::bail!("Checksum mismatch: expected {checksum_sha256}, got {hash}");
                             }
-
                             let mut file = std::fs::File::create(&dest)?;
                             file.write_all(&bytes)?;
                         }
@@ -178,40 +169,101 @@ impl SandboxBackend for WslBackend {
                     }
                 };
                 self.wsl_cmd(&[
-                    "--import",
-                    &self.distro_name,
-                    &distro_path,
-                    &rootfs_path.to_string_lossy(),
-                    "--version", "2",
+                    "--import", &self.distro_name, &distro_path,
+                    &rootfs_path.to_string_lossy(), "--version", "2",
                 ]).await?;
             }
             InstallMode::OnlineBuild => {
-                // Download Alpine minirootfs
+                // Download Alpine minirootfs and import
                 let rootfs = Self::download_alpine_rootfs(&opts.alpine_version).await?;
-
-                // Import into WSL2
                 self.wsl_cmd(&[
-                    "--import",
-                    &self.distro_name,
-                    &distro_path,
-                    &rootfs.to_string_lossy(),
-                    "--version", "2",
+                    "--import", &self.distro_name, &distro_path,
+                    &rootfs.to_string_lossy(), "--version", "2",
                 ]).await?;
 
-                // Install base packages
-                self.exec("apk update && apk add --no-cache nodejs npm git curl bash ca-certificates").await?;
+                // Run provision as a single script inside WSL (avoids pipe timeout)
+                // Write script → run with nohup → poll done file
+                let proxy = &opts.proxy_script;
+                let version = &opts.claw_version;
+                let browser_cmd = if opts.install_browser {
+                    "apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
+                } else {
+                    "echo 'browser skipped'"
+                };
 
-                // Install OpenClaw
+                let provision_script = format!(r#"#!/bin/sh
+LOG=/tmp/clawenv-provision.log
+DONE=/tmp/clawenv-provision.done
+rm -f "$LOG" "$DONE"
+
+echo "STAGE:proxy" > "$LOG"
+{proxy}
+
+echo "STAGE:packages" >> "$LOG"
+apk update >> "$LOG" 2>&1
+apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3 >> "$LOG" 2>&1
+
+echo "STAGE:user" >> "$LOG"
+adduser -D -s /bin/bash clawenv >> "$LOG" 2>&1 || true
+echo "clawenv ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
+
+echo "STAGE:ssh" >> "$LOG"
+ssh-keygen -A >> "$LOG" 2>&1
+
+echo "STAGE:openclaw" >> "$LOG"
+npm install -g --loglevel http openclaw@{version} >> "$LOG" 2>&1
+
+echo "STAGE:browser" >> "$LOG"
+{browser_cmd} >> "$LOG" 2>&1
+
+echo "STAGE:done" >> "$LOG"
+echo "0" > "$DONE"
+"#);
+
+                // Write provision script into WSL
                 self.exec(&format!(
-                    "npm install -g openclaw@{} && openclaw --version",
-                    opts.claw_version
+                    "cat > /tmp/clawenv-provision.sh << 'PROVEOF'\n{provision_script}\nPROVEOF"
                 )).await?;
+                self.exec("chmod +x /tmp/clawenv-provision.sh").await?;
 
-                // Optional: install browser packages
-                if opts.install_browser {
-                    self.exec(
-                        "apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
-                    ).await?;
+                // Run in background (decoupled from pipe)
+                self.exec("nohup sh /tmp/clawenv-provision.sh > /dev/null 2>&1 &").await?;
+
+                // Poll for completion
+                let mut elapsed = 0u64;
+                let mut last_lines = 0usize;
+                let mut idle = 0u64;
+                loop {
+                    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                    elapsed += 5;
+
+                    let done = self.exec("cat /tmp/clawenv-provision.done 2>/dev/null || echo ''").await.unwrap_or_default();
+                    let log = self.exec(&format!(
+                        "tail -n +{} /tmp/clawenv-provision.log 2>/dev/null | head -30 || echo ''",
+                        last_lines + 1
+                    )).await.unwrap_or_default();
+
+                    let new_lines: Vec<&str> = log.lines().filter(|l| !l.trim().is_empty()).collect();
+                    if !new_lines.is_empty() {
+                        idle = 0;
+                        last_lines += new_lines.len();
+                        tracing::info!("[WSL provision {elapsed}s] {}", new_lines.last().unwrap_or(&""));
+                    } else {
+                        idle += 5;
+                    }
+
+                    if !done.trim().is_empty() {
+                        self.exec("rm -f /tmp/clawenv-provision.sh /tmp/clawenv-provision.log /tmp/clawenv-provision.done").await.ok();
+                        let rc: i32 = done.trim().parse().unwrap_or(-1);
+                        if rc != 0 {
+                            anyhow::bail!("WSL provision failed (exit {rc})");
+                        }
+                        break;
+                    }
+
+                    if idle >= 600 {
+                        anyhow::bail!("WSL provision stalled — no output for 10 min");
+                    }
                 }
             }
         }
@@ -219,7 +271,6 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn start(&self) -> Result<()> {
-        // WSL2 auto-starts on exec; run a no-op to ensure the distro is running
         self.wsl_cmd(&["-d", &self.distro_name, "--", "echo", "started"]).await?;
         Ok(())
     }
@@ -231,7 +282,6 @@ impl SandboxBackend for WslBackend {
 
     async fn destroy(&self) -> Result<()> {
         self.wsl_cmd(&["--unregister", &self.distro_name]).await?;
-        // Clean up local directory
         let distro_dir = self.distro_dir()?;
         if distro_dir.exists() {
             tokio::fs::remove_dir_all(&distro_dir).await?;
@@ -240,7 +290,6 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Plan C: spawn with pipes, join!(wait, read, read) with timeout
         let args = ["-d", self.distro_name.as_str(), "--", "sh", "-c", cmd];
         let (stdout, stderr, rc) = super::exec_helper::exec("wsl", &args).await?;
         if rc != 0 {
@@ -264,13 +313,7 @@ impl SandboxBackend for WslBackend {
         let snap_dir = self.snapshot_dir()?;
         tokio::fs::create_dir_all(&snap_dir).await?;
         let snapshot_path = snap_dir.join(format!("{tag}.tar.gz"));
-
-        self.wsl_cmd(&[
-            "--export",
-            &self.distro_name,
-            &snapshot_path.to_string_lossy(),
-        ]).await?;
-
+        self.wsl_cmd(&["--export", &self.distro_name, &snapshot_path.to_string_lossy()]).await?;
         tracing::info!("Snapshot '{}' created at {}", tag, snapshot_path.display());
         Ok(())
     }
@@ -284,19 +327,11 @@ impl SandboxBackend for WslBackend {
 
         let distro_dir = self.distro_dir()?;
         let distro_path = distro_dir.to_string_lossy().to_string();
-
-        // Unregister existing distro
         self.wsl_cmd(&["--unregister", &self.distro_name]).await?;
-
-        // Re-import from snapshot
         self.wsl_cmd(&[
-            "--import",
-            &self.distro_name,
-            &distro_path,
-            &snapshot_path.to_string_lossy(),
-            "--version", "2",
+            "--import", &self.distro_name, &distro_path,
+            &snapshot_path.to_string_lossy(), "--version", "2",
         ]).await?;
-
         tracing::info!("Snapshot '{}' restored", tag);
         Ok(())
     }
@@ -313,21 +348,12 @@ impl SandboxBackend for WslBackend {
         while let Some(entry) = entries.next_entry().await? {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("gz") {
-                let tag = path
-                    .file_stem()
-                    .and_then(|s| s.to_str())
-                    .unwrap_or("")
-                    .trim_end_matches(".tar")
-                    .to_string();
+                let tag = path.file_stem().and_then(|s| s.to_str())
+                    .unwrap_or("").trim_end_matches(".tar").to_string();
                 let metadata = entry.metadata().await?;
-                let created = metadata.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                let created = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
                 let created_at: chrono::DateTime<chrono::Utc> = created.into();
-
-                snapshots.push(SnapshotInfo {
-                    tag,
-                    created_at,
-                    size_bytes: metadata.len(),
-                });
+                snapshots.push(SnapshotInfo { tag, created_at, size_bytes: metadata.len() });
             }
         }
 
@@ -336,12 +362,8 @@ impl SandboxBackend for WslBackend {
 
     async fn stats(&self) -> Result<ResourceStats> {
         let output = self.wsl_cmd(&["--list", "--verbose"]).await?;
-
-        // Parse `wsl --list --verbose` output for the distro status
         for line in output.lines() {
             if line.contains(&self.distro_name) {
-                // WSL doesn't provide detailed resource stats via CLI;
-                // return defaults indicating the distro is registered.
                 return Ok(ResourceStats {
                     cpu_percent: 0.0,
                     memory_used_mb: 0,
@@ -349,7 +371,6 @@ impl SandboxBackend for WslBackend {
                 });
             }
         }
-
         Ok(ResourceStats::default())
     }
 
@@ -357,22 +378,120 @@ impl SandboxBackend for WslBackend {
         if !path.exists() {
             anyhow::bail!("Image file not found: {}", path.display());
         }
-
         let distro_dir = self.distro_dir()?;
         tokio::fs::create_dir_all(&distro_dir).await?;
         let distro_path = distro_dir.to_string_lossy().to_string();
-
         self.wsl_cmd(&[
-            "--import",
-            &self.distro_name,
-            &distro_path,
-            &path.to_string_lossy(),
-            "--version", "2",
+            "--import", &self.distro_name, &distro_path,
+            &path.to_string_lossy(), "--version", "2",
         ]).await?;
-
         tracing::info!("Image imported as WSL distro '{}'", self.distro_name);
         Ok(())
     }
+
+    // ---- Management operations ----
+
+    async fn rename(&self, new_name: &str) -> Result<String> {
+        // WSL has no rename command — export → unregister → import with new name
+        let snap_dir = Self::cache_dir()?;
+        tokio::fs::create_dir_all(&snap_dir).await?;
+        let tmp_export = snap_dir.join("_rename_tmp.tar.gz");
+
+        // Export current distro
+        self.wsl_cmd(&["--export", &self.distro_name, &tmp_export.to_string_lossy()]).await?;
+
+        // Unregister old
+        self.wsl_cmd(&["--unregister", &self.distro_name]).await?;
+        let old_dir = self.distro_dir()?;
+        if old_dir.exists() {
+            tokio::fs::remove_dir_all(&old_dir).await?;
+        }
+
+        // Import with new name
+        let new_distro = format!("ClawEnv-{new_name}");
+        let new_dir = dirs::home_dir()
+            .ok_or_else(|| anyhow!("Cannot find home directory"))?
+            .join(".clawenv/wsl")
+            .join(&new_distro);
+        tokio::fs::create_dir_all(&new_dir).await?;
+
+        let result = Command::new("wsl")
+            .args(["--import", &new_distro, &new_dir.to_string_lossy(), &tmp_export.to_string_lossy(), "--version", "2"])
+            .output().await?;
+
+        // Cleanup temp file
+        tokio::fs::remove_file(&tmp_export).await.ok();
+
+        if !result.status.success() {
+            anyhow::bail!("Failed to import renamed distro: {}", String::from_utf8_lossy(&result.stderr));
+        }
+
+        Ok(new_distro)
+    }
+
+    async fn edit_resources(&self, cpus: Option<u32>, memory_mb: Option<u32>, _disk_gb: Option<u32>) -> Result<()> {
+        // WSL2 resources are configured via %USERPROFILE%\.wslconfig (global for all distros)
+        let home = std::env::var("USERPROFILE")
+            .or_else(|_| std::env::var("HOME"))
+            .unwrap_or_else(|_| ".".into());
+        let wslconfig_path = PathBuf::from(&home).join(".wslconfig");
+
+        let mut config = if wslconfig_path.exists() {
+            tokio::fs::read_to_string(&wslconfig_path).await.unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        // Ensure [wsl2] section exists
+        if !config.contains("[wsl2]") {
+            config.push_str("\n[wsl2]\n");
+        }
+
+        // Update or add settings
+        if let Some(c) = cpus {
+            config = set_wslconfig_value(&config, "processors", &c.to_string());
+        }
+        if let Some(m) = memory_mb {
+            let gb = format!("{}GB", m / 1024);
+            config = set_wslconfig_value(&config, "memory", &gb);
+        }
+
+        tokio::fs::write(&wslconfig_path, &config).await?;
+        tracing::info!("Updated .wslconfig: cpus={:?}, memory={:?}", cpus, memory_mb);
+        Ok(())
+    }
+
+    fn supports_rename(&self) -> bool { true }
+    fn supports_resource_edit(&self) -> bool { true }
+    // WSL2 auto-forwards localhost ports, no portForwards needed
+    fn supports_port_edit(&self) -> bool { false }
+}
+
+/// Update or insert a key=value in .wslconfig under [wsl2] section
+fn set_wslconfig_value(config: &str, key: &str, value: &str) -> String {
+    let mut lines: Vec<String> = config.lines().map(|l| l.to_string()).collect();
+    let key_lower = key.to_lowercase();
+
+    // Find existing key
+    let mut found = false;
+    for line in lines.iter_mut() {
+        let trimmed = line.trim().to_lowercase();
+        if trimmed.starts_with(&key_lower) && trimmed.contains('=') {
+            *line = format!("{}={}", key, value);
+            found = true;
+            break;
+        }
+    }
+
+    if !found {
+        // Insert after [wsl2] line
+        let insert_pos = lines.iter().position(|l| l.trim() == "[wsl2]")
+            .map(|i| i + 1)
+            .unwrap_or(lines.len());
+        lines.insert(insert_pos, format!("{}={}", key, value));
+    }
+
+    lines.join("\n")
 }
 
 fn sha256_hex(data: &[u8]) -> String {
