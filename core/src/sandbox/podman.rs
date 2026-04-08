@@ -368,6 +368,32 @@ impl SandboxBackend for PodmanBackend {
         tracing::info!("Image loaded from {}", path.display());
         Ok(())
     }
+
+    async fn rename(&self, new_name: &str) -> Result<String> {
+        let new_container = format!("clawenv-{new_name}");
+        self.podman(&["rename", &self.container_name, &new_container]).await?;
+        Ok(new_container)
+    }
+
+    async fn edit_resources(&self, cpus: Option<u32>, memory_mb: Option<u32>, _disk_gb: Option<u32>) -> Result<()> {
+        let mut args = vec!["update".to_string(), self.container_name.clone()];
+        if let Some(c) = cpus {
+            args.push("--cpus".into());
+            args.push(c.to_string());
+        }
+        if let Some(m) = memory_mb {
+            args.push("--memory".into());
+            args.push(format!("{m}m"));
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.podman(&arg_refs).await?;
+        Ok(())
+    }
+
+    fn supports_rename(&self) -> bool { true }
+    fn supports_resource_edit(&self) -> bool { true }
+    // Port is bound at `podman run -p`, changing requires container recreation
+    fn supports_port_edit(&self) -> bool { false }
 }
 
 /// Parse a memory string like "128MiB", "2GiB", "512MB" into megabytes

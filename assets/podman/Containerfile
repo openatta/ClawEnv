@@ -1,13 +1,34 @@
 FROM alpine:latest
 LABEL maintainer="ClawEnv"
-RUN apk update && apk add --no-cache nodejs npm git curl bash ca-certificates && rm -rf /var/cache/apk/*
+
+# System packages + build tools for native npm modules
+RUN apk update && apk add --no-cache \
+    nodejs npm git curl bash ca-certificates \
+    ttyd openssh build-base python3 \
+    && rm -rf /var/cache/apk/*
+
+# Generate SSH host keys
+RUN ssh-keygen -A
+
+# Install OpenClaw
 ARG OPENCLAW_VERSION=latest
 RUN npm install -g openclaw@${OPENCLAW_VERSION} && openclaw --version
+
+# Optional: browser automation
 ARG INSTALL_BROWSER=false
-RUN if [ "$INSTALL_BROWSER" = "true" ]; then apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont; fi
-RUN adduser -D -s /bin/ash clawuser && mkdir -p /home/clawuser/.openclaw && chown -R clawuser:clawuser /home/clawuser
-USER clawuser
-WORKDIR /home/clawuser
-VOLUME ["/workspace", "/home/clawuser/.openclaw"]
+RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
+    apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont; \
+    fi
+
+# Create clawenv user (consistent across Lima/WSL2/Podman)
+RUN adduser -D -s /bin/bash clawenv \
+    && echo "clawenv ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
+    && mkdir -p /home/clawenv/.openclaw /workspace \
+    && chown -R clawenv:clawenv /home/clawenv /workspace
+
+USER clawenv
+WORKDIR /home/clawenv
+
+VOLUME ["/workspace", "/home/clawenv/.openclaw"]
 EXPOSE 3000
 CMD ["openclaw", "gateway", "--port", "3000", "--allow-unconfigured"]
