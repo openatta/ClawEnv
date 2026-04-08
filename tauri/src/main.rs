@@ -129,6 +129,9 @@ fn main() {
             ipc::install_openclaw,
             ipc::start_instance,
             ipc::stop_instance,
+            ipc::delete_instance,
+            ipc::open_install_window,
+            ipc::get_sandbox_ip,
             ipc::get_instance_health,
             ipc::save_settings,
             ipc::test_proxy,
@@ -151,6 +154,13 @@ fn main() {
             ipc::open_url_in_browser,
             ipc::create_default_config,
         ])
+        .on_window_event(|window, event| {
+            // Close button hides the window instead of quitting — app stays in tray
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("error while running ClawEnv");
 }

@@ -23,7 +23,7 @@ const INSTALL_STAGES = [
   { key: "save_config", label: "保存配置 / Save Config" },
 ];
 
-export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void }) {
+export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void; defaultInstanceName?: string }) {
   const [step, setStep] = createSignal(1);
   const totalSteps = 7;
 
@@ -40,6 +40,27 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
   const [connTesting, setConnTesting] = createSignal(false);
   const [connResults, setConnResults] = createSignal<ConnTestResult[]>([]);
   const [connLog, setConnLog] = createSignal<string[]>([]);
+
+  // Instance name + validation
+  const [instanceName, setInstanceName] = createSignal(props.defaultInstanceName || "default");
+  const [existingNames, setExistingNames] = createSignal<string[]>([]);
+
+  // Fetch existing instance names on mount
+  (async () => {
+    try {
+      const list = await invoke<{ name: string }[]>("list_instances");
+      setExistingNames(list.map(i => i.name));
+    } catch { /* ignore */ }
+  })();
+
+  const nameError = () => {
+    const name = instanceName();
+    if (!name) return "Name is required";
+    if (name.length > 63) return "Name too long (max 63)";
+    if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]*$/.test(name)) return "Only letters, numbers, underscore, hyphen. Must start with letter/number.";
+    if (existingNames().includes(name)) return `Instance "${name}" already exists`;
+    return "";
+  };
 
   // Step 4
   const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native">("online");
@@ -214,7 +235,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
 
     try {
       await invoke("install_openclaw", {
-        instanceName: "default", clawVersion: "latest",
+        instanceName: instanceName(), clawVersion: "latest",
         apiKey: apiKey() || null, useNative: installMethod() === "native",
         installBrowser: installBrowser(), installMcpBridge: installMcpBridge(),
         gatewayPort: 3000,
@@ -320,6 +341,27 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                     </ul>
                     <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
                   </>)}
+                </div>
+
+                {/* Instance name */}
+                <div class="mt-4">
+                  <label class="block text-sm text-gray-400 mb-1">
+                    {zh ? "实例名称" : "Instance Name"}
+                  </label>
+                  <input
+                    type="text"
+                    value={instanceName()}
+                    onInput={(e) => setInstanceName(e.currentTarget.value.replace(/[^a-zA-Z0-9_-]/g, ""))}
+                    placeholder="default"
+                    class={`bg-gray-800 border rounded px-3 py-2 w-64 text-sm ${nameError() ? "border-red-500" : "border-gray-600"}`}
+                  />
+                  {nameError() ? (
+                    <p class="text-xs text-red-400 mt-1">{nameError()}</p>
+                  ) : (
+                    <p class="text-xs text-gray-500 mt-1">
+                      {zh ? "字母、数字、连字符、下划线，用于区分多个实例" : "Letters, numbers, hyphens, underscores. Used to identify this instance."}
+                    </p>
+                  )}
                 </div>
               </div>
             );
@@ -600,7 +642,8 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
             </Show>
             {/* Other steps */}
             <Show when={step() < 5 && step() < totalSteps}>
-              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed"
+                disabled={step() === 1 && !!nameError()}
                 onClick={() => goToStep(step() + 1)}>
                 Next
               </button>

@@ -1,7 +1,7 @@
 {
   "identifier": "default",
   "description": "Default permissions for ClawEnv",
-  "windows": ["main"],
+  "windows": ["main", "install-*"],
   "permissions": [
     "core:default",
     "core:event:default",

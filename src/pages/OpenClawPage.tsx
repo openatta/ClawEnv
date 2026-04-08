@@ -6,6 +6,8 @@ type Instance = { name: string; sandbox_type: string; version: string; gateway_p
 export default function OpenClawPage(props: {
   instances: Instance[];
   healths: Record<string, string>;
+  onInstancesChanged?: () => void;
+  onAddInstance?: () => void;
 }) {
   const [activeTab, setActiveTab] = createSignal(props.instances[0]?.name ?? "");
 
@@ -20,53 +22,74 @@ export default function OpenClawPage(props: {
     return "bg-red-500";
   }
 
+  const [actionLoading, setActionLoading] = createSignal<string | null>(null);
+  const [actionError, setActionError] = createSignal("");
+  const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
   const [gatewayToken, setGatewayToken] = createSignal("");
 
-  // Fetch gateway token when tab changes
   async function fetchToken() {
-    const name = activeTab();
     try {
-      const token = await invoke<string>("get_gateway_token", { name });
+      const token = await invoke<string>("get_gateway_token", { name: activeTab() });
       setGatewayToken(token);
-    } catch {
-      setGatewayToken("");
-    }
+    } catch { setGatewayToken(""); }
   }
-  // Fetch on first render
   fetchToken();
 
-  async function openInBrowser() {
-    const name = activeTab();
-    const inst = props.instances.find((i) => i.name === name);
-    const port = inst?.gateway_port ?? 3000;
-    const token = gatewayToken();
-    const url = token
-      ? `http://127.0.0.1:${port}/?token=${token}`
-      : `http://127.0.0.1:${port}`;
+  async function doAction(action: string) {
+    setActionLoading(action);
+    setActionError("");
     try {
-      await invoke("open_url_in_browser", { url });
+      if (action === "start") {
+        await invoke("start_instance", { name: activeTab() });
+      } else if (action === "stop") {
+        await invoke("stop_instance", { name: activeTab() });
+      } else if (action === "restart") {
+        await invoke("stop_instance", { name: activeTab() });
+        await invoke("start_instance", { name: activeTab() });
+      }
+      props.onInstancesChanged?.();
     } catch (e) {
-      prompt("Could not open browser. Copy this URL:", url);
+      setActionError(String(e));
+    } finally {
+      setActionLoading(null);
     }
   }
 
-  async function startInstance() {
+  async function doDelete() {
+    setShowDeleteConfirm(false);
+    setActionLoading("delete");
+    setActionError("");
     try {
-      await invoke("start_instance", { name: activeTab() });
+      await invoke("delete_instance", { name: activeTab() });
+      props.onInstancesChanged?.();
     } catch (e) {
-      console.error("Failed to start:", e);
+      setActionError(String(e));
+    } finally {
+      setActionLoading(null);
     }
   }
+
+  async function openInBrowser() {
+    const inst = activeInstance();
+    const port = inst?.gateway_port ?? 3000;
+    const token = gatewayToken();
+    const url = token ? `http://127.0.0.1:${port}/?token=${token}` : `http://127.0.0.1:${port}`;
+    try { await invoke("open_url_in_browser", { url }); }
+    catch { prompt("Copy this URL:", url); }
+  }
+
+  const loading = (action: string) => actionLoading() === action;
 
   return (
     <div class="h-full flex flex-col">
-      {/* Top bar */}
+      {/* Top bar with + button */}
       <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800 shrink-0">
         <span class="font-medium">OpenClaw</span>
-        <div class="flex items-center gap-2">
-          <div class={`w-2 h-2 rounded-full ${healthColor(activeTab())}`} />
-          <span class="text-sm text-gray-400">{activeHealth()}</span>
-        </div>
+        <button
+          class="w-6 h-6 flex items-center justify-center rounded bg-gray-700 hover:bg-indigo-600 text-sm font-bold"
+          title="New Instance"
+          onClick={() => props.onAddInstance?.()}
+        >+</button>
       </div>
 
       {/* Tab bar */}
@@ -79,12 +102,11 @@ export default function OpenClawPage(props: {
                   ? "border-indigo-500 text-white"
                   : "border-transparent text-gray-400 hover:text-gray-200"
               }`}
-              onClick={() => setActiveTab(inst.name)}
+              onClick={() => { setActiveTab(inst.name); fetchToken(); }}
             >
               <span class="flex items-center gap-1.5">
                 <span class={`w-1.5 h-1.5 rounded-full ${healthColor(inst.name)}`} />
                 {inst.name}
-                <span class="text-xs text-gray-500">({inst.sandbox_type.toLowerCase()})</span>
               </span>
             </button>
           )}
@@ -93,70 +115,102 @@ export default function OpenClawPage(props: {
 
       {/* Content area */}
       <div class="flex-1 flex items-center justify-center bg-gray-950">
-        {/* No instance */}
         <Show when={!activeInstance()}>
-          <div class="text-gray-500">No instance selected</div>
+          <div class="text-center text-gray-500">
+            <p class="mb-4">No instances yet</p>
+            <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+              onClick={() => props.onAddInstance?.()}>Create Instance</button>
+          </div>
         </Show>
 
-        {/* Instance running */}
-        <Show when={activeInstance() && isRunning()}>
-          <div class="text-center max-w-lg">
-            <div class="mb-6">
-              <span class="text-5xl">🦞</span>
+        <Show when={activeInstance()}>
+          <div class="text-center max-w-lg w-full">
+            {/* Icon + status */}
+            <div class="mb-4">
+              <span class={`text-5xl ${isRunning() ? "" : "opacity-30"}`}>🦞</span>
             </div>
-            <h2 class="text-xl font-bold mb-2">OpenClaw is Running</h2>
-            <p class="text-sm text-gray-400 mb-6">
-              Gateway is active on port {activeInstance()?.gateway_port}.
-              Click below to open the control panel in your browser.
+            <h2 class="text-xl font-bold mb-1">
+              {isRunning() ? "OpenClaw is Running" : "OpenClaw is Stopped"}
+            </h2>
+            <p class="text-sm text-gray-400 mb-5">
+              {isRunning()
+                ? `Gateway active on port ${activeInstance()?.gateway_port}`
+                : `Instance "${activeTab()}" is ${activeHealth()}`}
             </p>
 
-            <button
-              class="px-6 py-3 bg-indigo-600 hover:bg-indigo-500 rounded-lg text-white font-medium transition-colors"
-              onClick={openInBrowser}
-            >
-              Open OpenClaw Control Panel ↗
-            </button>
+            {/* Action buttons */}
+            <div class="flex items-center justify-center gap-2 mb-4">
+              <Show when={!isRunning()}>
+                <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm disabled:opacity-50"
+                  disabled={!!actionLoading()} onClick={() => doAction("start")}>
+                  {loading("start") ? "Starting..." : "▶ Start"}
+                </button>
+              </Show>
+              <Show when={isRunning()}>
+                <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+                  onClick={openInBrowser}>
+                  Open Control Panel ↗
+                </button>
+                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50"
+                  disabled={!!actionLoading()} onClick={() => doAction("stop")}>
+                  {loading("stop") ? "..." : "⏹ Stop"}
+                </button>
+                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50"
+                  disabled={!!actionLoading()} onClick={() => doAction("restart")}>
+                  {loading("restart") ? "..." : "↻ Restart"}
+                </button>
+              </Show>
+              <button class="px-3 py-2 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-sm disabled:opacity-50 ml-2"
+                disabled={!!actionLoading()} onClick={() => setShowDeleteConfirm(true)}>
+                {loading("delete") ? "Deleting..." : "Delete"}
+              </button>
+            </div>
 
-            <div class="mt-8 bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500 max-w-xl w-full">
+            {actionError() && <p class="text-xs text-red-400 mb-3">{actionError()}</p>}
+
+            {/* Info table */}
+            <div class="bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500 mx-auto max-w-xl">
               <table class="w-full">
                 <tbody>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Instance</td><td>{activeInstance()?.name}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Version</td><td>{activeInstance()?.version}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Gateway</td><td class="font-mono break-all">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "loading..."}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap align-top">Status</td><td class="text-green-400">● running</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Instance</td><td>{activeInstance()?.name}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Version</td><td>{activeInstance()?.version}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
+                  <Show when={isRunning()}>
+                    <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "..."}</td></tr>
+                  </Show>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Status</td>
+                    <td class={isRunning() ? "text-green-400" : "text-gray-500"}>
+                      {isRunning() ? "● running" : "○ " + activeHealth()}
+                    </td>
+                  </tr>
                 </tbody>
               </table>
             </div>
           </div>
         </Show>
+      </div>
 
-        {/* Instance not running */}
-        <Show when={activeInstance() && !isRunning()}>
-          <div class="text-center text-gray-400 max-w-md">
-            <div class="mb-4 opacity-30">
-              <span class="text-6xl">🦞</span>
-            </div>
-            <p class="text-lg mb-2">OpenClaw is not running</p>
-            <p class="text-sm text-gray-500 mb-4">
-              Instance "{activeTab()}" is {activeHealth()}.
+      {/* Delete confirmation dialog */}
+      <Show when={showDeleteConfirm()}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm shadow-2xl">
+            <h3 class="text-lg font-bold text-red-400 mb-2">Delete Instance</h3>
+            <p class="text-sm text-gray-300 mb-1">
+              Are you sure you want to delete <strong>"{activeTab()}"</strong>?
             </p>
-            <button
-              class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-              onClick={startInstance}
-            >
-              Start Instance
-            </button>
-            <div class="mt-6 bg-gray-900 rounded p-3 text-left text-xs text-gray-500">
-              <div>Instance: {activeInstance()?.name}</div>
-              <div>Type: {activeInstance()?.sandbox_type}</div>
-              <div>Version: {activeInstance()?.version}</div>
-              <div>Gateway: 127.0.0.1:{activeInstance()?.gateway_port}</div>
+            <p class="text-xs text-gray-500 mb-4">
+              This will stop the instance and destroy the VM. All data inside the sandbox will be lost.
+            </p>
+            <div class="flex gap-2 justify-end">
+              <button class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                onClick={() => setShowDeleteConfirm(false)}>Cancel</button>
+              <button class="px-4 py-2 bg-red-700 hover:bg-red-600 rounded text-sm text-white font-medium"
+                onClick={doDelete}>Delete</button>
             </div>
           </div>
-        </Show>
-      </div>
+        </div>
+      </Show>
     </div>
   );
 }

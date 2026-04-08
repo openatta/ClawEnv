@@ -20,10 +20,18 @@ type Page = "home" | "openclaw" | "sandbox" | "settings";
 export default function MainLayout(props: { instances: Instance[] }) {
   const [activePage, setActivePage] = createSignal<Page>("home");
   const [healths, setHealths] = createSignal<Record<string, string>>({});
+  const [instances, setInstances] = createSignal<Instance[]>(props.instances);
 
-  // Shared health polling — one source of truth for all pages
+  async function refreshInstances() {
+    try {
+      const list = await invoke<Instance[]>("list_instances");
+      setInstances(list);
+    } catch { /* keep current */ }
+    refreshHealths();
+  }
+
   async function refreshHealths() {
-    for (const inst of props.instances) {
+    for (const inst of instances()) {
       try {
         const h = await invoke<string>("get_instance_health", { name: inst.name });
         setHealths((prev) => ({ ...prev, [inst.name]: h }));
@@ -35,8 +43,9 @@ export default function MainLayout(props: { instances: Instance[] }) {
 
   onMount(async () => {
     refreshHealths();
-    // Listen for monitor health events
-    const unlisten = await listen<{ instance_name: string; health: string }>(
+
+    // Listen for health events from monitor
+    const unHealth = await listen<{ instance_name: string; health: string }>(
       "instance-health",
       (event) => {
         setHealths((prev) => ({
@@ -45,22 +54,40 @@ export default function MainLayout(props: { instances: Instance[] }) {
         }));
       }
     );
-    onCleanup(unlisten);
+
+    // Listen for instance changes (e.g. install window completed)
+    const unChanged = await listen("instances-changed", () => {
+      refreshInstances();
+    });
+
+    onCleanup(() => { unHealth(); unChanged(); });
   });
 
-  // Periodic refresh
   const interval = setInterval(refreshHealths, 10000);
   onCleanup(() => clearInterval(interval));
+
+  async function openInstallWindow() {
+    try {
+      await invoke("open_install_window", { instanceName: null });
+    } catch (e) {
+      console.error("Failed to open install window:", e);
+    }
+  }
 
   return (
     <div class="flex h-screen bg-gray-900 text-white">
       <IconBar activePage={activePage()} onNavigate={setActivePage} />
       <main class="flex-1 overflow-hidden">
         {activePage() === "home" && (
-          <Home instances={props.instances} healths={healths()} onHealthChange={refreshHealths} />
+          <Home instances={instances()} healths={healths()} onHealthChange={refreshInstances} />
         )}
         {activePage() === "openclaw" && (
-          <OpenClawPage instances={props.instances} healths={healths()} />
+          <OpenClawPage
+            instances={instances()}
+            healths={healths()}
+            onInstancesChanged={refreshInstances}
+            onAddInstance={openInstallWindow}
+          />
         )}
         {activePage() === "sandbox" && <SandboxPage />}
         {activePage() === "settings" && <Settings />}

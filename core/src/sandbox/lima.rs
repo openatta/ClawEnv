@@ -251,20 +251,14 @@ impl SandboxBackend for LimaBackend {
 
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 let workspace_dir = format!("{}/.clawenv/workspaces/{}", home, opts.instance_name);
-
-                // Browser provision script (empty if not requested)
-                let browser_script = if opts.install_browser {
-                    r#"echo "STAGE:browser:Installing Chromium + noVNC" >> "$LOG"
-    apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 | tee -a "$LOG""#.to_string()
-                } else {
-                    r#"echo "STAGE:browser:Skipped" >> "$LOG""#.to_string()
-                };
+                let gateway_port = 3000u16; // default
+                let ttyd_port = gateway_port + 4681; // 7681
 
                 let rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
-                    .replace("{CLAW_VERSION}", &opts.claw_version)
-                    .replace("{PROXY_SCRIPT}", &opts.proxy_script)
-                    .replace("{BROWSER_SCRIPT}", &browser_script);
+                    .replace("{GATEWAY_PORT}", &gateway_port.to_string())
+                    .replace("{TTYD_PORT}", &ttyd_port.to_string())
+                    .replace("{PROXY_SCRIPT}", &opts.proxy_script);
 
                 // Write rendered template
                 let templates_dir = Self::templates_dir()?;

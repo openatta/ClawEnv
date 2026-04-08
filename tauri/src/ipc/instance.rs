@@ -2,6 +2,7 @@ use clawenv_core::config::ConfigManager;
 use clawenv_core::launcher::{self, LaunchState};
 use clawenv_core::manager::instance;
 use serde::Serialize;
+use tauri::{Manager, webview::WebviewWindowBuilder};
 
 #[tauri::command]
 pub async fn detect_launch_state() -> Result<LaunchState, String> {
@@ -91,6 +92,35 @@ pub async fn get_instance_logs(name: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<String>) -> Result<(), String> {
+    let name = instance_name.unwrap_or_else(|| "default".into());
+    let label = format!("install-{name}");
+    let url = format!("/index.html?mode=install&name={name}");
+
+    // If window already exists, focus it
+    if let Some(win) = app.get_webview_window(&label) {
+        let _ = win.set_focus();
+        return Ok(());
+    }
+
+    WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
+        .title(format!("Install OpenClaw — {name}"))
+        .inner_size(900.0, 650.0)
+        .resizable(true)
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn get_sandbox_ip(name: String) -> Result<String, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    instance::get_sandbox_ip(inst).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 pub async fn start_instance(name: String) -> Result<(), String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
@@ -102,6 +132,12 @@ pub async fn stop_instance(name: String) -> Result<(), String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     instance::stop_instance(inst).await.map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn delete_instance(name: String) -> Result<(), String> {
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+    instance::remove_instance(&mut config, &name).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

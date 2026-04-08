@@ -20,38 +20,73 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 /// Start an OpenClaw instance
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
-    backend.start().await?;
+
+    // Only call backend.start() if VM is not already running
+    let already_running = backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false);
+    if !already_running {
+        backend.start().await?;
+        // Wait for SSH to stabilize
+        for _ in 0..5 {
+            if backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        }
+    }
 
     // Sync host IP for Bridge Server access (LAN IP may change between reboots/networks)
-    // Skip for Native backend (no VM isolation, host IS the sandbox)
     if instance.sandbox_type != SandboxType::Native {
         match network::sync_host_ip(backend.as_ref()).await {
             Ok(true) => tracing::info!("Host IP updated in sandbox '{}'", instance.name),
-            Ok(false) => {} // unchanged
+            Ok(false) => {}
             Err(e) => tracing::warn!("Failed to sync host IP: {e}"),
         }
     }
 
     let port = instance.openclaw.gateway_port;
+    let ttyd_port = instance.openclaw.ttyd_port;
 
-    // Check if gateway is already running on this port
-    let check = backend.exec(&format!(
-        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+    // Start ttyd if not running (binds 0.0.0.0 so host can reach it via VM IP)
+    let ttyd_check = backend.exec(&format!(
+        "pgrep -f 'ttyd.*-p {ttyd_port}' > /dev/null 2>&1 && echo running || echo stopped"
     )).await.unwrap_or_default();
-    let code = check.trim().trim_matches('\'');
-
-    if code.starts_with('2') || code.starts_with('3') || code == "401" {
-        tracing::info!("Instance '{}' gateway already running on port {port}", instance.name);
-        return Ok(());
+    if !ttyd_check.contains("running") {
+        backend.exec(&format!(
+            "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
+        )).await?;
+        tracing::info!("ttyd started on 0.0.0.0:{ttyd_port}");
     }
 
-    // Start gateway
-    backend.exec(&format!(
-        "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
-    )).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-    tracing::info!("Instance '{}' started on port {port}", instance.name);
+    // Start gateway if not running
+    let gw_check = backend.exec(&format!(
+        "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+    )).await.unwrap_or_default();
+    let code = gw_check.trim().trim_matches('\'');
+
+    if code != "000" && !code.is_empty() {
+        tracing::info!("Instance '{}' gateway already running on port {port} (HTTP {code})", instance.name);
+    } else {
+        backend.exec(&format!(
+            "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
+        )).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        tracing::info!("Instance '{}' gateway started on port {port}", instance.name);
+    }
+
     Ok(())
+}
+
+/// Get the VM's external IP address (for connecting to ttyd, etc.)
+pub async fn get_sandbox_ip(instance: &InstanceConfig) -> Result<String> {
+    if instance.sandbox_type == SandboxType::Native {
+        return Ok("127.0.0.1".into());
+    }
+    let backend = backend_for_instance(instance)?;
+    let output = backend.exec(
+        "ip -4 addr show eth0 2>/dev/null | grep -oP 'inet \\K[0-9.]+' || hostname -i 2>/dev/null || echo '127.0.0.1'"
+    ).await?;
+    let ip = output.trim().to_string();
+    if ip.is_empty() { Ok("127.0.0.1".into()) } else { Ok(ip) }
 }
 
 /// Stop an OpenClaw instance

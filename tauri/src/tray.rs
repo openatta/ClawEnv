@@ -80,15 +80,17 @@ pub fn update_tray_tooltip(app: &AppHandle, status_text: &str) {
     }
 }
 
-/// Build the right-click context menu with instance sub-menus and actions
+/// Build the right-click context menu with instance sub-menus and actions.
+/// Instance labels show status: 🟢 Running, 🔴 Stopped, ⚪ Unknown.
 fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::error::Error>> {
     let menu = Menu::new(app)?;
 
-    // Add instance sub-menus from config
     if let Ok(config) = ConfigManager::load() {
         for inst in config.instances() {
-            // Show instance name with type (sync context, so we use config info only)
-            let label = format!("{} ({})", inst.name, inst.claw_type);
+            // Quick health check via backend (sync-safe: spawn + block briefly)
+            let status_icon = get_instance_status_icon(&inst.name);
+
+            let label = format!("{status_icon} {} — {}", inst.name, inst.claw_type);
             let submenu = Submenu::with_id(
                 app,
                 &format!("submenu-{}", inst.name),
@@ -96,44 +98,16 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
                 true,
             )?;
 
-            // Start action
-            let start_item = MenuItem::with_id(
-                app,
-                &format!("start-{}", inst.name),
-                "Start",
-                true,
-                None::<&str>,
-            )?;
+            let start_item = MenuItem::with_id(app, &format!("start-{}", inst.name), "▶ Start", true, None::<&str>)?;
+            let stop_item = MenuItem::with_id(app, &format!("stop-{}", inst.name), "⏹ Stop", true, None::<&str>)?;
+            let restart_item = MenuItem::with_id(app, &format!("restart-{}", inst.name), "↻ Restart", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let logs_item = MenuItem::with_id(app, &format!("logs-{}", inst.name), "View Logs", true, None::<&str>)?;
+
             submenu.append(&start_item)?;
-
-            // Stop action
-            let stop_item = MenuItem::with_id(
-                app,
-                &format!("stop-{}", inst.name),
-                "Stop",
-                true,
-                None::<&str>,
-            )?;
             submenu.append(&stop_item)?;
-
-            // Restart action
-            let restart_item = MenuItem::with_id(
-                app,
-                &format!("restart-{}", inst.name),
-                "Restart",
-                true,
-                None::<&str>,
-            )?;
             submenu.append(&restart_item)?;
-
-            // View Logs action
-            let logs_item = MenuItem::with_id(
-                app,
-                &format!("logs-{}", inst.name),
-                "View Logs",
-                true,
-                None::<&str>,
-            )?;
+            submenu.append(&sep)?;
             submenu.append(&logs_item)?;
 
             menu.append(&submenu)?;
@@ -145,18 +119,44 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
         }
     }
 
-    // Standard menu items
     let open_item = MenuItem::with_id(app, "open", "Open ClawEnv", true, None::<&str>)?;
-    let settings_item = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
     let sep2 = PredefinedMenuItem::separator(app)?;
-    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit ClawEnv", true, None::<&str>)?;
 
     menu.append(&open_item)?;
-    menu.append(&settings_item)?;
     menu.append(&sep2)?;
     menu.append(&quit_item)?;
 
     Ok(menu)
+}
+
+/// Get a status icon for an instance (called from sync tray menu build).
+/// Quick check via `limactl list` — fast, no SSH needed.
+fn get_instance_status_icon(instance_name: &str) -> &'static str {
+    let vm_name = format!("clawenv-{instance_name}");
+    let output = std::process::Command::new("limactl")
+        .args(["list", "--json"])
+        .output();
+    match output {
+        Ok(out) => {
+            let text = String::from_utf8_lossy(&out.stdout);
+            // Look for our VM's status in JSON output
+            if text.contains(&format!("\"name\":\"{vm_name}\""))
+                || text.contains(&format!("\"name\": \"{vm_name}\""))
+            {
+                if text.contains("\"status\":\"Running\"")
+                    || text.contains("\"status\": \"Running\"")
+                {
+                    "🟢"
+                } else {
+                    "🔴"
+                }
+            } else {
+                "⚪"
+            }
+        }
+        Err(_) => "⚪",
+    }
 }
 
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {

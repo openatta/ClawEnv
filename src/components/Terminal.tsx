@@ -1,13 +1,32 @@
 import { onMount, onCleanup, createSignal } from "solid-js";
 import { Terminal } from "xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { AttachAddon } from "@xterm/addon-attach";
 
 type Props = {
   instanceName: string;
   ttydPort?: number;
   onClose: () => void;
 };
+
+/**
+ * ttyd WebSocket protocol (from ttyd source):
+ *
+ * Handshake: first message after open = JSON string:
+ *   {AuthToken: "", columns: N, rows: N}
+ *
+ * Message types (ASCII char prefix, NOT binary byte):
+ *   "0" (0x30) = INPUT (client→server) / OUTPUT (server→client)
+ *   "1" (0x31) = RESIZE_TERMINAL
+ *   "2" (0x32) = PAUSE
+ *   "3" (0x33) = RESUME
+ *
+ * SubProtocol: ["tty"]
+ * BinaryType: "arraybuffer"
+ */
+
+const CMD_OUTPUT = "0".charCodeAt(0);  // 0x30
+const CMD_INPUT = "0".charCodeAt(0);   // 0x30
+const CMD_RESIZE = "1".charCodeAt(0);  // 0x31
 
 export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
@@ -19,6 +38,8 @@ export default function SandboxTerminal(props: Props) {
   onMount(() => {
     const port = props.ttydPort ?? 7681;
     const wsUrl = `ws://127.0.0.1:${port}/ws`;
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
 
     try {
       term = new Terminal({
@@ -42,20 +63,64 @@ export default function SandboxTerminal(props: Props) {
         setTimeout(() => fitAddon.fit(), 50);
       }
 
-      // Connect via WebSocket to ttyd
       setStatus(`Connecting to ${wsUrl}...`);
-      ws = new WebSocket(wsUrl);
+      ws = new WebSocket(wsUrl, ["tty"]);
+      ws.binaryType = "arraybuffer";
 
       ws.onopen = () => {
-        setStatus("Connected");
+        setStatus(`Connected (localhost:${port})`);
+        // ttyd handshake: first message must be JSON with AuthToken + terminal size
         if (term && ws) {
-          const attachAddon = new AttachAddon(ws);
-          term.loadAddon(attachAddon);
+          const handshake = JSON.stringify({
+            AuthToken: "",
+            columns: term.cols,
+            rows: term.rows,
+          });
+          ws.send(encoder.encode(handshake));
         }
       };
 
+      ws.onmessage = (ev) => {
+        if (!term) return;
+        const data = new Uint8Array(ev.data as ArrayBuffer);
+        if (data.length < 1) return;
+        const cmd = data[0];
+        const payload = data.slice(1);
+
+        if (cmd === CMD_OUTPUT) {
+          term.write(payload);
+        }
+        // cmd === 0x31: SET_WINDOW_TITLE — ignore
+        // cmd === 0x32: SET_PREFERENCES — ignore
+      };
+
+      // Send keyboard input
+      term.onData((input: string) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          if (typeof input === "string") {
+            const encoded = encoder.encode(input);
+            const msg = new Uint8Array(1 + encoded.length);
+            msg[0] = CMD_INPUT;
+            msg.set(encoded, 1);
+            ws.send(msg);
+          }
+        }
+      });
+
+      // Send resize
+      term.onResize(({ cols, rows }) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          const json = JSON.stringify({ columns: cols, rows: rows });
+          const encoded = encoder.encode(json);
+          const msg = new Uint8Array(1 + encoded.length);
+          msg[0] = CMD_RESIZE;
+          msg.set(encoded, 1);
+          ws.send(msg);
+        }
+      });
+
       ws.onerror = () => {
-        setError(`WebSocket error. Is ttyd running on port ${port}?`);
+        setError(`Cannot connect to terminal on port ${port}. Is the instance running?`);
         setStatus("Error");
       };
 
@@ -64,10 +129,7 @@ export default function SandboxTerminal(props: Props) {
         term?.writeln("\r\n\x1b[31mConnection closed\x1b[0m");
       };
 
-      // Resize handling
-      const observer = new ResizeObserver(() => {
-        setTimeout(() => fitAddon.fit(), 10);
-      });
+      const observer = new ResizeObserver(() => setTimeout(() => fitAddon.fit(), 10));
       if (containerRef) observer.observe(containerRef);
       onCleanup(() => observer.disconnect());
 
@@ -97,7 +159,7 @@ export default function SandboxTerminal(props: Props) {
             </span>
           </div>
           <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium text-white"
-            onClick={props.onClose}>✕ Close</button>
+            onClick={props.onClose}>Close</button>
         </div>
         {error() && (
           <div class="px-4 py-2 bg-red-900/30 text-red-400 text-xs border-b border-red-700">

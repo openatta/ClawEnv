@@ -51,10 +51,11 @@ impl InstanceMonitor {
                 let raw = out.trim();
                 let code = raw.trim_matches('\'').trim();
                 tracing::debug!("Health check port {port}: raw='{}' code='{}'", raw, code);
-                if code.starts_with('2') || code.starts_with('3') || code == "401" || code == "403" {
+                // Any HTTP response (non-000) means gateway process is running and responding.
+                // 500 = app-level error but process is alive. 000 = no connection.
+                if code != "000" && !code.is_empty() {
                     return InstanceHealth::Running;
                 }
-                tracing::warn!("Health check: unexpected HTTP code '{}' for port {port}", code);
             }
             Err(e) => {
                 tracing::warn!("Health check exec failed for port {port}: {e}");

@@ -151,11 +151,19 @@ pub async fn install(
         send(&tx, "VM already exists", 38, InstallStage::CreateVm).await;
     }
 
-    // Verify VM accessible
-    let check = backend.exec("echo ok").await;
-    if !check.map(|o| o.contains("ok")).unwrap_or(false) {
-        backend.start().await?;
-        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    // Wait for SSH to stabilize (provision may restart sshd)
+    send(&tx, "Waiting for VM SSH to stabilize...", 39, InstallStage::BootVm).await;
+    for attempt in 1..=10 {
+        match backend.exec("echo ok").await {
+            Ok(o) if o.contains("ok") => break,
+            _ => {
+                if attempt == 10 {
+                    // Last resort: try starting the VM
+                    backend.start().await.ok();
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+        }
     }
 
     // ---- Step 3: Install OpenClaw via background script + polling ----
@@ -228,7 +236,9 @@ pub async fn install(
     // Start services
     send(&tx, "Starting services...", 88, InstallStage::StartOpenClaw).await;
     let ttyd_port = opts.gateway_port + 4681;
-    backend.exec(&format!("nohup ttyd -p {ttyd_port} -W /bin/sh > /tmp/ttyd.log 2>&1 &")).await?;
+    backend.exec(&format!(
+        "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
+    )).await?;
     backend.exec(&format!(
         "nohup openclaw gateway --port {} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &",
         opts.gateway_port
