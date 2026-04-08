@@ -6,7 +6,7 @@ type Instance = { name: string; sandbox_type: string; version: string; gateway_p
 type InstallProgress = { message: string; percent: number; stage: string };
 type ConnTestResult = { endpoint: string; ok: boolean; message: string };
 type SystemProxy = { detected: boolean; source: string; http_proxy: string; https_proxy: string; no_proxy: string };
-type CheckItem = { name: string; ok: boolean; detail: string };
+type CheckItem = { name: string; ok: boolean; detail: string; info_only?: boolean };
 type SystemCheckInfo = { os: string; arch: string; memory_gb: number; disk_free_gb: number; sandbox_backend: string; sandbox_available: boolean; checks: CheckItem[] };
 
 const INSTALL_STAGES = [
@@ -172,12 +172,20 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
     setProgressMessage("Starting..."); setInstallLogs([]);
     setCompletedStages(new Set<string>()); setCurrentStage("");
 
-    const TIMEOUT = 5 * 60 * 1000;
+    const IDLE_TIMEOUT = 5 * 60 * 1000; // 5 min without any update → timeout
     let done = false;
-    function cleanup() { done = true; unlistenProgress?.(); unlistenComplete?.(); unlistenFailed?.(); }
-    const timer = setTimeout(() => { if (!done) { cleanup(); setInstalling(false); setInstallError("Installation timed out (5 min)"); } }, TIMEOUT);
+    let timer: ReturnType<typeof setTimeout> = undefined!;
+    function resetTimer() {
+      clearTimeout(timer);
+      timer = setTimeout(() => {
+        if (!done) { cleanup(); setInstalling(false); setInstallError("Installation stalled — no progress for 5 minutes"); }
+      }, IDLE_TIMEOUT);
+    }
+    function cleanup() { done = true; clearTimeout(timer); unlistenProgress?.(); unlistenComplete?.(); unlistenFailed?.(); }
+    resetTimer();
 
     unlistenProgress = await listen<InstallProgress>("install-progress", (ev) => {
+      resetTimer(); // got update — reset idle timeout
       const p = ev.payload;
       setProgress(p.percent); setProgressMessage(p.message);
       setInstallLogs(l => [...l, `[${p.percent}%] ${p.message}`]);
@@ -325,8 +333,10 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                 <div class="space-y-1.5 mb-3">
                   <For each={sysCheck()!.checks}>
                     {(c) => (
-                      <div class={`flex items-center gap-2 text-sm ${c.ok ? "text-green-400" : "text-red-400"}`}>
-                        <span>{c.ok ? "✓" : "✗"}</span>
+                      <div class={`flex items-center gap-2 text-sm ${
+                        c.ok ? "text-green-400" : c.info_only ? "text-gray-400" : "text-red-400"
+                      }`}>
+                        <span>{c.ok ? "✓" : c.info_only ? "○" : "✗"}</span>
                         <span class="w-36 text-gray-300">{c.name}</span>
                         <span>{c.detail}</span>
                       </div>
@@ -403,69 +413,82 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
           {/* ===== Step 4: Install Plan ===== */}
           {step() === 4 && (
             <div>
-              <h2 class="text-xl font-bold mb-3">Installation Plan</h2>
-              <div class="space-y-2">
-                <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
-                  <input type="radio" name="im" checked={installMethod() === "online"} onChange={() => setInstallMethod("online")} class="w-4 h-4" />
-                  <div><div class="font-medium text-sm">Sandbox - Online Build</div><div class="text-xs text-gray-400">Create VM/container and install from source (recommended)</div></div>
-                </label>
-                <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
-                  <input type="radio" name="im" checked={installMethod() === "local"} onChange={() => setInstallMethod("local")} class="w-4 h-4" />
-                  <div><div class="font-medium text-sm">Sandbox - Local Image</div><div class="text-xs text-gray-400">Import a pre-built sandbox image file</div></div>
-                </label>
-                <label class="flex items-center gap-3 p-3 rounded border border-gray-700 cursor-pointer hover:border-gray-500 border-dashed border-yellow-700/50">
-                  <input type="radio" name="im" checked={installMethod() === "native"} onChange={() => setInstallMethod("native")} class="w-4 h-4" />
-                  <div>
-                    <div class="font-medium text-sm">Native (Developer Only)</div>
-                    <div class="text-xs text-gray-400">Install directly on host OS — no isolation, no sandbox</div>
-                    <div class="text-xs text-yellow-500 mt-1">⚠ Requires Node.js ≥ 22 + npm. No security isolation.</div>
-                  </div>
-                </label>
-              </div>
-              <Show when={installMethod() === "local"}>
-                <input type="text" placeholder="/path/to/image.tar.gz" value={localFilePath()} onInput={e => setLocalFilePath(e.currentTarget.value)}
-                  class="mt-3 bg-gray-800 border border-gray-600 rounded px-3 py-2 w-96 text-sm" />
-              </Show>
+              <h2 class="text-xl font-bold mb-4">{iLang() === "zh-CN" ? "安装方案" : "Installation Plan"}</h2>
 
-              {/* Optional components */}
-              <div class="mt-4 space-y-3">
-                {/* MCP Bridge Plugin — default ON */}
-                <div class="p-3 bg-gray-800 rounded border border-green-700/30">
-                  <label class="flex items-start gap-3 cursor-pointer">
+              {/* Install Mode group */}
+              <fieldset class="border border-gray-600 rounded-lg p-4 mb-4">
+                <legend class="px-2 text-sm font-medium text-gray-300">{iLang() === "zh-CN" ? "安装模式" : "Install Mode"}</legend>
+                <div class="space-y-2">
+                  <label class="flex items-center gap-3 p-2.5 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
+                    <input type="radio" name="im" checked={installMethod() === "online"} onChange={() => setInstallMethod("online")} class="w-4 h-4 shrink-0" />
+                    <div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "沙盒 - 在线构建" : "Sandbox - Online Build"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "创建虚拟机/容器并从源安装（推荐）" : "Create VM/container and install from source (recommended)"}</div>
+                    </div>
+                  </label>
+                  <label class="flex items-center gap-3 p-2.5 rounded border border-gray-700 cursor-pointer hover:border-gray-500">
+                    <input type="radio" name="im" checked={installMethod() === "local"} onChange={() => setInstallMethod("local")} class="w-4 h-4 shrink-0" />
+                    <div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "沙盒 - 本地镜像" : "Sandbox - Local Image"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "导入预构建的沙盒镜像文件" : "Import a pre-built sandbox image file"}</div>
+                    </div>
+                  </label>
+                  <label class="flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 cursor-pointer hover:border-yellow-600/50">
+                    <input type="radio" name="im" checked={installMethod() === "native"} onChange={() => setInstallMethod("native")} class="w-4 h-4 shrink-0" />
+                    <div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "原生模式（仅开发者）" : "Native (Developer Only)"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "直接安装在宿主系统 — 无隔离，无沙盒" : "Install directly on host OS — no isolation, no sandbox"}</div>
+                      <div class="text-xs text-yellow-500 mt-1">{iLang() === "zh-CN" ? "⚠ 需要 Node.js ≥ 22 + npm，无安全隔离" : "⚠ Requires Node.js ≥ 22 + npm. No security isolation."}</div>
+                    </div>
+                  </label>
+                </div>
+                <Show when={installMethod() === "local"}>
+                  <input type="text" placeholder="/path/to/image.tar.gz" value={localFilePath()} onInput={e => setLocalFilePath(e.currentTarget.value)}
+                    class="mt-3 bg-gray-800 border border-gray-600 rounded px-3 py-2 w-full text-sm" />
+                </Show>
+              </fieldset>
+
+              {/* Optional components group */}
+              <fieldset class="border border-gray-600 rounded-lg p-4">
+                <legend class="px-2 text-sm font-medium text-gray-300">{iLang() === "zh-CN" ? "可选组件" : "Optional Components"}</legend>
+                <div class="space-y-3">
+                  {/* MCP Bridge Plugin — default ON */}
+                  <label class="flex items-start gap-3 p-2.5 rounded border border-green-700/30 bg-gray-800/50 cursor-pointer hover:border-green-600/40">
                     <input type="checkbox" checked={installMcpBridge()} onChange={e => setInstallMcpBridge(e.currentTarget.checked)}
                       class="w-4 h-4 mt-0.5 shrink-0" />
                     <div>
-                      <div class="text-sm font-medium">MCP Bridge Plugin <span class="text-green-400 text-xs">(recommended)</span></div>
+                      <div class="text-sm font-medium">MCP Bridge Plugin <span class="text-green-400 text-xs">({iLang() === "zh-CN" ? "推荐" : "recommended"})</span></div>
                       <div class="text-xs text-gray-400 mt-1">
-                        Enables OpenClaw agents to access host machine files, commands, and tools
-                        through a secure, permission-controlled bridge.
+                        {iLang() === "zh-CN"
+                          ? "使 OpenClaw Agent 能通过安全的权限控制桥接访问宿主机的文件、命令和工具"
+                          : "Enables OpenClaw agents to access host machine files, commands, and tools through a secure, permission-controlled bridge."}
                       </div>
                       {!installMcpBridge() && (
                         <div class="text-xs text-yellow-500 mt-1">
-                          ⚠ Without this plugin, agents cannot access programs or data on your host machine.
+                          {iLang() === "zh-CN" ? "⚠ 不安装此插件，Agent 将无法访问宿主机上的程序和数据" : "⚠ Without this plugin, agents cannot access programs or data on your host machine."}
                         </div>
                       )}
                     </div>
                   </label>
-                </div>
 
-                {/* Browser Automation — default OFF */}
-                <div class="p-3 bg-gray-800 rounded border border-gray-700">
-                  <label class="flex items-start gap-3 cursor-pointer">
+                  {/* Browser Automation — default OFF */}
+                  <label class="flex items-start gap-3 p-2.5 rounded border border-gray-700 bg-gray-800/50 cursor-pointer hover:border-gray-500">
                     <input type="checkbox" checked={installBrowser()} onChange={e => setInstallBrowser(e.currentTarget.checked)}
                       class="w-4 h-4 mt-0.5 shrink-0" />
                     <div>
-                      <div class="text-sm font-medium">Browser Automation (Chromium Headless)</div>
+                      <div class="text-sm font-medium">{iLang() === "zh-CN" ? "浏览器自动化（Chromium Headless）" : "Browser Automation (Chromium Headless)"}</div>
                       <div class="text-xs text-gray-400 mt-1">
-                        Required for web scraping, screenshots, CDP automation, and CAPTCHA handling.
+                        {iLang() === "zh-CN"
+                          ? "用于网页抓取、截图、CDP 自动化和验证码处理"
+                          : "Required for web scraping, screenshots, CDP automation, and CAPTCHA handling."}
                       </div>
                       <div class="text-xs text-yellow-500 mt-1">
-                        ⚠ Adds ~630MB. Can be installed later from Settings.
+                        {iLang() === "zh-CN" ? "⚠ 增加约 630MB 空间，可稍后在设置中安装" : "⚠ Adds ~630MB. Can be installed later from Settings."}
                       </div>
                     </div>
                   </label>
                 </div>
-              </div>
+              </fieldset>
             </div>
           )}
 

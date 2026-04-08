@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 
 use crate::config::{ConfigManager, InstanceConfig};
 use crate::monitor::{InstanceHealth, InstanceMonitor};
+use crate::platform::network;
 use crate::sandbox::{
     detect_backend, native_backend, LimaBackend, PodmanBackend, WslBackend, SandboxBackend, SandboxType,
 };
@@ -20,6 +21,17 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
     backend.start().await?;
+
+    // Sync host IP for Bridge Server access (LAN IP may change between reboots/networks)
+    // Skip for Native backend (no VM isolation, host IS the sandbox)
+    if instance.sandbox_type != SandboxType::Native {
+        match network::sync_host_ip(backend.as_ref()).await {
+            Ok(true) => tracing::info!("Host IP updated in sandbox '{}'", instance.name),
+            Ok(false) => {} // unchanged
+            Err(e) => tracing::warn!("Failed to sync host IP: {e}"),
+        }
+    }
+
     let port = instance.openclaw.gateway_port;
 
     // Check if gateway is already running on this port

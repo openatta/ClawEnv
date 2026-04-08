@@ -19,7 +19,7 @@ import { z } from "zod";
 
 // Parse CLI args
 const args = process.argv.slice(2);
-let bridgeUrl = "http://host.lima.internal:3100";
+let bridgeUrl = "";
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--bridge-url" && args[i + 1]) {
     bridgeUrl = args[i + 1];
@@ -27,15 +27,23 @@ for (let i = 0; i < args.length; i++) {
   }
 }
 
-// Auto-detect bridge URL by platform
-if (bridgeUrl === "auto") {
-  try {
-    // Podman
-    const resp = await fetch("http://host.containers.internal:3100/api/health");
-    if (resp.ok) bridgeUrl = "http://host.containers.internal:3100";
-  } catch {
-    // fallback to Lima
-    bridgeUrl = "http://host.lima.internal:3100";
+// Auto-detect bridge URL if not specified via CLI
+if (!bridgeUrl) {
+  // Priority 1: Environment variable (set by ClawEnv installer)
+  const hostIp = process.env.CLAWENV_HOST_IP;
+  if (hostIp) {
+    bridgeUrl = `http://${hostIp}:3100`;
+  } else {
+    // Priority 2: Try Podman host alias
+    try {
+      const resp = await fetch("http://host.containers.internal:3100/api/health", { signal: AbortSignal.timeout(2000) });
+      if (resp.ok) bridgeUrl = "http://host.containers.internal:3100";
+    } catch { /* not Podman */ }
+
+    // Priority 3: Try default gateway IP (works for Lima VZ real host IP)
+    if (!bridgeUrl) {
+      bridgeUrl = "http://host.lima.internal:3100";
+    }
   }
 }
 

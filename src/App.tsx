@@ -1,7 +1,6 @@
 import { createSignal, onMount, Switch, Match } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import MainLayout from "./layouts/MainLayout";
-import ModeSelect from "./pages/ModeSelect";
 import InstallWizard from "./pages/Install";
 import UpgradePrompt from "./components/UpgradePrompt";
 
@@ -43,16 +42,11 @@ export default function App() {
         </div>
       }
     >
-      <Match when={state().type === "first_run"}>
-        <ModeSelect onComplete={() => setState({ type: "not_installed" })} />
-      </Match>
-
-      <Match when={state().type === "not_installed"}>
+      <Match when={state().type === "first_run" || state().type === "not_installed"}>
         <InstallWizard
           onComplete={(instances: Instance[]) =>
             setState({ type: "ready", instances })
           }
-          onBack={() => setState({ type: "first_run" })}
         />
       </Match>
 

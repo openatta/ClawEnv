@@ -87,6 +87,9 @@ pub struct SandboxOpts {
     pub cpu_cores: u32,
     pub install_browser: bool,
     pub install_mode: InstallMode,
+    /// Proxy env lines for provision script (empty string if no proxy)
+    #[serde(default)]
+    pub proxy_script: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -2,7 +2,11 @@ use clawenv_core::config::{ConfigManager, UserMode};
 use clawenv_core::manager::install;
 use clawenv_core::sandbox::InstallMode;
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
+
+/// Guard against concurrent installs — only one install at a time.
+static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[tauri::command]
 pub async fn install_openclaw(
@@ -15,6 +19,11 @@ pub async fn install_openclaw(
     install_mcp_bridge: Option<bool>,
     gateway_port: u16,
 ) -> Result<(), String> {
+    // Prevent concurrent installs (retry clicks while previous install still running)
+    if INSTALL_RUNNING.swap(true, Ordering::SeqCst) {
+        return Err("Installation already in progress. Please wait for it to finish.".into());
+    }
+
     let opts = install::InstallOptions {
         instance_name,
         claw_version,
@@ -28,7 +37,7 @@ pub async fn install_openclaw(
 
     let mut config = ConfigManager::load()
         .or_else(|_| ConfigManager::create_default(UserMode::General))
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| { INSTALL_RUNNING.store(false, Ordering::SeqCst); e.to_string() })?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 
@@ -62,6 +71,8 @@ pub async fn install_openclaw(
                 );
             }
         }
+        // Release the install lock
+        INSTALL_RUNNING.store(false, Ordering::SeqCst);
     });
 
     Ok(())
@@ -106,6 +117,9 @@ pub struct CheckItem {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+    /// "info" level means the installer will handle it automatically (show as gray, not red)
+    #[serde(default)]
+    pub info_only: bool,
 }
 
 #[tauri::command]
@@ -209,6 +223,7 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
         name: "Operating System".into(),
         ok: true,
         detail: format!("{} ({})", os_str, arch_str),
+        info_only: false,
     });
 
     // Memory check (OpenClaw needs at least 512MB for sandbox)
@@ -217,6 +232,7 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
         name: "Memory".into(),
         ok: mem_ok,
         detail: format!("{:.1} GB {}", memory_gb, if mem_ok { "(sufficient)" } else { "(need 2GB+)" }),
+        info_only: false,
     });
 
     // Disk check (need at least 2GB free)
@@ -225,13 +241,15 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
         name: "Disk Space".into(),
         ok: disk_ok,
         detail: format!("{:.0} GB free {}", disk_free_gb, if disk_ok { "(sufficient)" } else { "(need 2GB+)" }),
+        info_only: false,
     });
 
-    // Sandbox backend
+    // Sandbox backend — if not installed, it's info-only (installer will auto-install)
     checks.push(CheckItem {
         name: "Sandbox Backend".into(),
         ok: backend_available,
-        detail: format!("{} {}", backend_name, if backend_available { "(ready)" } else { "(not installed)" }),
+        detail: format!("{} {}", backend_name, if backend_available { "(ready)" } else { "(will be installed automatically)" }),
+        info_only: !backend_available,
     });
 
     Ok(SystemCheckInfo {

@@ -247,23 +247,41 @@ impl SandboxBackend for LimaBackend {
                 self.import_image(&path).await?;
             }
             InstallMode::OnlineBuild => {
-                // Use Lima's built-in Alpine template (has SSH + cloud-init pre-configured)
-                // Then provision OpenClaw inside the running VM
-                tracing::info!("Creating Lima VM '{}' from template:alpine", self.vm_name);
+                let template = include_str!("../../../assets/lima/clawenv-alpine.yaml");
 
+                let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                let workspace_dir = format!("{}/.clawenv/workspaces/{}", home, opts.instance_name);
+
+                // Browser provision script (empty if not requested)
+                let browser_script = if opts.install_browser {
+                    r#"echo "STAGE:browser:Installing Chromium + noVNC" >> "$LOG"
+    apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 | tee -a "$LOG""#.to_string()
+                } else {
+                    r#"echo "STAGE:browser:Skipped" >> "$LOG""#.to_string()
+                };
+
+                let rendered = template
+                    .replace("{WORKSPACE_DIR}", &workspace_dir)
+                    .replace("{CLAW_VERSION}", &opts.claw_version)
+                    .replace("{PROXY_SCRIPT}", &opts.proxy_script)
+                    .replace("{BROWSER_SCRIPT}", &browser_script);
+
+                // Write rendered template
+                let templates_dir = Self::templates_dir()?;
+                tokio::fs::create_dir_all(&templates_dir).await?;
+                tokio::fs::create_dir_all(&workspace_dir).await?;
+                let template_path = templates_dir.join(format!("{}.yaml", self.vm_name));
+                tokio::fs::write(&template_path, &rendered).await?;
+
+                tracing::info!("Creating Lima VM '{}' with provision (packages + OpenClaw)", self.vm_name);
+
+                // limactl start blocks until provision completes (~7-10 min)
                 self.limactl_run(
-                    &["start", "--name", &self.vm_name, "--tty=false", "template:alpine"],
+                    &["start", "--name", &self.vm_name, "--tty=false",
+                      &template_path.to_string_lossy()],
                 ).await?;
 
-                tracing::info!("Lima VM '{}' created and running", self.vm_name);
-
-                // Provisioning is done by install.rs (not here) so each step
-                // can send individual progress updates to the frontend.
-
-                // Optional: install browser if requested (also moved to install.rs)
-                if opts.install_browser {
-                    tracing::info!("Browser install will be handled by install flow");
-                }
+                tracing::info!("Lima VM '{}' created and provisioned", self.vm_name);
             }
         }
         Ok(())

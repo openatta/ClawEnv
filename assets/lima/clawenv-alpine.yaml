@@ -1,48 +1,31 @@
 # ClawEnv Lima Template — Alpine Linux
-# cgroup v2 unified mode fix included (alpine-lima issue #1878)
-# {ARCH} is replaced at runtime with "aarch64" or "x86_64"
+# Provision installs system packages only (fast, ~30s).
+# OpenClaw npm install is done post-boot by the installer.
 
-vmType: vz
-os: Linux
-arch: "{ARCH}"
+minimumLimaVersion: "2.0.0"
 
 images:
-  - location: "https://dl-cdn.alpinelinux.org/alpine/v3.21/releases/{ARCH}/alpine-virt-3.21.3-{ARCH}.iso"
-    arch: "{ARCH}"
-
-cpus: 2
-memory: "512MiB"
-disk: "8GiB"
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.2-x86_64-uefi-cloudinit-r0.qcow2"
+  arch: "x86_64"
+  digest: "sha512:26e10874cda1c8a63b00744b5497e74764dcadf3213fb85a6cb7e7bf06a0b9d9b1e6aae166ecb009794b7b6ccfc069d16301a7b7e10f0a5dd1860b918fdd1eb9"
+- location: "https://dl-cdn.alpinelinux.org/alpine/v3.23/releases/cloud/nocloud_alpine-3.23.2-aarch64-uefi-cloudinit-r0.qcow2"
+  arch: "aarch64"
+  digest: "sha512:f4086df9ee84a08e4e5a9fef16d810b459d42fb6b9d7cb4690250f3d2d4290c57b8e2610103b91ac953ee2da87308771b73249f1d72e4c614045e7c2fb96043d"
 
 mounts:
-  - location: "~/.clawenv/workspaces/{INSTANCE_NAME}"
-    writable: true
-    mountPoint: "/workspace"
-  - location: "~"
-    writable: false
-    mountPoint: "/host-home"
+- location: "~"
+- location: "{WORKSPACE_DIR}"
+  writable: true
+  mountPoint: "/workspace"
 
-hostResolver:
-  enabled: true
+containerd:
+  system: false
+  user: false
 
 provision:
-  - mode: system
-    script: |
-      #!/bin/ash
-      set -e
-
-      # Fix: cgroup v2 unified mode
-      if [ -f /etc/conf.d/cgroups ]; then
-        sed -i 's/rc_cgroup_mode=.*/rc_cgroup_mode=unified/' /etc/conf.d/cgroups
-        rc-update add cgroups boot 2>/dev/null || true
-      fi
-
-      # Install runtime dependencies
-      apk update
-      apk add --no-cache nodejs npm git curl bash ca-certificates
-
-      # Install OpenClaw
-      npm install -g openclaw@{OPENCLAW_VERSION}
-
-      openclaw --version
-      echo "ClawEnv Alpine VM initialized"
+- mode: system
+  script: |
+    #!/bin/sh
+    {PROXY_SCRIPT}
+    apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3
+    ssh-keygen -A

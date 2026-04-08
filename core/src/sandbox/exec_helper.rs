@@ -1,7 +1,10 @@
-//! Plan C: Unified exec helper for all sandbox backends.
+//! Unified exec helper for all sandbox backends.
 //!
-//! Uses `tokio::join!(wait, read_stdout, read_stderr)` with timeout
-//! on pipe reads. Works on all platforms — Lima, WSL2, Podman, Native.
+//! Two modes:
+//! - `exec()`: For short commands (echo, which, cat, etc.). Has pipe-read timeout.
+//! - `exec_with_progress()`: For long commands (apk add, npm install, etc.).
+//!   Streams output line-by-line with NO timeout — the process runs until it
+//!   finishes naturally. Caller shows progress via heartbeat.
 
 use anyhow::Result;
 use std::time::Duration;
@@ -9,10 +12,10 @@ use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-const READ_TIMEOUT_SECS: u64 = 30;
+/// Pipe-read timeout for `exec()` (short commands only).
+const READ_TIMEOUT_SECS: u64 = 120;
 
 /// Read from an async reader with a timeout.
-/// Returns whatever was read before timeout (may be partial).
 async fn read_with_timeout(mut reader: impl AsyncReadExt + Unpin, secs: u64) -> String {
     let mut buf = Vec::new();
     match tokio::time::timeout(Duration::from_secs(secs), reader.read_to_end(&mut buf)).await {
@@ -25,8 +28,8 @@ async fn read_with_timeout(mut reader: impl AsyncReadExt + Unpin, secs: u64) -> 
     String::from_utf8_lossy(&buf).to_string()
 }
 
-/// Execute a command, returning (stdout, stderr, exit_code).
-/// Uses Plan C: spawn with pipes, join!(wait, read, read) with timeout.
+/// Execute a short command, returning (stdout, stderr, exit_code).
+/// Has a 120s pipe-read timeout — use `exec_with_progress` for long operations.
 pub async fn exec(program: &str, args: &[&str]) -> Result<(String, String, i32)> {
     let mut child = Command::new(program)
         .args(args)
@@ -57,7 +60,11 @@ pub async fn exec(program: &str, args: &[&str]) -> Result<(String, String, i32)>
     Ok((stdout, stderr, code))
 }
 
-/// Execute with streaming progress — pipes stdout+stderr lines to a channel.
+/// Execute a long-running command with streaming progress.
+///
+/// Pipes stdout+stderr lines to a channel as they arrive.
+/// **No timeout** — the process runs until it finishes naturally.
+/// Caller is responsible for showing heartbeat/progress to the user.
 pub async fn exec_with_progress(
     program: &str,
     args: &[&str],
@@ -75,7 +82,7 @@ pub async fn exec_with_progress(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Stream stderr to channel
+    // Stream stderr lines to channel
     let tx2 = tx.clone();
     let stderr_task = tokio::spawn(async move {
         if let Some(se) = stderr {
@@ -86,7 +93,7 @@ pub async fn exec_with_progress(
         }
     });
 
-    // Stream stdout to channel + collect
+    // Stream stdout lines to channel + collect full output
     let tx3 = tx.clone();
     let stdout_task = tokio::spawn(async move {
         let mut output = String::new();
@@ -101,21 +108,17 @@ pub async fn exec_with_progress(
         output
     });
 
-    // Wait for process with global timeout
-    let wait_result = tokio::time::timeout(
-        Duration::from_secs(300), // 5 min max
-        child.wait(),
-    ).await;
+    // Wait for process to finish — NO timeout
+    let status = child.wait().await;
 
-    // Give pipes a moment to flush
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Give pipes a moment to flush remaining data
+    tokio::time::sleep(Duration::from_millis(500)).await;
     stderr_task.abort();
     let output = stdout_task.await.unwrap_or_default();
 
-    let code = match wait_result {
-        Ok(Ok(s)) => s.code().unwrap_or(-1),
-        Ok(Err(e)) => { tracing::error!("exec wait failed: {e}"); -1 }
-        Err(_) => { tracing::error!("exec timed out (5 min)"); -1 }
+    let code = match status {
+        Ok(s) => s.code().unwrap_or(-1),
+        Err(e) => { tracing::error!("exec wait failed: {e}"); -1 }
     };
 
     Ok((output, code))
