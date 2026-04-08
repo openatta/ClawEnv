@@ -35,6 +35,17 @@ ClawEnv 提供：
 - 开发者工具：CLI、Skill 脚手架、本地调试
 - 浏览器集成助手（Phase 2：CDT；Phase 4：指纹浏览器）
 
+## 1.4 平台最低版本要求
+
+| 平台 | 最低版本 | 沙盒后端 | 说明 |
+|------|---------|---------|------|
+| **macOS** | macOS 11 (Big Sur)+ | Lima | Tauri WebView (WKWebView) + Lima VZ |
+| **Windows** | Windows 10 2004 (Build 19041)+ | WSL2 | WSL2 首次可用版本，Tauri WebView2 |
+| **Ubuntu** | 22.04 LTS+ | Podman | WebKitGTK 4.1, Podman 3.0+ |
+| **Fedora** | 36+ | Podman | WebKitGTK 4.1, Podman 预装 |
+
+所有平台均支持 Native 安装模式（无沙盒，直接安装 Node.js + OpenClaw）。
+
 ---
 
 ## 2. 可行性分析
