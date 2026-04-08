@@ -251,8 +251,8 @@ impl SandboxBackend for LimaBackend {
 
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 let workspace_dir = format!("{}/.clawenv/workspaces/{}", home, opts.instance_name);
-                let gateway_port = 3000u16; // default
-                let ttyd_port = gateway_port + 4681; // 7681
+                let gateway_port = opts.gateway_port;
+                let ttyd_port = gateway_port + 4681;
 
                 let rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
@@ -386,4 +386,42 @@ impl SandboxBackend for LimaBackend {
         self.limactl(&["start", &self.vm_name]).await?;
         Ok(())
     }
+
+    async fn rename(&self, new_name: &str) -> Result<String> {
+        let new_vm = format!("clawenv-{new_name}");
+        self.limactl_run(&["rename", &self.vm_name, &new_vm]).await?;
+        Ok(new_vm)
+    }
+
+    async fn edit_resources(&self, cpus: Option<u32>, memory_mb: Option<u32>, disk_gb: Option<u32>) -> Result<()> {
+        let mut args = vec!["edit".to_string(), self.vm_name.clone()];
+        if let Some(c) = cpus {
+            args.push("--cpus".into());
+            args.push(c.to_string());
+        }
+        if let Some(m) = memory_mb {
+            args.push("--memory".into());
+            // Lima uses GiB float
+            args.push(format!("{:.1}", m as f64 / 1024.0));
+        }
+        if let Some(d) = disk_gb {
+            args.push("--disk".into());
+            args.push(d.to_string());
+        }
+        let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        self.limactl_run(&arg_refs).await
+    }
+
+    async fn edit_port_forwards(&self, forwards: &[(u16, u16)]) -> Result<()> {
+        // Build yq expression for portForwards array
+        let entries: Vec<String> = forwards.iter()
+            .map(|(guest, host)| format!("{{\"guestPort\":{guest},\"hostPort\":{host}}}"))
+            .collect();
+        let yq_expr = format!(".portForwards = [{}]", entries.join(","));
+        self.limactl_run(&["edit", &self.vm_name, "--set", &yq_expr]).await
+    }
+
+    fn supports_rename(&self) -> bool { true }
+    fn supports_resource_edit(&self) -> bool { true }
+    fn supports_port_edit(&self) -> bool { true }
 }

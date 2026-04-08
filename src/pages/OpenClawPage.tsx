@@ -80,6 +80,62 @@ export default function OpenClawPage(props: {
 
   const loading = (action: string) => actionLoading() === action;
 
+  // Config panel
+  const [showConfig, setShowConfig] = createSignal(false);
+  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(props.instances[0]?.gateway_port ?? 3000);
+  const [cfgTtydPort, setCfgTtydPort] = createSignal(props.instances[0]?.ttyd_port ?? 7681);
+  const [cfgSaving, setCfgSaving] = createSignal(false);
+  const [cfgError, setCfgError] = createSignal("");
+  const [caps, setCaps] = createSignal<Record<string,boolean>>({});
+
+  async function openConfig() {
+    const inst = activeInstance();
+    if (!inst) return;
+    setCfgGatewayPort(inst.gateway_port);
+    setCfgTtydPort(inst.ttyd_port);
+    setCfgError("");
+    try {
+      const c = await invoke<Record<string,boolean>>("get_instance_capabilities", { name: inst.name });
+      setCaps(c);
+    } catch { setCaps({}); }
+    setShowConfig(true);
+  }
+
+  // Check if ports conflict with other instances
+  const portConflict = () => {
+    const gp = cfgGatewayPort();
+    const tp = cfgTtydPort();
+    const current = activeTab();
+    if (gp === tp) return "Gateway and terminal ports cannot be the same";
+    for (const inst of props.instances) {
+      if (inst.name === current) continue;
+      if (inst.gateway_port === gp || inst.ttyd_port === gp) return `Port ${gp} already used by "${inst.name}"`;
+      if (inst.gateway_port === tp || inst.ttyd_port === tp) return `Port ${tp} already used by "${inst.name}"`;
+    }
+    if (gp < 1024 || gp > 65535) return "Gateway port must be 1024-65535";
+    if (tp < 1024 || tp > 65535) return "Terminal port must be 1024-65535";
+    return "";
+  };
+
+  async function saveConfig(restart: boolean) {
+    const conflict = portConflict();
+    if (conflict) { setCfgError(conflict); return; }
+    setCfgSaving(true); setCfgError("");
+    try {
+      await invoke("edit_instance_ports", {
+        name: activeTab(),
+        gatewayPort: cfgGatewayPort(),
+        ttydPort: cfgTtydPort(),
+      });
+      if (restart) {
+        await invoke("start_instance", { name: activeTab() });
+      }
+      setShowConfig(false);
+      props.onInstancesChanged?.();
+    } catch (e) { setCfgError(String(e)); }
+    finally { setCfgSaving(false); }
+  }
+
   return (
     <div class="h-full flex flex-col">
       {/* Top bar with + button */}
@@ -160,6 +216,10 @@ export default function OpenClawPage(props: {
                   {loading("restart") ? "..." : "↻ Restart"}
                 </button>
               </Show>
+              <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                onClick={openConfig}>
+                ⚙ Configure
+              </button>
               <button class="px-3 py-2 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-sm disabled:opacity-50 ml-2"
                 disabled={!!actionLoading()} onClick={() => setShowDeleteConfirm(true)}>
                 {loading("delete") ? "Deleting..." : "Delete"}
@@ -190,6 +250,47 @@ export default function OpenClawPage(props: {
           </div>
         </Show>
       </div>
+
+      {/* Config dialog */}
+      <Show when={showConfig()}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
+            <h3 class="text-base font-bold mb-4">Configure — {activeTab()}</h3>
+            <div class="space-y-3">
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">Gateway Port</label>
+                <input type="number" value={cfgGatewayPort()}
+                  onInput={(e) => { setCfgGatewayPort(parseInt(e.currentTarget.value) || 3000); setCfgTtydPort((parseInt(e.currentTarget.value) || 3000) + 4681); }}
+                  class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
+              </div>
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">Terminal (ttyd) Port</label>
+                <input type="number" value={cfgTtydPort()}
+                  onInput={(e) => setCfgTtydPort(parseInt(e.currentTarget.value) || 7681)}
+                  class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
+              </div>
+            </div>
+            <Show when={!caps().port_edit}>
+              <p class="text-xs text-gray-500 mt-2">Port forwarding not supported by this backend. Config saved locally only.</p>
+            </Show>
+            {portConflict() && <p class="text-xs text-red-400 mt-2">{portConflict()}</p>}
+            {cfgError() && !portConflict() && <p class="text-xs text-red-400 mt-2">{cfgError()}</p>}
+            <p class="text-xs text-yellow-500 mt-2">Port changes require instance restart.</p>
+            <div class="flex gap-2 justify-end mt-4">
+              <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+                onClick={() => setShowConfig(false)}>Cancel</button>
+              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+                disabled={cfgSaving() || !!portConflict()} onClick={() => saveConfig(false)}>
+                {cfgSaving() ? "..." : "Save"}
+              </button>
+              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+                disabled={cfgSaving() || !!portConflict()} onClick={() => saveConfig(true)}>
+                {cfgSaving() ? "..." : "Save & Restart"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
 
       {/* Delete confirmation dialog */}
       <Show when={showDeleteConfirm()}>

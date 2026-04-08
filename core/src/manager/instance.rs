@@ -44,17 +44,19 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     let port = instance.openclaw.gateway_port;
-    let ttyd_port = instance.openclaw.ttyd_port;
 
-    // Start ttyd if not running (binds 0.0.0.0 so host can reach it via VM IP)
-    let ttyd_check = backend.exec(&format!(
-        "pgrep -f 'ttyd.*-p {ttyd_port}' > /dev/null 2>&1 && echo running || echo stopped"
-    )).await.unwrap_or_default();
-    if !ttyd_check.contains("running") {
-        backend.exec(&format!(
-            "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
-        )).await?;
-        tracing::info!("ttyd started on 0.0.0.0:{ttyd_port}");
+    // Start ttyd for sandbox instances only (Native doesn't need it)
+    if instance.sandbox_type != SandboxType::Native {
+        let ttyd_port = instance.openclaw.ttyd_port;
+        let ttyd_check = backend.exec(&format!(
+            "pgrep -f 'ttyd.*-p {ttyd_port}' > /dev/null 2>&1 && echo running || echo stopped"
+        )).await.unwrap_or_default();
+        if !ttyd_check.contains("running") {
+            backend.exec(&format!(
+                "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
+            )).await?;
+            tracing::info!("ttyd started on 0.0.0.0:{ttyd_port}");
+        }
     }
 
     // Start gateway if not running

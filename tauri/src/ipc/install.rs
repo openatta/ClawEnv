@@ -24,6 +24,20 @@ pub async fn install_openclaw(
         return Err("Installation already in progress. Please wait for it to finish.".into());
     }
 
+    let mut config = ConfigManager::load()
+        .or_else(|_| ConfigManager::create_default(UserMode::General))
+        .map_err(|e| { INSTALL_RUNNING.store(false, Ordering::SeqCst); e.to_string() })?;
+
+    // Auto-allocate port: find next free gateway port not used by existing instances
+    let actual_port = if gateway_port == 0 {
+        let used: Vec<u16> = config.instances().iter().map(|i| i.openclaw.gateway_port).collect();
+        let mut p = 3000u16;
+        while used.contains(&p) { p += 1; }
+        p
+    } else {
+        gateway_port
+    };
+
     let opts = install::InstallOptions {
         instance_name,
         claw_version,
@@ -32,12 +46,8 @@ pub async fn install_openclaw(
         install_mcp_bridge: install_mcp_bridge.unwrap_or(true),
         api_key,
         use_native,
-        gateway_port,
+        gateway_port: actual_port,
     };
-
-    let mut config = ConfigManager::load()
-        .or_else(|_| ConfigManager::create_default(UserMode::General))
-        .map_err(|e| { INSTALL_RUNNING.store(false, Ordering::SeqCst); e.to_string() })?;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel(32);
 

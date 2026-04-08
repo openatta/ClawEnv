@@ -238,7 +238,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
         instanceName: instanceName(), clawVersion: "latest",
         apiKey: apiKey() || null, useNative: installMethod() === "native",
         installBrowser: installBrowser(), installMcpBridge: installMcpBridge(),
-        gatewayPort: 3000,
+        gatewayPort: 0, // auto-allocate next available port
       });
     } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
   }
@@ -478,9 +478,9 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                   <label class="flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 cursor-pointer hover:border-yellow-600/50">
                     <input type="radio" name="im" checked={installMethod() === "native"} onChange={() => setInstallMethod("native")} class="w-4 h-4 shrink-0" />
                     <div>
-                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "原生模式（仅开发者）" : "Native (Developer Only)"}</div>
-                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "直接安装在宿主系统 — 无隔离，无沙盒" : "Install directly on host OS — no isolation, no sandbox"}</div>
-                      <div class="text-xs text-yellow-500 mt-1">{iLang() === "zh-CN" ? "⚠ 需要 Node.js ≥ 22 + npm，无安全隔离" : "⚠ Requires Node.js ≥ 22 + npm. No security isolation."}</div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "本地安装" : "Local Install"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "直接安装在本机 — 无需虚拟机，启动更快" : "Install directly on this machine — no VM, faster startup"}</div>
+                      <div class="text-xs text-yellow-500 mt-1">{iLang() === "zh-CN" ? "⚠ 缺少 Node.js 时会自动安装（可能需要管理员密码）" : "⚠ Node.js will be auto-installed if missing (may need admin password)"}</div>
                     </div>
                   </label>
                 </div>

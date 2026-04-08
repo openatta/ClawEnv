@@ -141,6 +141,102 @@ pub async fn delete_instance(name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+pub async fn rename_instance(old_name: String, new_name: String) -> Result<(), String> {
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &old_name).map_err(|e| e.to_string())?.clone();
+    let backend = instance::backend_for_instance(&inst).map_err(|e| e.to_string())?;
+
+    // Stop first if running
+    instance::stop_instance(&inst).await.ok();
+
+    // Rename in backend (Lima: limactl rename)
+    let new_sandbox_id = if backend.supports_rename() {
+        backend.rename(&new_name).await.map_err(|e| e.to_string())?
+    } else {
+        format!("{:?}-{}", inst.sandbox_type, new_name).to_lowercase()
+    };
+
+    // Update config
+    if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == old_name) {
+        entry.name = new_name.clone();
+        entry.sandbox_id = new_sandbox_id;
+    }
+    config.save().map_err(|e| e.to_string())?;
+
+    // Rename workspace dir
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+    let old_ws = std::path::PathBuf::from(&home).join(format!(".clawenv/workspaces/{old_name}"));
+    let new_ws = std::path::PathBuf::from(&home).join(format!(".clawenv/workspaces/{new_name}"));
+    if old_ws.exists() {
+        let _ = tokio::fs::rename(&old_ws, &new_ws).await;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn edit_instance_resources(
+    name: String,
+    cpus: Option<u32>,
+    memory_mb: Option<u32>,
+    disk_gb: Option<u32>,
+) -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+
+    if !backend.supports_resource_edit() {
+        return Err("This backend does not support resource editing".into());
+    }
+
+    // Must stop before editing
+    instance::stop_instance(inst).await.ok();
+    backend.edit_resources(cpus, memory_mb, disk_gb).await.map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn edit_instance_ports(
+    name: String,
+    gateway_port: u16,
+    ttyd_port: u16,
+) -> Result<(), String> {
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+
+    if backend.supports_port_edit() {
+        instance::stop_instance(inst).await.ok();
+        backend.edit_port_forwards(&[(gateway_port, gateway_port), (ttyd_port, ttyd_port)])
+            .await.map_err(|e| e.to_string())?;
+    }
+
+    // Update config
+    if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == name) {
+        entry.openclaw.gateway_port = gateway_port;
+        entry.openclaw.ttyd_port = ttyd_port;
+    }
+    config.save().map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
+/// Get backend capabilities for an instance
+#[tauri::command]
+pub async fn get_instance_capabilities(name: String) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+
+    Ok(serde_json::json!({
+        "rename": backend.supports_rename(),
+        "resource_edit": backend.supports_resource_edit(),
+        "port_edit": backend.supports_port_edit(),
+    }))
+}
+
+#[tauri::command]
 pub async fn get_instance_health(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;

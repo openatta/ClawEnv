@@ -76,6 +76,28 @@ pub trait SandboxBackend: Send + Sync {
 
     /// 导入预构建镜像
     async fn import_image(&self, path: &std::path::Path) -> Result<()>;
+
+    // ---- Optional management operations (default: not supported) ----
+
+    /// Rename the sandbox instance. Returns new sandbox_id.
+    async fn rename(&self, _new_name: &str) -> Result<String> {
+        anyhow::bail!("Rename not supported by this backend")
+    }
+
+    /// Edit resource limits (CPU cores, memory MB, disk GB). Requires restart.
+    async fn edit_resources(&self, _cpus: Option<u32>, _memory_mb: Option<u32>, _disk_gb: Option<u32>) -> Result<()> {
+        anyhow::bail!("Resource editing not supported by this backend")
+    }
+
+    /// Edit port forwarding rules. Requires restart.
+    async fn edit_port_forwards(&self, _forwards: &[(u16, u16)]) -> Result<()> {
+        anyhow::bail!("Port forward editing not supported by this backend")
+    }
+
+    /// Capability flags
+    fn supports_rename(&self) -> bool { false }
+    fn supports_resource_edit(&self) -> bool { false }
+    fn supports_port_edit(&self) -> bool { false }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,6 +112,13 @@ pub struct SandboxOpts {
     /// Proxy env lines for provision script (empty string if no proxy)
     #[serde(default)]
     pub proxy_script: String,
+    /// Gateway port (for Lima portForwards)
+    #[serde(default = "default_gateway_port")]
+    pub gateway_port: u16,
+}
+
+fn default_gateway_port() -> u16 {
+    3000
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

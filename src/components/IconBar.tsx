@@ -4,8 +4,15 @@ type Page = "home" | "openclaw" | "sandbox" | "settings";
 
 const icons: Record<Page | "user" | "logo", () => JSX.Element> = {
   logo: () => (
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="w-5 h-5">
-      <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z" fill="currentColor" stroke="none" />
+    <svg viewBox="0 0 120 120" fill="none" class="w-full h-full">
+      <defs><linearGradient id="lg" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#60A5FA"/><stop offset="100%" stop-color="#2563EB"/></linearGradient></defs>
+      <path d="M60 10 C30 10 15 35 15 55 C15 75 30 95 45 100 L45 110 L55 110 L55 100 C55 100 60 102 65 100 L65 110 L75 110 L75 100 C90 95 105 75 105 55 C105 35 90 10 60 10Z" fill="url(#lg)"/>
+      <path d="M20 45 C5 40 0 50 5 60 C10 70 20 65 25 55 C28 48 25 45 20 45Z" fill="url(#lg)"/>
+      <path d="M100 45 C115 40 120 50 115 60 C110 70 100 65 95 55 C92 48 95 45 100 45Z" fill="url(#lg)"/>
+      <path d="M45 15 Q35 5 30 8" stroke="#60A5FA" stroke-width="3" stroke-linecap="round"/>
+      <path d="M75 15 Q85 5 90 8" stroke="#60A5FA" stroke-width="3" stroke-linecap="round"/>
+      <circle cx="45" cy="35" r="6" fill="#050810"/><circle cx="75" cy="35" r="6" fill="#050810"/>
+      <circle cx="46" cy="34" r="2.5" fill="#00e5cc"/><circle cx="76" cy="34" r="2.5" fill="#00e5cc"/>
     </svg>
   ),
   home: () => (
@@ -82,11 +89,11 @@ export default function IconBar(props: {
     <nav class="flex flex-col w-14 bg-gray-950 border-r border-gray-800 items-center py-3 shrink-0">
       {/* Logo */}
       <button
-        class="w-9 h-9 rounded-lg bg-indigo-600 flex items-center justify-center hover:bg-indigo-500 transition-colors text-white"
+        class="w-10 h-10 rounded-lg flex items-center justify-center hover:bg-gray-800 transition-colors"
         onClick={() => props.onNavigate("home")}
         title="ClawEnv"
       >
-        {icons.logo()}
+        <span class="w-7 h-7 block">{icons.logo()}</span>
       </button>
 
       {/* Separator */}

@@ -58,10 +58,10 @@ export default function SandboxPage() {
 
       <Show when={!loading()}>
         <section class="mb-6">
-          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Platform</h2>
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Virtual Machines</h2>
           <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-300">
             <div class="flex justify-between">
-              <span>Total VMs/Containers</span>
+              <span>VMs / Containers</span>
               <span>{vms().length} ({managed().length} managed, {external().length} external)</span>
             </div>
             <Show when={diskUsage()}>
@@ -115,6 +115,11 @@ function VmCard(props: {
 }) {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
+  const [showConfig, setShowConfig] = createSignal(false);
+  const [cfgCpus, setCfgCpus] = createSignal(parseInt(props.vm.cpus) || 4);
+  const [cfgMemory, setCfgMemory] = createSignal(Math.round(parseInt(props.vm.memory) / 1073741824) || 4);
+  const [cfgSaving, setCfgSaving] = createSignal(false);
+  const [cfgError, setCfgError] = createSignal("");
 
   const isRunning = () => props.vm.status.toLowerCase().includes("running");
   const statusColor = () => isRunning() ? "bg-green-500" : "bg-gray-500";
@@ -198,6 +203,14 @@ function VmCard(props: {
           </button>
         </Show>
 
+        {/* Configure (managed only) */}
+        <Show when={props.vm.managed}>
+          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+            onClick={() => setShowConfig(true)}>
+            ⚙ Configure
+          </button>
+        </Show>
+
         {/* Delete with confirmation */}
         {confirmDelete() ? (
           <div class="flex items-center gap-1 ml-auto">
@@ -214,6 +227,60 @@ function VmCard(props: {
           </button>
         )}
       </div>
+
+      {/* Config modal */}
+      <Show when={showConfig()}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
+            <h3 class="text-base font-bold mb-4">Configure — {props.vm.name}</h3>
+            <div class="space-y-4">
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">CPU Cores: {cfgCpus()}</label>
+                <input type="range" min="1" max="8" value={cfgCpus()}
+                  onInput={(e) => setCfgCpus(parseInt(e.currentTarget.value))} class="w-full" />
+                <div class="flex justify-between text-[10px] text-gray-500"><span>1</span><span>8</span></div>
+              </div>
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">Memory: {cfgMemory()} GB</label>
+                <input type="range" min="1" max="16" value={cfgMemory()}
+                  onInput={(e) => setCfgMemory(parseInt(e.currentTarget.value))} class="w-full" />
+                <div class="flex justify-between text-[10px] text-gray-500"><span>1 GB</span><span>16 GB</span></div>
+              </div>
+            </div>
+            {cfgError() && <p class="text-xs text-red-400 mt-3">{cfgError()}</p>}
+            <p class="text-xs text-yellow-500 mt-3">Changes require VM restart to take effect.</p>
+            <div class="flex gap-2 justify-end mt-4">
+              <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+                onClick={() => setShowConfig(false)}>Cancel</button>
+              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+                disabled={cfgSaving()}
+                onClick={async () => {
+                  setCfgSaving(true); setCfgError("");
+                  try {
+                    await invoke("edit_instance_resources", { name: instanceName(), cpus: cfgCpus(), memoryMb: cfgMemory() * 1024, diskGb: null });
+                    setShowConfig(false); props.onRefresh();
+                  } catch (e) { setCfgError(String(e)); }
+                  finally { setCfgSaving(false); }
+                }}>
+                {cfgSaving() ? "Saving..." : "Save"}
+              </button>
+              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
+                disabled={cfgSaving()}
+                onClick={async () => {
+                  setCfgSaving(true); setCfgError("");
+                  try {
+                    await invoke("edit_instance_resources", { name: instanceName(), cpus: cfgCpus(), memoryMb: cfgMemory() * 1024, diskGb: null });
+                    await invoke("sandbox_vm_action", { vmName: props.vm.name, action: "start" });
+                    setShowConfig(false); props.onRefresh();
+                  } catch (e) { setCfgError(String(e)); }
+                  finally { setCfgSaving(false); }
+                }}>
+                {cfgSaving() ? "..." : "Save & Restart"}
+              </button>
+            </div>
+          </div>
+        </div>
+      </Show>
     </div>
   );
 }

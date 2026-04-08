@@ -85,13 +85,14 @@ pub async fn install(
 ) -> Result<()> {
     validate_instance_name(&opts.instance_name)?;
 
-    // ---- Step 1: Platform ----
+    // Dispatch: Native vs Sandbox
+    if opts.use_native {
+        return super::install_native::install_native(&opts, config, &tx).await;
+    }
+
+    // ---- Sandbox path below ----
     send(&tx, "Detecting platform...", 5, InstallStage::DetectPlatform).await;
-    let backend: Box<dyn SandboxBackend> = if opts.use_native {
-        Box::new(native_backend(&opts.instance_name))
-    } else {
-        detect_backend()?
-    };
+    let backend: Box<dyn SandboxBackend> = detect_backend()?;
 
     send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
     backend.ensure_prerequisites().await?;
@@ -125,6 +126,7 @@ pub async fn install(
             install_browser: opts.install_browser,
             install_mode: opts.install_mode.clone(),
             proxy_script,
+            gateway_port: opts.gateway_port,
         };
 
         // Heartbeat while VM creates

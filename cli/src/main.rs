@@ -218,6 +218,7 @@ async fn main() -> Result<()> {
                 install_browser: false,
                 install_mode: clawenv_core::sandbox::InstallMode::OnlineBuild,
                 proxy_script: String::new(),
+                gateway_port: 3000,
             };
 
             let backend = clawenv_core::sandbox::detect_backend()?;

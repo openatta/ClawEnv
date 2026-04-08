@@ -88,7 +88,7 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
     if let Ok(config) = ConfigManager::load() {
         for inst in config.instances() {
             // Quick health check via backend (sync-safe: spawn + block briefly)
-            let status_icon = get_instance_status_icon(&inst.name);
+            let status_icon = get_instance_status_icon(inst);
 
             let label = format!("{status_icon} {} — {}", inst.name, inst.claw_type);
             let submenu = Submenu::with_id(
@@ -98,15 +98,20 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
                 true,
             )?;
 
-            let start_item = MenuItem::with_id(app, &format!("start-{}", inst.name), "▶ Start", true, None::<&str>)?;
-            let stop_item = MenuItem::with_id(app, &format!("stop-{}", inst.name), "⏹ Stop", true, None::<&str>)?;
-            let restart_item = MenuItem::with_id(app, &format!("restart-{}", inst.name), "↻ Restart", true, None::<&str>)?;
+            let is_running = status_icon == "🟢";
+
+            if is_running {
+                let stop_item = MenuItem::with_id(app, &format!("stop-{}", inst.name), "⏹ Stop", true, None::<&str>)?;
+                let restart_item = MenuItem::with_id(app, &format!("restart-{}", inst.name), "↻ Restart", true, None::<&str>)?;
+                submenu.append(&stop_item)?;
+                submenu.append(&restart_item)?;
+            } else {
+                let start_item = MenuItem::with_id(app, &format!("start-{}", inst.name), "▶ Start", true, None::<&str>)?;
+                submenu.append(&start_item)?;
+            }
+
             let sep = PredefinedMenuItem::separator(app)?;
             let logs_item = MenuItem::with_id(app, &format!("logs-{}", inst.name), "View Logs", true, None::<&str>)?;
-
-            submenu.append(&start_item)?;
-            submenu.append(&stop_item)?;
-            submenu.append(&restart_item)?;
             submenu.append(&sep)?;
             submenu.append(&logs_item)?;
 
@@ -131,31 +136,48 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
 }
 
 /// Get a status icon for an instance (called from sync tray menu build).
-/// Quick check via `limactl list` — fast, no SSH needed.
-fn get_instance_status_icon(instance_name: &str) -> &'static str {
-    let vm_name = format!("clawenv-{instance_name}");
-    let output = std::process::Command::new("limactl")
-        .args(["list", "--json"])
-        .output();
-    match output {
-        Ok(out) => {
-            let text = String::from_utf8_lossy(&out.stdout);
-            // Look for our VM's status in JSON output
-            if text.contains(&format!("\"name\":\"{vm_name}\""))
-                || text.contains(&format!("\"name\": \"{vm_name}\""))
-            {
-                if text.contains("\"status\":\"Running\"")
-                    || text.contains("\"status\": \"Running\"")
-                {
-                    "🟢"
-                } else {
-                    "🔴"
+fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'static str {
+    use clawenv_core::sandbox::SandboxType;
+    match inst.sandbox_type {
+        SandboxType::Native => {
+            // Check if gateway process is running on the port
+            let check = std::process::Command::new("sh")
+                .args(["-c", &format!(
+                    "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
+                    inst.openclaw.gateway_port
+                )])
+                .output();
+            match check {
+                Ok(out) => {
+                    let code = String::from_utf8_lossy(&out.stdout);
+                    let code = code.trim().trim_matches('\'');
+                    if code != "000" && !code.is_empty() { "🟢" } else { "🔴" }
                 }
-            } else {
-                "⚪"
+                Err(_) => "🔴",
             }
         }
-        Err(_) => "⚪",
+        _ => {
+            // VM-based: check limactl / podman / wsl
+            let vm_name = format!("clawenv-{}", inst.name);
+            let output = std::process::Command::new("limactl")
+                .args(["list", "--json"])
+                .output();
+            match output {
+                Ok(out) => {
+                    let text = String::from_utf8_lossy(&out.stdout);
+                    if (text.contains(&format!("\"name\":\"{vm_name}\""))
+                        || text.contains(&format!("\"name\": \"{vm_name}\"")))
+                        && (text.contains("\"status\":\"Running\"")
+                            || text.contains("\"status\": \"Running\""))
+                    {
+                        "🟢"
+                    } else {
+                        "🔴"
+                    }
+                }
+                Err(_) => "⚪",
+            }
+        }
     }
 }
 
