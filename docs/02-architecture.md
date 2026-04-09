@@ -109,15 +109,6 @@ pub trait SandboxBackend: Send + Sync {
     /// 在沙盒内以流式方式执行命令（用于安装进度等场景）
     async fn exec_stream(&self, cmd: &str, tx: mpsc::Sender<String>) -> Result<ExitStatus>;
 
-    /// 创建快照
-    async fn snapshot_create(&self, tag: &str) -> Result<()>;
-
-    /// 还原快照
-    async fn snapshot_restore(&self, tag: &str) -> Result<()>;
-
-    /// 列出快照
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>>;
-
     /// 获取资源使用情况（内存/CPU）
     async fn stats(&self) -> Result<ResourceStats>;
 }

@@ -88,28 +88,6 @@ impl SandboxBackend for WslBackend {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        // WSL2 快照通过导出 distro tarball 实现
-        let snapshot_path = snapshot_dir().join(format!("{}.tar.gz", tag));
-        Command::new("wsl")
-            .args(["--export", &self.distro_name,
-                   &snapshot_path.to_string_lossy()])
-            .status().await?;
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        let snapshot_path = snapshot_dir().join(format!("{}.tar.gz", tag));
-        // 先注销当前 distro，再从快照重新导入
-        Command::new("wsl").args(["--unregister", &self.distro_name]).status().await?;
-        Command::new("wsl")
-            .args(["--import", &self.distro_name,
-                   &install_path().to_string_lossy(),
-                   &snapshot_path.to_string_lossy(),
-                   "--version", "2"])
-            .status().await?;
-        Ok(())
-    }
 }
 ```
 
@@ -233,20 +211,6 @@ impl SandboxBackend for LimaBackend {
             .args(["shell", &self.vm_name, "--", "ash", "-c", cmd])
             .output().await?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    }
-
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        Command::new("limactl")
-            .args(["snapshot", "create", &self.vm_name, "--tag", tag])
-            .status().await?;
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        Command::new("limactl")
-            .args(["snapshot", "apply", &self.vm_name, "--tag", tag])
-            .status().await?;
-        Ok(())
     }
 
     async fn start(&self) -> Result<()> {
@@ -383,27 +347,6 @@ impl SandboxBackend for PodmanBackend {
         Ok(())
     }
 
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        // Podman 快照通过 commit 容器为镜像实现
-        Command::new("podman")
-            .args(["commit", &self.container_name,
-                   &format!("{}:snap-{}", self.image_tag, tag)])
-            .status().await?;
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        // 停止并删除当前容器，从快照镜像重新启动
-        self.stop().await.ok();
-        Command::new("podman").args(["rm", &self.container_name]).status().await?;
-        // 临时修改 image_tag 为快照标签后重新 start
-        let snapshot_image = format!("{}:snap-{}", self.image_tag, tag);
-        Command::new("podman")
-            .args(["run", "-d", "--name", &self.container_name,
-                   "--userns=keep-id", &snapshot_image])
-            .status().await?;
-        Ok(())
-    }
 }
 ```
 
@@ -603,25 +546,5 @@ impl SandboxBackend for NativeBackend {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        // 快照通过 tar 打包 install_dir 实现（无 VM/容器级快照）
-        let snapshot_path = snapshot_dir().join(format!("{}.tar.gz", tag));
-        Command::new("tar")
-            .args(["-czf", &snapshot_path.to_string_lossy(),
-                   "-C", &self.install_dir.to_string_lossy(), "."])
-            .status().await?;
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        let snapshot_path = snapshot_dir().join(format!("{}.tar.gz", tag));
-        std::fs::remove_dir_all(&self.install_dir)?;
-        std::fs::create_dir_all(&self.install_dir)?;
-        Command::new("tar")
-            .args(["-xzf", &snapshot_path.to_string_lossy(),
-                   "-C", &self.install_dir.to_string_lossy()])
-            .status().await?;
-        Ok(())
-    }
 }
 ```

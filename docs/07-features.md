@@ -164,11 +164,7 @@ pub struct VersionInfo {
 }
 
 pub async fn upgrade(instance: &ClawInstance, target: Option<&str>) -> Result<()> {
-    // 1. 升级前自动快照（回滚保障）
-    let tag = format!("pre-upgrade-{}", instance.version);
-    instance.backend().snapshot_create(&tag).await?;
-
-    // 2. 执行升级（在沙盒内）
+    // 1. 执行升级（在沙盒内）
     let version = target.unwrap_or("latest");
     instance.backend()
         .exec(&format!("npm update -g openclaw@{version}"))
@@ -256,15 +252,11 @@ clawenv logs      [<n>] [-f] [--lines 100]
 
 # 升级管理
 clawenv upgrade   [<n>] [--version <ver>]
-clawenv rollback  [<n>] [--to <ver>]
 clawenv update check                  # 检查 ClawEnv 自身更新
 
 # 沙盒操作（开发者专属）
 clawenv sandbox shell   [<n>]         # 进入沙盒交互式 shell
 clawenv sandbox exec    <cmd> [<n>]   # 在沙盒内执行单条命令
-clawenv snapshot create <tag>  [<n>]
-clawenv snapshot restore <tag> [<n>]
-clawenv snapshot list  [<n>]
 
 # 浏览器集成
 clawenv browser start|stop|status [<n>]

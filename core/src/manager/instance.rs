@@ -4,7 +4,7 @@ use crate::config::{ConfigManager, InstanceConfig};
 use crate::monitor::{InstanceHealth, InstanceMonitor};
 use crate::platform::network;
 use crate::sandbox::{
-    detect_backend, native_backend, LimaBackend, PodmanBackend, WslBackend, SandboxBackend, SandboxType,
+    native_backend, LimaBackend, PodmanBackend, WslBackend, SandboxBackend, SandboxType,
 };
 
 /// Get the appropriate sandbox backend for an instance

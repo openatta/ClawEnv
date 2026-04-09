@@ -145,7 +145,6 @@ impl SandboxBackend for PodmanBackend {
              - Arch: sudo pacman -S podman\n\
              See https://podman.io/docs/installation"
         );
-        Ok(())
     }
 
     async fn create(&self, opts: &SandboxOpts) -> Result<()> {
@@ -276,6 +275,7 @@ impl SandboxBackend for PodmanBackend {
 
         // Podman stats JSON is an array of objects
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
         struct PodmanStats {
             #[serde(alias = "CPU", alias = "cpu_percent", default)]
             cpu: String,

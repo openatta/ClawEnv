@@ -61,7 +61,7 @@ async fn check_upgrade_available(instance: &InstanceConfig) -> Result<bool> {
 /// Auto-start OpenClaw after installation completes.
 /// Called after install wizard finishes successfully.
 pub async fn post_install_start(instance: &InstanceConfig) -> Result<()> {
-    use crate::manager::instance::{backend_for_instance, start_instance};
+    use crate::manager::instance::backend_for_instance;
     use crate::monitor::InstanceMonitor;
 
     let backend = backend_for_instance(instance)?;

@@ -4,7 +4,7 @@ use tokio::sync::mpsc;
 use crate::config::{keychain, ConfigManager, InstanceConfig, OpenClawConfig, ResourceConfig};
 use crate::platform::network;
 use crate::sandbox::{
-    detect_backend, native_backend, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
+    detect_backend, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
 };
 
 pub fn shell_escape(s: &str) -> String {

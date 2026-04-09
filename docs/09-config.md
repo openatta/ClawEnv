@@ -13,8 +13,6 @@ theme      = "system"    # "light" | "dark" | "system"
 [clawenv.updates]
 auto_check          = true
 check_interval_hours = 24
-auto_snapshot_before_upgrade = true
-snapshot_retention_count     = 5
 
 [clawenv.security]
 # API Key 统一存储在系统 Keychain，此处不存明文
@@ -178,10 +176,6 @@ clawenv/
 ├── instances/
 │   └── default/
 │       └── instance.toml           # 实例元数据
-├── snapshots/
-│   └── default/
-│       ├── manifest.toml
-│       └── *.tar.gz                # WSL2 快照（或 Podman image 引用）
 ├── workspaces/
 │   └── default/                    # 挂载到沙盒的工作目录
 ├── templates/                      # 从 assets/ 复制并实例化

@@ -45,56 +45,6 @@ impl LimaBackend {
         Ok(())
     }
 
-    /// Run limactl with streaming stderr output (for long operations like start)
-    async fn limactl_stream(&self, args: &[&str], tx: Option<&mpsc::Sender<String>>) -> Result<String> {
-        use tokio::io::{AsyncBufReadExt, BufReader};
-
-        let mut child = Command::new("limactl")
-            .args(args)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()?;
-
-        let stderr = child.stderr.take();
-        let stdout = child.stdout.take();
-
-        // Stream stderr (Lima outputs progress here)
-        if let (Some(stderr), Some(tx)) = (stderr, tx) {
-            let tx = tx.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx.send(line).await;
-                }
-            });
-        }
-
-        let status = child.wait().await?;
-        let stdout_data = if let Some(mut so) = stdout {
-            let mut buf = Vec::new();
-            tokio::io::AsyncReadExt::read_to_end(&mut so, &mut buf).await?;
-            String::from_utf8_lossy(&buf).to_string()
-        } else {
-            String::new()
-        };
-
-        if !status.success() {
-            anyhow::bail!("limactl {} failed (exit code {:?})", args.join(" "), status.code());
-        }
-        Ok(stdout_data)
-    }
-
-    /// Read a small file from inside the VM
-    async fn read_vm_file(&self, path: &str) -> Result<String> {
-        let out = Command::new("limactl")
-            .args(["shell", &self.vm_name, "--", "cat", path])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .output()
-            .await?;
-        Ok(String::from_utf8_lossy(&out.stdout).to_string())
-    }
-
     fn templates_dir() -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -321,6 +271,7 @@ impl SandboxBackend for LimaBackend {
         let output = self.limactl(&["list", "--json"]).await?;
 
         #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
         struct LimaVm {
             name: String,
             #[serde(default)]

@@ -13,9 +13,6 @@ pub enum TrayStatus {
     Running,
     Stopped,
     Error,
-    CveAlert,
-    HumanIntervention,
-    Installing(u8),
 }
 
 /// Generate a simple 16x16 RGBA solid-color circle icon
@@ -41,11 +38,9 @@ fn make_circle_icon(r: u8, g: u8, b: u8) -> tauri::image::Image<'static> {
 /// Update the tray icon based on status
 pub fn set_tray_status(app: &AppHandle, status: TrayStatus) {
     let icon = match status {
-        TrayStatus::Running => make_circle_icon(34, 197, 94),      // green
-        TrayStatus::Stopped => make_circle_icon(156, 163, 175),    // gray
-        TrayStatus::Error | TrayStatus::CveAlert => make_circle_icon(239, 68, 68), // red
-        TrayStatus::HumanIntervention => make_circle_icon(245, 158, 11), // orange
-        TrayStatus::Installing(_) => make_circle_icon(59, 130, 246),     // blue
+        TrayStatus::Running => make_circle_icon(34, 197, 94),   // green
+        TrayStatus::Stopped => make_circle_icon(156, 163, 175), // gray
+        TrayStatus::Error => make_circle_icon(239, 68, 68),     // red
     };
 
     if let Some(tray) = app.tray_by_id("clawenv-tray") {
@@ -56,9 +51,6 @@ pub fn set_tray_status(app: &AppHandle, status: TrayStatus) {
         TrayStatus::Running => "ClawEnv — Running",
         TrayStatus::Stopped => "ClawEnv — Stopped",
         TrayStatus::Error => "ClawEnv — Error",
-        TrayStatus::CveAlert => "ClawEnv — Security Alert",
-        TrayStatus::HumanIntervention => "ClawEnv — Action Required",
-        TrayStatus::Installing(_) => "ClawEnv — Installing...",
     };
     update_tray_tooltip(app, tooltip);
 }
