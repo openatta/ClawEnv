@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, SnapshotInfo, ResourceStats};
+use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, ResourceStats};
 
 pub struct WslBackend {
     distro_name: String,
@@ -21,13 +21,6 @@ impl WslBackend {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
             .join(".clawenv/wsl")
-            .join(&self.distro_name))
-    }
-
-    fn snapshot_dir(&self) -> Result<PathBuf> {
-        Ok(dirs::home_dir()
-            .ok_or_else(|| anyhow!("Cannot find home directory"))?
-            .join(".clawenv/wsl/snapshots")
             .join(&self.distro_name))
     }
 
@@ -309,57 +302,6 @@ echo "0" > "$DONE"
         Ok(output)
     }
 
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        let snap_dir = self.snapshot_dir()?;
-        tokio::fs::create_dir_all(&snap_dir).await?;
-        let snapshot_path = snap_dir.join(format!("{tag}.tar.gz"));
-        self.wsl_cmd(&["--export", &self.distro_name, &snapshot_path.to_string_lossy()]).await?;
-        tracing::info!("Snapshot '{}' created at {}", tag, snapshot_path.display());
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        let snap_dir = self.snapshot_dir()?;
-        let snapshot_path = snap_dir.join(format!("{tag}.tar.gz"));
-        if !snapshot_path.exists() {
-            anyhow::bail!("Snapshot '{tag}' not found at {}", snapshot_path.display());
-        }
-
-        let distro_dir = self.distro_dir()?;
-        let distro_path = distro_dir.to_string_lossy().to_string();
-        self.wsl_cmd(&["--unregister", &self.distro_name]).await?;
-        self.wsl_cmd(&[
-            "--import", &self.distro_name, &distro_path,
-            &snapshot_path.to_string_lossy(), "--version", "2",
-        ]).await?;
-        tracing::info!("Snapshot '{}' restored", tag);
-        Ok(())
-    }
-
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
-        let snap_dir = self.snapshot_dir()?;
-        if !snap_dir.exists() {
-            return Ok(vec![]);
-        }
-
-        let mut entries = tokio::fs::read_dir(&snap_dir).await?;
-        let mut snapshots = Vec::new();
-
-        while let Some(entry) = entries.next_entry().await? {
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("gz") {
-                let tag = path.file_stem().and_then(|s| s.to_str())
-                    .unwrap_or("").trim_end_matches(".tar").to_string();
-                let metadata = entry.metadata().await?;
-                let created = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
-                let created_at: chrono::DateTime<chrono::Utc> = created.into();
-                snapshots.push(SnapshotInfo { tag, created_at, size_bytes: metadata.len() });
-            }
-        }
-
-        Ok(snapshots)
-    }
-
     async fn stats(&self) -> Result<ResourceStats> {
         let output = self.wsl_cmd(&["--list", "--verbose"]).await?;
         for line in output.lines() {
@@ -463,7 +405,6 @@ echo "0" > "$DONE"
 
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
-    // WSL2 auto-forwards localhost ports, no portForwards needed
     fn supports_port_edit(&self) -> bool { false }
 }
 

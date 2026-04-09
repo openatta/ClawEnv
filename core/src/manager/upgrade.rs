@@ -3,7 +3,7 @@ use tokio::sync::mpsc;
 
 use crate::config::{ConfigManager, InstanceConfig};
 use crate::manager::instance::backend_for_instance;
-use crate::sandbox::{SandboxBackend, SandboxType};
+use crate::sandbox::SandboxType;
 use crate::update::checker::{self, VersionInfo};
 
 /// Check if an upgrade is available for an instance
@@ -37,20 +37,7 @@ pub async fn upgrade_instance(
     let backend = backend_for_instance(&instance)?;
     let version = target_version.unwrap_or("latest");
 
-    // 1. Pre-upgrade snapshot (sandbox only)
-    if instance.sandbox_type != SandboxType::Native {
-        send(tx, "Creating pre-upgrade snapshot...", 5, "snapshot").await;
-        let snap_tag = format!("pre-upgrade-{}", instance.version.replace(' ', "-"));
-        match backend.snapshot_create(&snap_tag).await {
-            Ok(()) => send(tx, &format!("Snapshot '{snap_tag}' created"), 15, "snapshot").await,
-            Err(e) => {
-                tracing::warn!("Snapshot failed (continuing): {e}");
-                send(tx, "Snapshot skipped (non-critical)", 15, "snapshot").await;
-            }
-        }
-    }
-
-    // 2. Stop gateway before upgrade
+    // 1. Stop gateway before upgrade
     send(tx, "Stopping gateway...", 20, "prepare").await;
     backend.exec("pkill -f 'openclaw gateway' 2>/dev/null || true").await.ok();
 
@@ -159,20 +146,6 @@ chmod +x /tmp/clawenv-upgrade.sh"#
 
     send(tx, &format!("Upgraded to {new_ver}"), 100, "done").await;
     Ok(new_ver)
-}
-
-/// Rollback to a pre-upgrade snapshot
-pub async fn rollback(instance: &InstanceConfig, tag: &str) -> Result<()> {
-    let backend = backend_for_instance(instance)?;
-    tracing::info!("Rolling back '{}' to snapshot '{tag}'", instance.name);
-    backend.snapshot_restore(tag).await?;
-    Ok(())
-}
-
-/// List available snapshots for an instance
-pub async fn list_snapshots(instance: &InstanceConfig) -> Result<Vec<crate::sandbox::SnapshotInfo>> {
-    let backend = backend_for_instance(instance)?;
-    backend.snapshot_list().await
 }
 
 async fn send(tx: &mpsc::Sender<UpgradeProgress>, message: &str, percent: u8, stage: &str) {

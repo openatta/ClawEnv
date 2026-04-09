@@ -115,6 +115,8 @@ pub async fn install_native(
         },
         resources: ResourceConfig::default(),
         browser: Default::default(),
+        cached_latest_version: String::new(),
+        cached_version_check_at: String::new(),
     });
     config.save()?;
 

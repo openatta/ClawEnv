@@ -281,6 +281,7 @@ function VmCard(props: {
           </div>
         </div>
       </Show>
+
     </div>
   );
 }

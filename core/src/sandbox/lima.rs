@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{SandboxBackend, SandboxOpts, SnapshotInfo, ResourceStats, InstallMode, ImageSource};
+use super::{SandboxBackend, SandboxOpts, ResourceStats, InstallMode, ImageSource};
 
 pub struct LimaBackend {
     vm_name: String,
@@ -314,38 +314,6 @@ impl SandboxBackend for LimaBackend {
             anyhow::bail!("command failed (exit {rc}): {cmd}");
         }
         Ok(output)
-    }
-
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        self.limactl(&["snapshot", "create", &self.vm_name, "--tag", tag]).await?;
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        self.limactl(&["snapshot", "apply", &self.vm_name, "--tag", tag]).await?;
-        Ok(())
-    }
-
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
-        let output = self.limactl(&["snapshot", "list", &self.vm_name, "--json"]).await;
-        match output {
-            Ok(json_str) => {
-                // Parse JSON output — limactl returns array of snapshots
-                #[derive(serde::Deserialize)]
-                struct LimaSnapshot {
-                    tag: String,
-                    #[serde(default)]
-                    created: String,
-                }
-                let snaps: Vec<LimaSnapshot> = serde_json::from_str(&json_str).unwrap_or_default();
-                Ok(snaps.into_iter().map(|s| SnapshotInfo {
-                    tag: s.tag,
-                    created_at: s.created.parse().unwrap_or_else(|_| chrono::Utc::now()),
-                    size_bytes: 0,
-                }).collect())
-            }
-            Err(_) => Ok(vec![]),
-        }
     }
 
     async fn stats(&self) -> Result<ResourceStats> {

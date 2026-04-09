@@ -62,15 +62,6 @@ pub trait SandboxBackend: Send + Sync {
         Ok(())
     }
 
-    /// 创建快照
-    async fn snapshot_create(&self, tag: &str) -> Result<()>;
-
-    /// 还原快照
-    async fn snapshot_restore(&self, tag: &str) -> Result<()>;
-
-    /// 列出快照
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>>;
-
     /// 获取资源使用情况
     async fn stats(&self) -> Result<ResourceStats>;
 
@@ -135,13 +126,6 @@ pub enum ImageSource {
     Remote { url: String, checksum_sha256: String },
     /// 从本地文件导入
     LocalFile { path: std::path::PathBuf },
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SnapshotInfo {
-    pub tag: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub size_bytes: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

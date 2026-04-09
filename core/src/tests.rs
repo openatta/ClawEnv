@@ -94,7 +94,6 @@ mod tests {
         assert_eq!(config.clawenv.proxy.no_proxy, "localhost,127.0.0.1");
         assert!(!config.clawenv.proxy.enabled);
         assert!(config.clawenv.updates.auto_check);
-        assert_eq!(config.clawenv.updates.snapshot_retention_count, 5);
     }
 
     #[test]

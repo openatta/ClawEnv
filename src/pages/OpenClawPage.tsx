@@ -146,11 +146,13 @@ export default function OpenClawPage(props: {
 
   // Config panel
   const [showConfig, setShowConfig] = createSignal(false);
-  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(props.instances[0]?.gateway_port ?? 3000);
-  const [cfgTtydPort, setCfgTtydPort] = createSignal(props.instances[0]?.ttyd_port ?? 7681);
+  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(3000);
+  const [cfgTtydPort, setCfgTtydPort] = createSignal(7681);
   const [cfgSaving, setCfgSaving] = createSignal(false);
   const [cfgError, setCfgError] = createSignal("");
   const [caps, setCaps] = createSignal<Record<string,boolean>>({});
+  let gatewayPortRef: HTMLInputElement | undefined;
+  let ttydPortRef: HTMLInputElement | undefined;
 
   async function openConfig() {
     const inst = activeInstance();
@@ -163,6 +165,11 @@ export default function OpenClawPage(props: {
       setCaps(c);
     } catch { setCaps({}); }
     setShowConfig(true);
+    // Force set input values after dialog renders
+    setTimeout(() => {
+      if (gatewayPortRef) gatewayPortRef.value = String(inst.gateway_port);
+      if (ttydPortRef) ttydPortRef.value = String(inst.ttyd_port);
+    }, 0);
   }
 
   // Check if ports conflict with other instances
@@ -343,13 +350,18 @@ export default function OpenClawPage(props: {
             <div class="space-y-3">
               <div>
                 <label class="block text-xs text-gray-400 mb-1">Gateway Port</label>
-                <input type="number" value={cfgGatewayPort()}
-                  onInput={(e) => { setCfgGatewayPort(parseInt(e.currentTarget.value) || 3000); setCfgTtydPort((parseInt(e.currentTarget.value) || 3000) + 4681); }}
+                <input ref={gatewayPortRef} type="number"
+                  onInput={(e) => {
+                    const v = parseInt(e.currentTarget.value) || 3000;
+                    setCfgGatewayPort(v);
+                    setCfgTtydPort(v + 4681);
+                    if (ttydPortRef) ttydPortRef.value = String(v + 4681);
+                  }}
                   class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
               </div>
               <div>
                 <label class="block text-xs text-gray-400 mb-1">Terminal (ttyd) Port</label>
-                <input type="number" value={cfgTtydPort()}
+                <input ref={ttydPortRef} type="number"
                   onInput={(e) => setCfgTtydPort(parseInt(e.currentTarget.value) || 7681)}
                   class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
               </div>
@@ -414,7 +426,7 @@ export default function OpenClawPage(props: {
                 {updateInfo()?.security && <span class="text-red-400 ml-2">⚠ Security</span>}
               </div>
               <p class="text-xs text-gray-500 mb-4">
-                A snapshot will be created before upgrading. You can rollback if needed.
+                The upgrade will stop the gateway, update OpenClaw, and restart.
               </p>
               <div class="flex gap-2 justify-end">
                 <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"

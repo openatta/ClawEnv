@@ -43,10 +43,6 @@ pub struct UpdateConfig {
     pub auto_check: bool,
     #[serde(default = "default_24")]
     pub check_interval_hours: u32,
-    #[serde(default = "default_true")]
-    pub auto_snapshot_before_upgrade: bool,
-    #[serde(default = "default_5")]
-    pub snapshot_retention_count: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +97,11 @@ pub struct InstanceConfig {
     pub resources: ResourceConfig,
     #[serde(default)]
     pub browser: BrowserConfig,
+    /// Cached latest version info (from last npm registry check)
+    #[serde(default)]
+    pub cached_latest_version: String,
+    #[serde(default)]
+    pub cached_version_check_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -183,8 +184,6 @@ impl Default for UpdateConfig {
         Self {
             auto_check: true,
             check_interval_hours: 24,
-            auto_snapshot_before_upgrade: true,
-            snapshot_retention_count: 5,
         }
     }
 }

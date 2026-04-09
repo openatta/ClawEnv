@@ -67,22 +67,11 @@ enum Commands {
         #[command(subcommand)]
         command: SandboxCommands,
     },
-    /// Snapshot management
-    Snapshot {
-        #[command(subcommand)]
-        command: SnapshotCommands,
-    },
     /// Upgrade OpenClaw to latest or specific version
     Upgrade {
         name: Option<String>,
         #[arg(long)]
         version: Option<String>,
-    },
-    /// Rollback to a previous snapshot
-    Rollback {
-        name: Option<String>,
-        #[arg(long)]
-        to: String,
     },
     /// Check for available updates
     UpdateCheck {
@@ -112,13 +101,6 @@ enum Commands {
 enum SandboxCommands {
     /// Execute a command in sandbox
     Exec { cmd: String, name: Option<String> },
-}
-
-#[derive(Subcommand)]
-enum SnapshotCommands {
-    Create { tag: String, name: Option<String> },
-    Restore { tag: String, name: Option<String> },
-    List { name: Option<String> },
 }
 
 fn resolve_name(name: Option<String>) -> String {
@@ -241,6 +223,8 @@ async fn main() -> Result<()> {
                 },
                 resources: ResourceConfig::default(),
                 browser: Default::default(),
+                cached_latest_version: String::new(),
+                cached_version_check_at: String::new(),
             });
             config.save()?;
 
@@ -344,39 +328,6 @@ async fn main() -> Result<()> {
             }
         },
 
-        Commands::Snapshot { command } => match command {
-            SnapshotCommands::Create { tag, name } => {
-                let name = resolve_name(name);
-                let config = clawenv_core::config::ConfigManager::load()?;
-                let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
-                let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
-                backend.snapshot_create(&tag).await?;
-                println!("Snapshot '{tag}' created for instance '{name}'.");
-            }
-            SnapshotCommands::Restore { tag, name } => {
-                let name = resolve_name(name);
-                let config = clawenv_core::config::ConfigManager::load()?;
-                let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
-                let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
-                backend.snapshot_restore(&tag).await?;
-                println!("Snapshot '{tag}' restored for instance '{name}'.");
-            }
-            SnapshotCommands::List { name } => {
-                let name = resolve_name(name);
-                let config = clawenv_core::config::ConfigManager::load()?;
-                let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
-                let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
-                let snaps = backend.snapshot_list().await?;
-                if snaps.is_empty() {
-                    println!("No snapshots for instance '{name}'.");
-                } else {
-                    for s in snaps {
-                        println!("  {} ({})", s.tag, s.created_at);
-                    }
-                }
-            }
-        },
-
         Commands::Upgrade { name, version } => {
             let name = resolve_name(name);
             let mut config = clawenv_core::config::ConfigManager::load()?;
@@ -389,14 +340,6 @@ async fn main() -> Result<()> {
                 &tx,
             ).await?;
             println!("Upgraded to {new_ver}");
-        }
-
-        Commands::Rollback { name, to } => {
-            let name = resolve_name(name);
-            let config = clawenv_core::config::ConfigManager::load()?;
-            let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
-            clawenv_core::manager::upgrade::rollback(inst, &to).await?;
-            println!("Rolled back instance '{name}' to snapshot '{to}'.");
         }
 
         Commands::UpdateCheck { name } => {

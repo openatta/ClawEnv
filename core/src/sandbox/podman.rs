@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, SnapshotInfo, ResourceStats};
+use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, ResourceStats};
 
 pub struct PodmanBackend {
     container_name: String,
@@ -267,61 +267,6 @@ impl SandboxBackend for PodmanBackend {
             anyhow::bail!("command failed in Podman (exit {rc}): {cmd}");
         }
         Ok(output)
-    }
-
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        let snapshot_image = format!("{}:snap-{}", self.image_tag, tag);
-        self.podman(&["commit", &self.container_name, &snapshot_image]).await?;
-        tracing::info!("Snapshot '{}' created as image '{}'", tag, snapshot_image);
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        let snapshot_image = format!("{}:snap-{}", self.image_tag, tag);
-
-        // Stop and remove current container
-        self.podman(&["stop", &self.container_name]).await.ok();
-        self.podman(&["rm", "-f", &self.container_name]).await.ok();
-
-        // Extract instance name and start from snapshot image
-        let instance_name = self.container_name.strip_prefix("clawenv-").unwrap_or(&self.container_name);
-        let workspace = Self::workspace_dir(instance_name)?;
-
-        self.podman_run(&[
-            "run", "-d",
-            "--name", &self.container_name,
-            "--userns=keep-id",
-            "-v", &format!("{}:/workspace:Z", workspace.to_string_lossy()),
-            "-p", &format!("127.0.0.1:{}:3000", self.port),
-            &snapshot_image,
-        ]).await?;
-
-        tracing::info!("Snapshot '{}' restored, container restarted", tag);
-        Ok(())
-    }
-
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
-        let prefix = format!("{}:snap-", self.image_tag);
-        let output = self.podman(&[
-            "images",
-            "--format", "{{.Repository}}:{{.Tag}} {{.CreatedAt}} {{.Size}}",
-            "--filter", &format!("reference={}", self.image_tag),
-        ]).await.unwrap_or_default();
-
-        let mut snapshots = Vec::new();
-        for line in output.lines() {
-            if let Some(rest) = line.strip_prefix(&prefix) {
-                let parts: Vec<&str> = rest.splitn(2, ' ').collect();
-                let tag = parts.first().unwrap_or(&"").to_string();
-                snapshots.push(SnapshotInfo {
-                    tag,
-                    created_at: chrono::Utc::now(), // Simplified; real impl would parse date
-                    size_bytes: 0,
-                });
-            }
-        }
-
-        Ok(snapshots)
     }
 
     async fn stats(&self) -> Result<ResourceStats> {

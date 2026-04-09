@@ -20,7 +20,7 @@ const i18n = {
     normal: "Normal User",
     normalDesc: ["Guided installation wizard", "Automatic sandbox (secure)", "One-click upgrade & alerts", "No technical knowledge required"],
     dev: "Developer",
-    devDesc: ["Full CLI toolchain", "Multi-instance management", "Native or sandbox mode", "Skill development scaffold", "Snapshot & rollback"],
+    devDesc: ["Full CLI toolchain", "Multi-instance management", "Native or sandbox mode", "Skill development scaffold"],
   },
 };
 

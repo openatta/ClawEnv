@@ -40,17 +40,3 @@ pub async fn upgrade_openclaw(app: tauri::AppHandle, name: String, target_versio
 
     Ok(())
 }
-
-#[tauri::command]
-pub async fn rollback_openclaw(name: String, snapshot_tag: String) -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    upgrade::rollback(inst, &snapshot_tag).await.map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn list_snapshots(name: String) -> Result<Vec<clawenv_core::sandbox::SnapshotInfo>, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    upgrade::list_snapshots(inst).await.map_err(|e| e.to_string())
-}

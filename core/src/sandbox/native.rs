@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 
-use super::{SandboxBackend, SandboxOpts, SnapshotInfo, ResourceStats};
+use super::{SandboxBackend, SandboxOpts, ResourceStats};
 
 /// Native 模式——直接在宿主机运行，无沙盒隔离（开发者专用）
 pub struct NativeBackend {
@@ -20,12 +20,6 @@ impl NativeBackend {
         Self { install_dir }
     }
 
-    fn snapshot_dir(&self) -> PathBuf {
-        self.install_dir
-            .parent()
-            .unwrap_or(&self.install_dir)
-            .join("snapshots")
-    }
 }
 
 #[async_trait]
@@ -127,72 +121,6 @@ impl SandboxBackend for NativeBackend {
             anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
         }
         Ok(output)
-    }
-
-    async fn snapshot_create(&self, tag: &str) -> Result<()> {
-        let snap_dir = self.snapshot_dir();
-        tokio::fs::create_dir_all(&snap_dir).await?;
-        let snapshot_path = snap_dir.join(format!("{tag}.tar.gz"));
-        let status = Command::new("tar")
-            .args([
-                "-czf", &snapshot_path.to_string_lossy(),
-                "-C", &self.install_dir.to_string_lossy(),
-                ".",
-            ])
-            .status()
-            .await?;
-        if !status.success() {
-            anyhow::bail!("Failed to create snapshot");
-        }
-        Ok(())
-    }
-
-    async fn snapshot_restore(&self, tag: &str) -> Result<()> {
-        let snapshot_path = self.snapshot_dir().join(format!("{tag}.tar.gz"));
-        if !snapshot_path.exists() {
-            anyhow::bail!("Snapshot '{tag}' not found");
-        }
-        tokio::fs::remove_dir_all(&self.install_dir).await?;
-        tokio::fs::create_dir_all(&self.install_dir).await?;
-        let status = Command::new("tar")
-            .args([
-                "-xzf", &snapshot_path.to_string_lossy(),
-                "-C", &self.install_dir.to_string_lossy(),
-            ])
-            .status()
-            .await?;
-        if !status.success() {
-            anyhow::bail!("Failed to restore snapshot");
-        }
-        Ok(())
-    }
-
-    async fn snapshot_list(&self) -> Result<Vec<SnapshotInfo>> {
-        let snap_dir = self.snapshot_dir();
-        let mut snapshots = vec![];
-        if snap_dir.exists() {
-            let mut entries = tokio::fs::read_dir(&snap_dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) == Some("gz") {
-                    let tag = path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("unknown")
-                        .to_string();
-                    let metadata = entry.metadata().await?;
-                    snapshots.push(SnapshotInfo {
-                        tag,
-                        created_at: metadata.modified()
-                            .ok()
-                            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                            .map(|d| chrono::DateTime::<chrono::Utc>::from_timestamp(d.as_secs() as i64, 0).unwrap_or_default())
-                            .unwrap_or_else(chrono::Utc::now),
-                        size_bytes: metadata.len(),
-                    });
-                }
-            }
-        }
-        Ok(snapshots)
     }
 
     async fn stats(&self) -> Result<ResourceStats> {

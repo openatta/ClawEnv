@@ -36,7 +36,14 @@ export default function App() {
     // Normal main window
     try {
       const result = await invoke<LaunchState>("detect_launch_state");
-      setState(result);
+      // detect_launch_state returns InstanceConfig (nested openclaw.gateway_port)
+      // but UI needs flat Instance format. Re-fetch via list_instances for correct shape.
+      if (result.type === "ready" || result.type === "upgrade_available") {
+        const instances = await invoke<Instance[]>("list_instances");
+        setState({ ...result, instances });
+      } else {
+        setState(result);
+      }
     } catch {
       setState({ type: "first_run" });
     }

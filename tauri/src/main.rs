@@ -188,8 +188,6 @@ fn main() {
             ipc::create_default_config,
             ipc::check_openclaw_update,
             ipc::upgrade_openclaw,
-            ipc::rollback_openclaw,
-            ipc::list_snapshots,
         ])
         .on_window_event(|window, event| {
             // Close button hides the window instead of quitting — app stays in tray
