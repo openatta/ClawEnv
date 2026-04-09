@@ -118,6 +118,35 @@ fn main() {
                 monitor.run(instances, tx).await;
             });
 
+            // Background update check (every 24h, first check after 30s)
+            let update_handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                loop {
+                    if let Ok(config) = ConfigManager::load() {
+                        for inst in config.instances() {
+                            match clawenv_core::update::checker::check_latest_version(&inst.version).await {
+                                Ok(info) if info.has_upgrade => {
+                                    tracing::info!("Update available for '{}': {} → {}", inst.name, info.current, info.latest);
+                                    let _ = update_handle.emit("update-available", &serde_json::json!({
+                                        "instance": inst.name,
+                                        "current": info.current,
+                                        "latest": info.latest,
+                                        "security": info.is_security_release,
+                                    }));
+                                    let title = if info.is_security_release { "Security Update Available" } else { "Update Available" };
+                                    tray::send_notification(&update_handle, title,
+                                        &format!("OpenClaw {} → {} for '{}'", info.current, info.latest, inst.name));
+                                }
+                                Ok(_) => tracing::debug!("No update for '{}'", inst.name),
+                                Err(e) => tracing::debug!("Update check failed for '{}': {e}", inst.name),
+                            }
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await; // 24h
+                }
+            });
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -157,6 +186,10 @@ fn main() {
             ipc::close_terminal,
             ipc::open_url_in_browser,
             ipc::create_default_config,
+            ipc::check_openclaw_update,
+            ipc::upgrade_openclaw,
+            ipc::rollback_openclaw,
+            ipc::list_snapshots,
         ])
         .on_window_event(|window, event| {
             // Close button hides the window instead of quitting — app stays in tray

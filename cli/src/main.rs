@@ -381,10 +381,12 @@ async fn main() -> Result<()> {
             let name = resolve_name(name);
             let mut config = clawenv_core::config::ConfigManager::load()?;
             println!("Upgrading instance '{name}'...");
-            let new_ver = clawenv_core::manager::upgrade::upgrade(
+            let (tx, _rx) = tokio::sync::mpsc::channel(16);
+            let new_ver = clawenv_core::manager::upgrade::upgrade_instance(
                 &mut config,
                 &name,
                 version.as_deref(),
+                &tx,
             ).await?;
             println!("Upgraded to {new_ver}");
         }
@@ -404,7 +406,7 @@ async fn main() -> Result<()> {
             println!("Checking for updates...");
             match clawenv_core::update::checker::check_latest_version(&inst.version).await {
                 Ok(info) => {
-                    if info.has_upgrade() {
+                    if info.has_upgrade {
                         println!("Update available: {} → {}", info.current, info.latest);
                         if info.is_security_release {
                             println!("  ⚠ This is a SECURITY release!");

@@ -1,7 +1,10 @@
-import { createSignal, For, Show } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
+type UpgradeInfo = { instance: string; current: string; latest: string; security: boolean };
+type UpgradeProgress = { message: string; percent: number; stage: string };
 
 export default function OpenClawPage(props: {
   instances: Instance[];
@@ -26,6 +29,67 @@ export default function OpenClawPage(props: {
   const [actionError, setActionError] = createSignal("");
   const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
   const [gatewayToken, setGatewayToken] = createSignal("");
+
+  // Upgrade state
+  const [updateInfo, setUpdateInfo] = createSignal<UpgradeInfo | null>(null);
+  const [showUpgrade, setShowUpgrade] = createSignal(false);
+  const [upgrading, setUpgrading] = createSignal(false);
+  const [upgradeProgress, setUpgradeProgress] = createSignal(0);
+  const [upgradeMessage, setUpgradeMessage] = createSignal("");
+  const [upgradeError, setUpgradeError] = createSignal("");
+
+  // Listen for update-available events from background checker
+  onMount(async () => {
+    const unUpdate = await listen<UpgradeInfo>("update-available", (ev) => {
+      if (ev.payload.instance === activeTab()) {
+        setUpdateInfo(ev.payload);
+      }
+    });
+    const unProgress = await listen<UpgradeProgress>("upgrade-progress", (ev) => {
+      setUpgradeProgress(ev.payload.percent);
+      setUpgradeMessage(ev.payload.message);
+    });
+    const unComplete = await listen<string>("upgrade-complete", (ev) => {
+      setUpgrading(false);
+      setShowUpgrade(false);
+      setUpdateInfo(null);
+      props.onInstancesChanged?.();
+    });
+    const unFailed = await listen<string>("upgrade-failed", (ev) => {
+      setUpgrading(false);
+      setUpgradeError(String(ev.payload));
+    });
+    onCleanup(() => { unUpdate(); unProgress(); unComplete(); unFailed(); });
+
+    // Also check now for active instance
+    checkUpdate();
+  });
+
+  async function checkUpdate() {
+    const name = activeTab();
+    if (!name) return;
+    try {
+      const info = await invoke<{ current: string; latest: string; has_upgrade: boolean; is_security_release: boolean }>(
+        "check_openclaw_update", { name }
+      );
+      if (info.has_upgrade) {
+        setUpdateInfo({ instance: name, current: info.current, latest: info.latest, security: info.is_security_release });
+      }
+    } catch { /* ignore check failures */ }
+  }
+
+  async function startUpgrade() {
+    setUpgrading(true);
+    setUpgradeError("");
+    setUpgradeProgress(0);
+    setUpgradeMessage("Starting...");
+    try {
+      await invoke("upgrade_openclaw", { name: activeTab(), targetVersion: null });
+    } catch (e) {
+      setUpgrading(false);
+      setUpgradeError(String(e));
+    }
+  }
 
   async function fetchToken() {
     try {
@@ -228,6 +292,26 @@ export default function OpenClawPage(props: {
 
             {actionError() && <p class="text-xs text-red-400 mb-3">{actionError()}</p>}
 
+            {/* Upgrade banner */}
+            <Show when={updateInfo() && updateInfo()!.instance === activeTab()}>
+              <div class={`rounded-lg p-3 mb-3 text-sm flex items-center justify-between ${
+                updateInfo()!.security ? "bg-red-900/30 border border-red-700" : "bg-indigo-900/30 border border-indigo-700"
+              }`}>
+                <div>
+                  <span class={updateInfo()!.security ? "text-red-300" : "text-indigo-300"}>
+                    {updateInfo()!.security ? "⚠ Security update" : "Update available"}:
+                  </span>
+                  <span class="text-gray-300 ml-1">
+                    {updateInfo()!.current} → {updateInfo()!.latest}
+                  </span>
+                </div>
+                <button class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs text-white"
+                  onClick={() => setShowUpgrade(true)}>
+                  Upgrade
+                </button>
+              </div>
+            </Show>
+
             {/* Info table */}
             <div class="bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500 mx-auto max-w-xl">
               <table class="w-full">
@@ -309,6 +393,54 @@ export default function OpenClawPage(props: {
               <button class="px-4 py-2 bg-red-700 hover:bg-red-600 rounded text-sm text-white font-medium"
                 onClick={doDelete}>Delete</button>
             </div>
+          </div>
+        </div>
+      </Show>
+
+      {/* Upgrade modal */}
+      <Show when={showUpgrade()}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-[420px] shadow-2xl">
+            <h3 class="text-base font-bold mb-3">
+              {upgrading() ? "Upgrading..." : "Upgrade OpenClaw"}
+            </h3>
+
+            <Show when={!upgrading()}>
+              <div class="text-sm text-gray-300 mb-2">
+                <span class="text-gray-400">Current:</span> {updateInfo()?.current}
+              </div>
+              <div class="text-sm text-gray-300 mb-4">
+                <span class="text-gray-400">Latest:</span> <span class="text-green-400">{updateInfo()?.latest}</span>
+                {updateInfo()?.security && <span class="text-red-400 ml-2">⚠ Security</span>}
+              </div>
+              <p class="text-xs text-gray-500 mb-4">
+                A snapshot will be created before upgrading. You can rollback if needed.
+              </p>
+              <div class="flex gap-2 justify-end">
+                <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+                  onClick={() => setShowUpgrade(false)}>Cancel</button>
+                <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                  onClick={startUpgrade}>Upgrade Now</button>
+              </div>
+            </Show>
+
+            <Show when={upgrading()}>
+              <div class="w-full bg-gray-700 rounded-full h-2 mb-2">
+                <div class="h-2 rounded-full bg-indigo-600 transition-all" style={{ width: `${upgradeProgress()}%` }} />
+              </div>
+              <p class="text-xs text-gray-400 mb-2">{upgradeMessage()}</p>
+              {upgradeError() && (
+                <div>
+                  <p class="text-xs text-red-400 mb-3">{upgradeError()}</p>
+                  <div class="flex gap-2 justify-end">
+                    <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+                      onClick={() => { setShowUpgrade(false); setUpgrading(false); }}>Close</button>
+                    <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                      onClick={startUpgrade}>Retry</button>
+                  </div>
+                </div>
+              )}
+            </Show>
           </div>
         </div>
       </Show>

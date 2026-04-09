@@ -55,7 +55,7 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
 
 async fn check_upgrade_available(instance: &InstanceConfig) -> Result<bool> {
     let info = crate::update::checker::check_latest_version(&instance.version).await?;
-    Ok(info.has_upgrade())
+    Ok(info.has_upgrade)
 }
 
 /// Auto-start OpenClaw after installation completes.
