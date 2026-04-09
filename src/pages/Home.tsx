@@ -1,8 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import SandboxTerminal from "../components/Terminal";
-
-type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
+import type { Instance } from "../types";
 type Lang = "zh-CN" | "en";
 type StatusDetail = { processes: string; resources: string; gateway_log: string };
 

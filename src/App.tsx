@@ -5,14 +5,7 @@ import { emit } from "@tauri-apps/api/event";
 import MainLayout from "./layouts/MainLayout";
 import InstallWizard from "./pages/Install";
 import UpgradePrompt from "./components/UpgradePrompt";
-
-type Instance = {
-  name: string;
-  sandbox_type: string;
-  version: string;
-  gateway_port: number;
-  ttyd_port: number;
-};
+import type { Instance } from "./types";
 
 type LaunchState =
   | { type: "loading" }

@@ -1,10 +1,7 @@
 import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-
-type Instance = { name: string; sandbox_type: string; version: string; gateway_port: number; ttyd_port: number };
-type UpgradeInfo = { instance: string; current: string; latest: string; security: boolean };
-type UpgradeProgress = { message: string; percent: number; stage: string };
+import type { Instance, UpgradeInfo, UpgradeProgress } from "../types";
 
 export default function OpenClawPage(props: {
   instances: Instance[];

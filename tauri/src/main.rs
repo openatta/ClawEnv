@@ -118,32 +118,57 @@ fn main() {
                 monitor.run(instances, tx).await;
             });
 
-            // Background update check (every 24h, first check after 30s)
+            // Background update check — first emit cached results immediately,
+            // then check network every hour, cache results to config.
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
+                // Emit cached update info immediately on startup
+                if let Ok(config) = ConfigManager::load() {
+                    for inst in config.instances() {
+                        if !inst.cached_latest_version.is_empty() && inst.cached_latest_version != inst.version {
+                            let _ = update_handle.emit("update-available", &serde_json::json!({
+                                "instance": inst.name,
+                                "current": inst.version,
+                                "latest": inst.cached_latest_version,
+                                "security": false,
+                            }));
+                        }
+                    }
+                }
+
+                // Then check network periodically
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 loop {
-                    if let Ok(config) = ConfigManager::load() {
-                        for inst in config.instances() {
+                    if let Ok(mut config) = ConfigManager::load() {
+                        let instances = config.instances().to_vec();
+                        for inst in &instances {
                             match clawenv_core::update::checker::check_latest_version(&inst.version).await {
-                                Ok(info) if info.has_upgrade => {
-                                    tracing::info!("Update available for '{}': {} → {}", inst.name, info.current, info.latest);
-                                    let _ = update_handle.emit("update-available", &serde_json::json!({
-                                        "instance": inst.name,
-                                        "current": info.current,
-                                        "latest": info.latest,
-                                        "security": info.is_security_release,
-                                    }));
-                                    let title = if info.is_security_release { "Security Update Available" } else { "Update Available" };
-                                    tray::send_notification(&update_handle, title,
-                                        &format!("OpenClaw {} → {} for '{}'", info.current, info.latest, inst.name));
+                                Ok(info) => {
+                                    // Cache the result
+                                    if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == inst.name) {
+                                        entry.cached_latest_version = info.latest.clone();
+                                        entry.cached_version_check_at = format!("{:?}", std::time::SystemTime::now());
+                                    }
+
+                                    if info.has_upgrade {
+                                        tracing::info!("Update available for '{}': {} → {}", inst.name, info.current, info.latest);
+                                        let _ = update_handle.emit("update-available", &serde_json::json!({
+                                            "instance": inst.name,
+                                            "current": info.current,
+                                            "latest": info.latest,
+                                            "security": info.is_security_release,
+                                        }));
+                                        let title = if info.is_security_release { "Security Update Available" } else { "Update Available" };
+                                        tray::send_notification(&update_handle, title,
+                                            &format!("OpenClaw {} → {} for '{}'", info.current, info.latest, inst.name));
+                                    }
                                 }
-                                Ok(_) => tracing::debug!("No update for '{}'", inst.name),
                                 Err(e) => tracing::debug!("Update check failed for '{}': {e}", inst.name),
                             }
                         }
+                        config.save().ok();
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(86400)).await; // 24h
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await; // 1h
                 }
             });
 
@@ -181,9 +206,6 @@ fn main() {
             ipc::get_gateway_token,
             ipc::get_bridge_config,
             ipc::save_bridge_config,
-            ipc::start_terminal,
-            ipc::write_terminal,
-            ipc::close_terminal,
             ipc::open_url_in_browser,
             ipc::create_default_config,
             ipc::check_openclaw_update,

@@ -233,7 +233,7 @@ fn default_bridge_port() -> u16 { 3100 }
 impl Default for BridgeConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
+            enabled: true,
             port: default_bridge_port(),
             permissions: BridgePermissions::default(),
         }

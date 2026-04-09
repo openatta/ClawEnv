@@ -4,7 +4,6 @@ mod instance;
 mod network;
 mod sandbox;
 mod settings;
-mod terminal;
 mod upgrade;
 
 pub use bridge::*;
@@ -13,5 +12,4 @@ pub use instance::*;
 pub use network::*;
 pub use sandbox::*;
 pub use settings::*;
-pub use terminal::*;
 pub use upgrade::*;

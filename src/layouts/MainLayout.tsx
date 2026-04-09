@@ -6,14 +6,7 @@ import Home from "../pages/Home";
 import OpenClawPage from "../pages/OpenClawPage";
 import SandboxPage from "../pages/SandboxPage";
 import Settings from "../pages/Settings";
-
-type Instance = {
-  name: string;
-  sandbox_type: string;
-  version: string;
-  gateway_port: number;
-  ttyd_port: number;
-};
+import type { Instance } from "../types";
 
 type Page = "home" | "openclaw" | "sandbox" | "settings";
 
