@@ -7,7 +7,7 @@ mod ipc;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::launcher;
 use clawenv_core::monitor::InstanceMonitor;
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 fn main() {
     // Initialize logging — visible when run from terminal
@@ -218,6 +218,18 @@ fn main() {
                 api.prevent_close();
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running ClawEnv");
+        .build(tauri::generate_context!())
+        .expect("error while building ClawEnv")
+        .run(|app, event| {
+            // macOS: clicking Dock icon when window is hidden should show it
+            #[cfg(target_os = "macos")]
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+                if !has_visible_windows {
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                }
+            }
+        });
 }

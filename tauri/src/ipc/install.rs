@@ -143,78 +143,10 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
     let arch_str = format!("{:?}", platform.arch);
 
     // Memory detection (cross-platform)
-    let memory_gb = {
-        #[cfg(target_os = "macos")]
-        {
-            let out = tokio::process::Command::new("sysctl")
-                .args(["-n", "hw.memsize"])
-                .output().await;
-            out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout).trim().parse::<f64>().ok()
-            }).unwrap_or(0.0) / 1_073_741_824.0
-        }
-        #[cfg(target_os = "linux")]
-        {
-            // /proc/meminfo: MemTotal: 16384000 kB
-            let out = tokio::fs::read_to_string("/proc/meminfo").await;
-            out.ok().and_then(|s| {
-                s.lines().find(|l| l.starts_with("MemTotal"))
-                    .and_then(|l| l.split_whitespace().nth(1))
-                    .and_then(|v| v.parse::<f64>().ok())
-            }).unwrap_or(0.0) / 1_048_576.0 // kB to GB
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let out = tokio::process::Command::new("wmic")
-                .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
-                .output().await;
-            out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines().find(|l| l.contains("="))
-                    .and_then(|l| l.split('=').nth(1))
-                    .and_then(|v| v.trim().parse::<f64>().ok())
-            }).unwrap_or(0.0) / 1_073_741_824.0
-        }
-    };
+    let memory_gb = clawenv_core::platform::process::system_memory_gb().await;
 
     // Disk free space (cross-platform)
-    let disk_free_gb = {
-        #[cfg(target_os = "macos")]
-        {
-            let out = tokio::process::Command::new("df")
-                .args(["-g", "/"])
-                .output().await;
-            out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines().nth(1)
-                    .and_then(|l| l.split_whitespace().nth(3))
-                    .and_then(|v| v.parse::<f64>().ok())
-            }).unwrap_or(0.0)
-        }
-        #[cfg(target_os = "linux")]
-        {
-            let out = tokio::process::Command::new("df")
-                .args(["--output=avail", "-BG", "/"])
-                .output().await;
-            out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines().nth(1)
-                    .and_then(|l| l.trim().trim_end_matches('G').parse::<f64>().ok())
-            }).unwrap_or(0.0)
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let out = tokio::process::Command::new("wmic")
-                .args(["LogicalDisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value"])
-                .output().await;
-            out.ok().and_then(|o| {
-                String::from_utf8_lossy(&o.stdout)
-                    .lines().find(|l| l.contains("="))
-                    .and_then(|l| l.split('=').nth(1))
-                    .and_then(|v| v.trim().parse::<f64>().ok())
-            }).unwrap_or(0.0) / 1_073_741_824.0
-        }
-    };
+    let disk_free_gb = clawenv_core::platform::process::disk_free_gb().await;
 
     // Sandbox backend
     let (backend_name, backend_available) = match detect_backend() {

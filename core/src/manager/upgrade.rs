@@ -39,7 +39,7 @@ pub async fn upgrade_instance(
 
     // 1. Stop gateway before upgrade
     send(tx, "Stopping gateway...", 20, "prepare").await;
-    backend.exec("pkill -f 'openclaw gateway' 2>/dev/null || true").await.ok();
+    backend.exec(&crate::platform::process::kill_by_name_cmd("openclaw gateway")).await.ok();
 
     // 3. Run npm upgrade
     send(tx, &format!("Upgrading OpenClaw to {version}..."), 25, "install").await;

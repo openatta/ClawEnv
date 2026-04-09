@@ -182,16 +182,20 @@ function VmCard(props: {
       </div>
 
       {/* Action buttons */}
-      <div class="flex gap-2 mt-2">
-        {isRunning() ? (
-          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
-            disabled={!!actionLoading()} onClick={() => doAction("stop")}>
-            {actionLoading() === "stop" ? "..." : "Stop"}
+      <div class="flex gap-2 mt-2 items-center">
+        {actionLoading() ? (
+          <span class="text-xs text-indigo-300 animate-pulse">
+            {actionLoading() === "start" ? "Starting..." : actionLoading() === "stop" ? "Stopping..." : actionLoading() === "delete" ? "Deleting..." : "Processing..."}
+          </span>
+        ) : isRunning() ? (
+          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+            onClick={() => doAction("stop")}>
+            Stop
           </button>
         ) : (
-          <button class="px-2 py-0.5 text-xs bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-50"
-            disabled={!!actionLoading()} onClick={() => doAction("start")}>
-            {actionLoading() === "start" ? "..." : "Start"}
+          <button class="px-2 py-0.5 text-xs bg-indigo-700 hover:bg-indigo-600 rounded"
+            onClick={() => doAction("start")}>
+            Start
           </button>
         )}
 

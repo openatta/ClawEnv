@@ -149,25 +149,21 @@ fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'st
             }
         }
         _ => {
-            // VM-based: check limactl / podman / wsl
-            let vm_name = format!("clawenv-{}", inst.name);
-            let output = std::process::Command::new("limactl")
-                .args(["list", "--json"])
+            // VM-based: use HTTP check on the gateway port (same as Native)
+            // This is more reliable than parsing limactl JSON and also works for WSL2/Podman
+            let check = std::process::Command::new("sh")
+                .args(["-c", &format!(
+                    "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
+                    inst.openclaw.gateway_port
+                )])
                 .output();
-            match output {
+            match check {
                 Ok(out) => {
-                    let text = String::from_utf8_lossy(&out.stdout);
-                    if (text.contains(&format!("\"name\":\"{vm_name}\""))
-                        || text.contains(&format!("\"name\": \"{vm_name}\"")))
-                        && (text.contains("\"status\":\"Running\"")
-                            || text.contains("\"status\": \"Running\""))
-                    {
-                        "🟢"
-                    } else {
-                        "🔴"
-                    }
+                    let code = String::from_utf8_lossy(&out.stdout);
+                    let code = code.trim().trim_matches('\'');
+                    if code != "000" && !code.is_empty() { "🟢" } else { "🔴" }
                 }
-                Err(_) => "⚪",
+                Err(_) => "🔴",
             }
         }
     }

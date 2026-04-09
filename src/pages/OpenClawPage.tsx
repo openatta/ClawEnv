@@ -22,6 +22,7 @@ export default function OpenClawPage(props: {
     return "bg-red-500";
   }
 
+  // actionLoading format: "action:instanceName" e.g. "start:default"
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal("");
   const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
@@ -97,7 +98,7 @@ export default function OpenClawPage(props: {
   fetchToken();
 
   async function doAction(action: string) {
-    setActionLoading(action);
+    setActionLoading(`${action}:${activeTab()}`);
     setActionError("");
     try {
       if (action === "start") {
@@ -118,7 +119,7 @@ export default function OpenClawPage(props: {
 
   async function doDelete() {
     setShowDeleteConfirm(false);
-    setActionLoading("delete");
+    setActionLoading(`delete:${activeTab()}`);
     setActionError("");
     try {
       await invoke("delete_instance", { name: activeTab() });
@@ -139,7 +140,8 @@ export default function OpenClawPage(props: {
     catch { prompt("Copy this URL:", url); }
   }
 
-  const loading = (action: string) => actionLoading() === action;
+  const loading = (action: string) => actionLoading() === `${action}:${activeTab()}`;
+  const anyLoading = () => actionLoading()?.endsWith(`:${activeTab()}`) ?? false;
 
   // Config panel
   const [showConfig, setShowConfig] = createSignal(false);
@@ -263,25 +265,25 @@ export default function OpenClawPage(props: {
             </p>
 
             {/* Action buttons */}
-            <div class="flex items-center justify-center gap-2 mb-4">
-              <Show when={!isRunning()}>
-                <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm disabled:opacity-50"
-                  disabled={!!actionLoading()} onClick={() => doAction("start")}>
-                  {loading("start") ? "Starting..." : "▶ Start"}
+            <div class="flex items-center justify-center gap-2 mb-2">
+              <Show when={!isRunning() && !anyLoading()}>
+                <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+                  onClick={() => doAction("start")}>
+                  ▶ Start
                 </button>
               </Show>
-              <Show when={isRunning()}>
+              <Show when={isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
                   onClick={openInBrowser}>
                   Open Control Panel ↗
                 </button>
-                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50"
-                  disabled={!!actionLoading()} onClick={() => doAction("stop")}>
-                  {loading("stop") ? "..." : "⏹ Stop"}
+                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                  onClick={() => doAction("stop")}>
+                  ⏹ Stop
                 </button>
-                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm disabled:opacity-50"
-                  disabled={!!actionLoading()} onClick={() => doAction("restart")}>
-                  {loading("restart") ? "..." : "↻ Restart"}
+                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                  onClick={() => doAction("restart")}>
+                  ↻ Restart
                 </button>
               </Show>
               <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
@@ -289,10 +291,21 @@ export default function OpenClawPage(props: {
                 ⚙ Configure
               </button>
               <button class="px-3 py-2 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-sm disabled:opacity-50 ml-2"
-                disabled={!!actionLoading()} onClick={() => setShowDeleteConfirm(true)}>
+                disabled={anyLoading()} onClick={() => setShowDeleteConfirm(true)}>
                 {loading("delete") ? "Deleting..." : "Delete"}
               </button>
             </div>
+
+            {/* Loading indicator */}
+            <Show when={anyLoading()}>
+              <div class="flex items-center justify-center gap-2 mb-2 text-sm text-indigo-300">
+                <span class="animate-pulse">●</span>
+                {loading("start") && "Starting instance, please wait..."}
+                {loading("stop") && "Stopping instance..."}
+                {loading("restart") && "Restarting instance, please wait..."}
+                {loading("delete") && "Deleting instance..."}
+              </div>
+            </Show>
 
             {actionError() && <p class="text-xs text-red-400 mb-3">{actionError()}</p>}
 
