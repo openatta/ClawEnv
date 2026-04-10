@@ -335,10 +335,51 @@ impl SandboxBackend for PodmanBackend {
         Ok(())
     }
 
+    async fn edit_port_forwards(&self, forwards: &[(u16, u16)]) -> Result<()> {
+        // Podman port binding is set at container creation — must recreate
+        // 1. Commit current container state to a temporary image
+        // 2. Stop & remove old container
+        // 3. Run new container with updated ports from the committed image
+
+        let tmp_image = format!("{}:port-edit-tmp", self.image_tag);
+
+        // Commit current state
+        self.podman(&["commit", &self.container_name, &tmp_image]).await?;
+
+        // Stop and remove old container
+        self.podman(&["stop", &self.container_name]).await.ok();
+        self.podman(&["rm", "-f", &self.container_name]).await?;
+
+        // Build port args
+        let instance_name = self.container_name.strip_prefix("clawenv-").unwrap_or(&self.container_name);
+        let workspace = Self::workspace_dir(instance_name)?;
+
+        let mut run_args = vec![
+            "run".to_string(), "-d".to_string(),
+            "--name".to_string(), self.container_name.clone(),
+            "--userns=keep-id".to_string(),
+            "-v".to_string(), format!("{}:/workspace:Z", workspace.to_string_lossy()),
+        ];
+        for &(guest_port, host_port) in forwards {
+            run_args.push("-p".to_string());
+            run_args.push(format!("127.0.0.1:{host_port}:{guest_port}"));
+        }
+        run_args.push(tmp_image.clone());
+
+        let arg_refs: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
+        let result = self.podman_run(&arg_refs).await;
+
+        // Clean up temp image regardless of success
+        self.podman(&["rmi", &tmp_image]).await.ok();
+
+        result?;
+        tracing::info!("Podman container '{}' recreated with ports: {:?}", self.container_name, forwards);
+        Ok(())
+    }
+
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
-    // Port is bound at `podman run -p`, changing requires container recreation
-    fn supports_port_edit(&self) -> bool { false }
+    fn supports_port_edit(&self) -> bool { true }
 }
 
 /// Parse a memory string like "128MiB", "2GiB", "512MB" into megabytes

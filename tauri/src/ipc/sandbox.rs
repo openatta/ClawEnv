@@ -55,22 +55,47 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
 
     #[cfg(target_os = "linux")]
     {
-        // Podman containers
+        // Podman containers — query with --size for actual disk usage
         let output = tokio::process::Command::new("podman")
-            .args(["ps", "-a", "--format", "{{.Names}}\t{{.Status}}\t{{.Size}}"])
+            .args(["ps", "-a", "--size", "--format", "{{.Names}}\t{{.Status}}\t{{.Size}}"])
             .output().await.map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&output.stdout);
         for line in stdout.lines() {
             let parts: Vec<&str> = line.split('\t').collect();
             if !parts.is_empty() {
+                let name = parts.first().unwrap_or(&"").to_string();
+                let size_str = parts.get(2).unwrap_or(&"-").to_string();
+
+                // Query resource limits via podman inspect
+                let (cpus, memory) = if !name.is_empty() {
+                    let inspect = tokio::process::Command::new("podman")
+                        .args(["inspect", "--format", "{{.HostConfig.NanoCpus}}\t{{.HostConfig.Memory}}", &name])
+                        .output().await.ok();
+                    if let Some(out) = inspect {
+                        let s = String::from_utf8_lossy(&out.stdout);
+                        let iparts: Vec<&str> = s.trim().split('\t').collect();
+                        let cpu = iparts.first().and_then(|v| v.parse::<u64>().ok())
+                            .map(|n| if n > 0 { format!("{}", n / 1_000_000_000) } else { "-".into() })
+                            .unwrap_or("-".into());
+                        let mem = iparts.get(1).and_then(|v| v.parse::<u64>().ok())
+                            .map(|n| if n > 0 { format!("{} MB", n / (1024 * 1024)) } else { "-".into() })
+                            .unwrap_or("-".into());
+                        (cpu, mem)
+                    } else {
+                        ("-".into(), "-".into())
+                    }
+                } else {
+                    ("-".into(), "-".into())
+                };
+
                 vms.push(SandboxVmInfo {
-                    name: parts.first().unwrap_or(&"").to_string(),
+                    managed: name.starts_with("clawenv-"),
+                    name,
                     status: parts.get(1).unwrap_or(&"").to_string(),
-                    cpus: "-".to_string(),
-                    memory: "-".to_string(),
-                    disk: parts.get(2).unwrap_or(&"-").to_string(),
-                    dir_size: "-".to_string(),
-                    managed: parts.first().unwrap_or(&"").starts_with("clawenv-"),
+                    cpus,
+                    memory,
+                    disk: size_str.clone(),
+                    dir_size: size_str,
                 });
             }
         }
@@ -83,17 +108,34 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
             .args(["--list", "--verbose"])
             .output().await.map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&output.stdout);
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
         for line in stdout.lines().skip(1) {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 3 {
                 let name = parts[0].trim_start_matches('*').trim();
+
+                // Measure distro vhdx disk usage
+                let distro_dir = format!("{}\\.clawenv\\wsl\\{}", home.replace('/', "\\"), name);
+                let dir_size = if std::path::Path::new(&distro_dir).exists() {
+                    let du = tokio::process::Command::new("powershell")
+                        .args(["-Command", &format!(
+                            "(Get-ChildItem -Recurse '{}' -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB | ForEach-Object {{ '{{0:N1}} GB' -f $_ }}",
+                            distro_dir
+                        )])
+                        .output().await.ok();
+                    du.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                        .unwrap_or("-".into())
+                } else {
+                    "-".to_string()
+                };
+
                 vms.push(SandboxVmInfo {
                     name: name.to_string(),
                     status: parts[1].to_string(),
                     cpus: "-".to_string(),
                     memory: "-".to_string(),
-                    disk: "-".to_string(),
-                    dir_size: "-".to_string(),
+                    disk: dir_size.clone(),
+                    dir_size,
                     managed: name.starts_with("ClawEnv"),
                 });
             }
@@ -113,9 +155,40 @@ pub async fn get_sandbox_disk_usage() -> Result<String, String> {
         let s = String::from_utf8_lossy(&output.stdout);
         Ok(s.split_whitespace().next().unwrap_or("unknown").to_string())
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
     {
-        Ok("unknown".to_string())
+        // Use podman system df to get total disk usage
+        let output = tokio::process::Command::new("podman")
+            .args(["system", "df", "--format", "{{.TotalSize}}"])
+            .output().await.map_err(|e| e.to_string())?;
+        if output.status.success() {
+            let s = String::from_utf8_lossy(&output.stdout);
+            // Sum all lines (images, containers, volumes)
+            let total = s.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>().join(" + ");
+            if total.is_empty() { Ok("0B".to_string()) } else { Ok(total) }
+        } else {
+            Ok("unknown".to_string())
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Measure the WSL distro storage directory
+        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
+        let wsl_dir = format!("{}/.clawenv/wsl", home);
+        let path = std::path::Path::new(&wsl_dir);
+        if path.exists() {
+            // Use PowerShell to get directory size
+            let output = tokio::process::Command::new("powershell")
+                .args(["-Command", &format!(
+                    "(Get-ChildItem -Recurse '{}' -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB | ForEach-Object {{ '{{0:N1}} GB' -f $_ }}",
+                    wsl_dir.replace('/', "\\")
+                )])
+                .output().await.map_err(|e| e.to_string())?;
+            let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if s.is_empty() { Ok("0 GB".to_string()) } else { Ok(s) }
+        } else {
+            Ok("0 GB".to_string())
+        }
     }
 }
 

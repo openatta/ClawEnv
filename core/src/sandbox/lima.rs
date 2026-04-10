@@ -95,6 +95,32 @@ impl LimaBackend {
     }
 }
 
+/// Parse two /proc/stat "cpu" lines into a CPU usage percentage.
+fn parse_lima_cpu_usage(line1: &str, line2: &str) -> f32 {
+    fn parse_fields(line: &str) -> Option<(u64, u64)> {
+        let parts: Vec<u64> = line.split_whitespace()
+            .skip(1)
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() < 4 {
+            return None;
+        }
+        let idle = parts[3] + parts.get(4).unwrap_or(&0);
+        let total: u64 = parts.iter().sum();
+        Some((idle, total))
+    }
+
+    let (Some((idle1, total1)), Some((idle2, total2))) =
+        (parse_fields(line1), parse_fields(line2)) else { return 0.0 };
+
+    let total_diff = total2.saturating_sub(total1);
+    let idle_diff = idle2.saturating_sub(idle1);
+    if total_diff == 0 {
+        return 0.0;
+    }
+    ((total_diff - idle_diff) as f32 / total_diff as f32) * 100.0
+}
+
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
     let hash = Sha256::digest(data);
@@ -267,7 +293,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn stats(&self) -> Result<ResourceStats> {
-        // Query Lima VM info for resource usage
+        // Query Lima VM config for memory limit
         let output = self.limactl(&["list", "--json"]).await?;
 
         #[derive(serde::Deserialize)]
@@ -281,15 +307,54 @@ impl SandboxBackend for LimaBackend {
         }
 
         let vms: Vec<LimaVm> = serde_json::from_str(&output).unwrap_or_default();
-        if let Some(vm) = vms.iter().find(|v| v.name == self.vm_name) {
-            Ok(ResourceStats {
-                cpu_percent: 0.0, // Lima doesn't report real-time CPU
-                memory_used_mb: 0,
-                memory_limit_mb: vm.memory / (1024 * 1024),
-            })
-        } else {
-            Ok(ResourceStats::default())
+        let memory_limit_mb = vms.iter()
+            .find(|v| v.name == self.vm_name)
+            .map(|vm| vm.memory / (1024 * 1024))
+            .unwrap_or(0);
+
+        if memory_limit_mb == 0 {
+            return Ok(ResourceStats::default());
         }
+
+        // Query real memory usage from inside the VM via /proc/meminfo
+        let meminfo = self.exec("cat /proc/meminfo 2>/dev/null || echo ''").await.unwrap_or_default();
+        let mut mem_total_kb: u64 = 0;
+        let mut mem_available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if let Some(val) = line.strip_prefix("MemTotal:") {
+                mem_total_kb = val.trim().strip_suffix("kB").unwrap_or(val.trim())
+                    .trim().parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("MemAvailable:") {
+                mem_available_kb = val.trim().strip_suffix("kB").unwrap_or(val.trim())
+                    .trim().parse().unwrap_or(0);
+            }
+        }
+        let memory_used_mb = if mem_total_kb > 0 {
+            (mem_total_kb / 1024).saturating_sub(mem_available_kb / 1024)
+        } else {
+            0
+        };
+
+        // Query CPU usage from /proc/stat (two samples, 1s apart)
+        let cpu_percent = match self.exec(
+            "head -1 /proc/stat; sleep 1; head -1 /proc/stat"
+        ).await {
+            Ok(output) => {
+                let lines: Vec<&str> = output.lines().collect();
+                if lines.len() >= 2 {
+                    parse_lima_cpu_usage(lines[0], lines[1])
+                } else {
+                    0.0
+                }
+            }
+            Err(_) => 0.0,
+        };
+
+        Ok(ResourceStats {
+            cpu_percent,
+            memory_used_mb,
+            memory_limit_mb,
+        })
     }
 
     async fn import_image(&self, path: &Path) -> Result<()> {

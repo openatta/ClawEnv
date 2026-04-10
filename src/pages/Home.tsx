@@ -1,6 +1,5 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import SandboxTerminal from "../components/Terminal";
 import type { Instance } from "../types";
 type Lang = "zh-CN" | "en";
 type StatusDetail = { processes: string; resources: string; gateway_log: string };
@@ -42,9 +41,6 @@ export default function Home(props: {
   const [statusTab, setStatusTab] = createSignal<"processes" | "resources" | "logs">("processes");
   const [statusData, setStatusData] = createSignal<StatusDetail | null>(null);
   const [statusLoading, setStatusLoading] = createSignal(false);
-
-  // Terminal modal
-  const [terminalFor, setTerminalFor] = createSignal<string | null>(null);
 
   async function openStatus(name: string) {
     setStatusFor(name);
@@ -143,10 +139,6 @@ export default function Home(props: {
                       onClick={() => openStatus(inst.name)}>
                       {l().status}
                     </button>
-                    <button class="px-3 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded"
-                      onClick={() => setTerminalFor(inst.name)}>
-                      Terminal
-                    </button>
                   </div>
                 </div>
               );
@@ -221,14 +213,6 @@ export default function Home(props: {
         </div>
       </Show>
 
-      {/* Terminal Modal */}
-      {terminalFor() && (
-        <SandboxTerminal
-          instanceName={terminalFor()!}
-          ttydPort={props.instances.find(i => i.name === terminalFor())?.ttyd_port ?? 7681}
-          onClose={() => setTerminalFor(null)}
-        />
-      )}
     </div>
   );
 }

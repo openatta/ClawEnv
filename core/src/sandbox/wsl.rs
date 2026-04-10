@@ -303,17 +303,48 @@ echo "0" > "$DONE"
     }
 
     async fn stats(&self) -> Result<ResourceStats> {
-        let output = self.wsl_cmd(&["--list", "--verbose"]).await?;
-        for line in output.lines() {
-            if line.contains(&self.distro_name) {
-                return Ok(ResourceStats {
-                    cpu_percent: 0.0,
-                    memory_used_mb: 0,
-                    memory_limit_mb: 0,
-                });
+        // Verify the distro exists
+        let list_output = self.wsl_cmd(&["--list", "--verbose"]).await?;
+        if !list_output.lines().any(|l| l.contains(&self.distro_name)) {
+            return Ok(ResourceStats::default());
+        }
+
+        // Query memory from /proc/meminfo inside the WSL distro
+        let meminfo = self.exec("cat /proc/meminfo 2>/dev/null || echo ''").await.unwrap_or_default();
+        let mut mem_total_kb: u64 = 0;
+        let mut mem_available_kb: u64 = 0;
+        for line in meminfo.lines() {
+            if let Some(val) = line.strip_prefix("MemTotal:") {
+                mem_total_kb = val.trim().strip_suffix("kB").unwrap_or(val.trim())
+                    .trim().parse().unwrap_or(0);
+            } else if let Some(val) = line.strip_prefix("MemAvailable:") {
+                mem_available_kb = val.trim().strip_suffix("kB").unwrap_or(val.trim())
+                    .trim().parse().unwrap_or(0);
             }
         }
-        Ok(ResourceStats::default())
+        let memory_limit_mb = mem_total_kb / 1024;
+        let memory_used_mb = memory_limit_mb.saturating_sub(mem_available_kb / 1024);
+
+        // Query CPU usage from /proc/stat (two samples, 1s apart)
+        let cpu_percent = match self.exec(
+            "head -1 /proc/stat; sleep 1; head -1 /proc/stat"
+        ).await {
+            Ok(output) => {
+                let lines: Vec<&str> = output.lines().collect();
+                if lines.len() >= 2 {
+                    parse_cpu_usage(lines[0], lines[1])
+                } else {
+                    0.0
+                }
+            }
+            Err(_) => 0.0,
+        };
+
+        Ok(ResourceStats {
+            cpu_percent,
+            memory_used_mb,
+            memory_limit_mb,
+        })
     }
 
     async fn import_image(&self, path: &Path) -> Result<()> {
@@ -403,9 +434,48 @@ echo "0" > "$DONE"
         Ok(())
     }
 
+    async fn edit_port_forwards(&self, forwards: &[(u16, u16)]) -> Result<()> {
+        // WSL2 port forwarding via netsh interface portproxy
+        // First, clear existing ClawEnv port proxies by removing known ports
+        // Then add new ones
+
+        // Get the WSL2 distro's IP address
+        let wsl_ip = self.exec("hostname -I 2>/dev/null | awk '{print $1}'")
+            .await?
+            .trim()
+            .to_string();
+        if wsl_ip.is_empty() {
+            anyhow::bail!("Cannot determine WSL2 distro IP address");
+        }
+
+        // Remove all existing portproxy rules, then add new ones
+        // Reset v4tov4 portproxy (requires admin, but so does adding rules)
+        for &(guest_port, host_port) in forwards {
+            // Delete existing rule (ignore errors if it doesn't exist)
+            let _ = Command::new("netsh")
+                .args(["interface", "portproxy", "delete", "v4tov4",
+                       &format!("listenport={host_port}"), "listenaddress=127.0.0.1"])
+                .output().await;
+
+            // Add new rule
+            let out = Command::new("netsh")
+                .args(["interface", "portproxy", "add", "v4tov4",
+                       &format!("listenport={host_port}"), "listenaddress=127.0.0.1",
+                       &format!("connectport={guest_port}"), &format!("connectaddress={wsl_ip}")])
+                .output().await?;
+            if !out.status.success() {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                anyhow::bail!("netsh portproxy add failed for {host_port}->{guest_port}: {stderr}");
+            }
+        }
+
+        tracing::info!("WSL2 port forwards updated: {:?} (via {})", forwards, wsl_ip);
+        Ok(())
+    }
+
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
-    fn supports_port_edit(&self) -> bool { false }
+    fn supports_port_edit(&self) -> bool { true }
 }
 
 /// Update or insert a key=value in .wslconfig under [wsl2] section
@@ -433,6 +503,33 @@ fn set_wslconfig_value(config: &str, key: &str, value: &str) -> String {
     }
 
     lines.join("\n")
+}
+
+/// Parse two /proc/stat "cpu" lines into a CPU usage percentage.
+/// Format: cpu user nice system idle iowait irq softirq steal
+fn parse_cpu_usage(line1: &str, line2: &str) -> f32 {
+    fn parse_fields(line: &str) -> Option<(u64, u64)> {
+        let parts: Vec<u64> = line.split_whitespace()
+            .skip(1) // skip "cpu"
+            .filter_map(|s| s.parse().ok())
+            .collect();
+        if parts.len() < 4 {
+            return None;
+        }
+        let idle = parts[3] + parts.get(4).unwrap_or(&0); // idle + iowait
+        let total: u64 = parts.iter().sum();
+        Some((idle, total))
+    }
+
+    let (Some((idle1, total1)), Some((idle2, total2))) =
+        (parse_fields(line1), parse_fields(line2)) else { return 0.0 };
+
+    let total_diff = total2.saturating_sub(total1);
+    let idle_diff = idle2.saturating_sub(idle1);
+    if total_diff == 0 {
+        return 0.0;
+    }
+    ((total_diff - idle_diff) as f32 / total_diff as f32) * 100.0
 }
 
 fn sha256_hex(data: &[u8]) -> String {

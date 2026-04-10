@@ -60,8 +60,9 @@ pub async fn detect_host_ip() -> Result<String> {
 
     #[cfg(target_os = "windows")]
     {
+        // Accept both DHCP and Manual (static) IP assignments, excluding loopback and virtual adapters
         let out = tokio::process::Command::new("powershell")
-            .args(["-Command", "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike '*Loopback*' -and $_.PrefixOrigin -eq 'Dhcp' } | Select-Object -First 1).IPAddress"])
+            .args(["-Command", "(Get-NetIPAddress -AddressFamily IPv4 | Where-Object { $_.InterfaceAlias -notlike '*Loopback*' -and $_.InterfaceAlias -notlike '*vEthernet*' -and ($_.PrefixOrigin -eq 'Dhcp' -or $_.PrefixOrigin -eq 'Manual') } | Select-Object -First 1).IPAddress"])
             .output()
             .await;
         if let Ok(out) = out {
