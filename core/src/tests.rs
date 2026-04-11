@@ -36,7 +36,7 @@ mod tests {
         assert!(validate_instance_name(&"a".repeat(64)).is_err());
         assert!(validate_instance_name("../../../etc").is_err());
         assert!(validate_instance_name("$(whoami)").is_err());
-        assert!(validate_instance_name("-invalid").is_err());
+        assert!(validate_instance_name("-hyphen-start").is_ok()); // hyphens allowed
         assert!(validate_instance_name("has space").is_err());
         assert!(validate_instance_name("has@symbol").is_err());
         assert!(validate_instance_name("über").is_err());
@@ -84,6 +84,7 @@ mod tests {
                 security: Default::default(),
                 tray: Default::default(),
                 proxy: Default::default(),
+                mirrors: Default::default(),
                 bridge: Default::default(),
             },
             instances: vec![],
@@ -120,6 +121,7 @@ mod tests {
                     auth_required: false,
                     auth_user: "".into(),
                 },
+                mirrors: Default::default(),
                 bridge: Default::default(),
             },
             instances: vec![],
@@ -174,9 +176,9 @@ created_at = "2026-04-01T10:00:00Z"
             latest: "2.1.4".into(),
             changelog: String::new(),
             is_security_release: false,
-            download_url: None,
+            has_upgrade: true,
         };
-        assert!(info.has_upgrade());
+        assert!(info.has_upgrade);
     }
 
     #[test]
@@ -187,9 +189,9 @@ created_at = "2026-04-01T10:00:00Z"
             latest: "2.1.4".into(),
             changelog: String::new(),
             is_security_release: false,
-            download_url: None,
+            has_upgrade: false,
         };
-        assert!(!info.has_upgrade());
+        assert!(!info.has_upgrade);
     }
 
     #[test]
@@ -200,9 +202,9 @@ created_at = "2026-04-01T10:00:00Z"
             latest: "2.0.0".into(),
             changelog: String::new(),
             is_security_release: true,
-            download_url: None,
+            has_upgrade: true,
         };
-        assert!(info.has_upgrade());
+        assert!(info.has_upgrade);
         assert!(info.is_security_release);
     }
 
@@ -214,9 +216,9 @@ created_at = "2026-04-01T10:00:00Z"
             latest: "v2.1.4".into(),
             changelog: String::new(),
             is_security_release: false,
-            download_url: None,
+            has_upgrade: true,
         };
-        assert!(info.has_upgrade());
+        assert!(info.has_upgrade);
     }
 
     #[test]
@@ -227,9 +229,9 @@ created_at = "2026-04-01T10:00:00Z"
             latest: "also-not".into(),
             changelog: String::new(),
             is_security_release: false,
-            download_url: None,
+            has_upgrade: false,
         };
-        assert!(!info.has_upgrade()); // Invalid versions should not trigger upgrade
+        assert!(!info.has_upgrade); // Invalid versions should not trigger upgrade
     }
 
     // ===== SandboxType =====

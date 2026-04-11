@@ -4,6 +4,7 @@
 #![cfg(test)]
 
 use crate::claw::ClawRegistry;
+use crate::sandbox::SandboxBackend;
 use crate::sandbox::mock::MockBackend;
 
 /// For each builtin claw, verify the install flow sends correct commands.
@@ -76,8 +77,10 @@ async fn install_commands_use_descriptor_for_all_claws() {
             backend.assert_not_called_with("openclaw");
         }
 
-        // Gateway command must contain the correct port
-        backend.assert_called_with(&desc.default_port.to_string());
+        // Gateway command must contain the correct port (if gateway_cmd uses {port})
+        if desc.gateway_cmd.contains("{port}") {
+            backend.assert_called_with(&desc.default_port.to_string());
+        }
     }
 }
 
