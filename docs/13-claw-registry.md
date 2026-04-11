@@ -10,9 +10,13 @@
 
 ---
 
-## A 类：npm 包安装（在线沙盒安装）
+## A 类：ClawEnv 可独立安装管理的产品
 
-ClawEnv 可通过 `npm install -g {package}` 直接安装的独立 claw 产品。
+仅包含 ClawEnv 能通过 `npm install -g` 独立安装的产品（收录于 `assets/claw-registry.toml`）。
+
+> **注意**：国内产品（AutoClaw/QClaw/EasyClaw/ArkClaw/DuClaw/Kimi Claw）已从程序中移除，
+> 因为它们均为 OpenClaw 的封装/分发渠道，自带安装器，ClawEnv 无需重复管理。
+> 详见 [14-claw-repackaging-analysis.md](14-claw-repackaging-analysis.md)。
 
 | # | 产品 ID | 显示名 | npm 包名 | 评分区间 | 默认端口 | 验证状态 | 说明 |
 |---|--------|--------|---------|---------|---------|---------|------|

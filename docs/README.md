@@ -21,3 +21,4 @@
 | 10 | [安全模型](10-security.md) | 凭证安全、沙盒隔离、CVE 响应、快照策略 |
 | 11 | [开发路线图](11-roadmap.md) | Phase 1–4、开发指引、环境搭建、关键约束 |
 | 13 | [Claw 生态注册表](13-claw-registry.md) | 47 款 Claw 产品评测、安装方式分类、ClawEnv 支持矩阵 |
+| 14 | [国产 Claw 包装关系分析](14-claw-repackaging-analysis.md) | 证据链：国内 6 大 claw 产品均为 OpenClaw 封装 |

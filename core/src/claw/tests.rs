@@ -117,17 +117,10 @@ mod descriptor_tests {
 
     #[test]
     fn all_builtin_claws_have_valid_commands() {
+        // Only products ClawEnv can independently install via npm
         //       id,          binary,       port, apikey, mcp
         assert_claw_commands("openclaw",   "openclaw",   3000, true,  true);
-        assert_claw_commands("zeroclaw",   "zeroclaw",   3000, true,  false);
-        assert_claw_commands("autoclaw",   "autoclaw",   8080, true,  false);
-        assert_claw_commands("qclaw",      "qclaw",      3000, true,  false);
-        assert_claw_commands("kimi-claw",  "kimi-claw",  3000, true,  false);
-        assert_claw_commands("easyclaw",   "easyclaw",   9000, true,  false);
-        assert_claw_commands("duclaw",     "duclaw",     3000, true,  false);
-        assert_claw_commands("arkclaw",    "arkclaw",    8080, true,  false);
-        assert_claw_commands("maxclaw",    "maxclaw",    3000, true,  false);
-        assert_claw_commands("chatclaw",   "chatclaw",   3000, true,  false);
+        assert_claw_commands("nanoclaw",   "nanoclaw",   3000, true,  false);
     }
 
     // ---- Edge cases ----
@@ -171,19 +164,18 @@ mod registry_tests {
         let reg = ClawRegistry::load();
         let ids = reg.list_ids();
         assert!(ids.contains(&"openclaw"), "missing openclaw");
-        assert!(ids.contains(&"zeroclaw"), "missing zeroclaw");
-        assert!(ids.contains(&"autoclaw"), "missing autoclaw");
-        assert!(ids.len() >= 10, "expected at least 10 builtin claws, got {}", ids.len());
+        assert!(ids.contains(&"nanoclaw"), "missing nanoclaw");
+        assert!(ids.len() >= 2, "expected at least 2 builtin claws, got {}", ids.len());
     }
 
     #[test]
     fn registry_get_returns_correct_descriptor() {
         let reg = ClawRegistry::load();
-        let d = reg.get("autoclaw");
-        assert_eq!(d.id, "autoclaw");
-        assert_eq!(d.display_name, "智谱 AutoClaw");
-        assert_eq!(d.npm_package, "@zhipu/autoclaw");
-        assert_eq!(d.default_port, 8080);
+        let d = reg.get("nanoclaw");
+        assert_eq!(d.id, "nanoclaw");
+        assert_eq!(d.display_name, "NanoClaw");
+        assert_eq!(d.npm_package, "nanoclaw");
+        assert_eq!(d.default_port, 3000);
     }
 
     #[test]
