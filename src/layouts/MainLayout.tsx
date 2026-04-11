@@ -10,9 +10,6 @@ import type { Instance, ClawType } from "../types";
 
 export type Page = "home" | "sandbox" | "settings" | `claw:${string}`;
 
-/** Pinned claw types: verified npm-installable products shown permanently in icon bar.
- *  Others (unverified / not yet on npm) go to the "more" overflow dialog. */
-const PINNED_CLAW_IDS = ["openclaw", "nemoclaw", "easyclaw", "duclaw", "maxclaw"];
 
 export default function MainLayout(props: { instances: Instance[] }) {
   const [activePage, setActivePage] = createSignal<Page>("home");
@@ -106,8 +103,6 @@ export default function MainLayout(props: { instances: Instance[] }) {
         onNavigate={setActivePage}
         clawTypes={clawTypes()}
         instances={instances()}
-        pinnedClawIds={PINNED_CLAW_IDS}
-        onAddInstance={openInstallWindow}
       />
       <main class="flex-1 overflow-hidden">
         {activePage() === "home" && (
