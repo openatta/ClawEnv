@@ -3,7 +3,7 @@ use clawenv_core::manager::{instance, upgrade};
 use tauri::Emitter;
 
 #[tauri::command]
-pub async fn check_openclaw_update(name: String) -> Result<clawenv_core::update::checker::VersionInfo, String> {
+pub async fn check_instance_update(name: String) -> Result<clawenv_core::update::checker::VersionInfo, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
@@ -13,7 +13,7 @@ pub async fn check_openclaw_update(name: String) -> Result<clawenv_core::update:
 }
 
 #[tauri::command]
-pub async fn upgrade_openclaw(app: tauri::AppHandle, name: String, target_version: Option<String>) -> Result<(), String> {
+pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_version: Option<String>) -> Result<(), String> {
     let mut config = ConfigManager::load()
         .or_else(|_| ConfigManager::create_default(UserMode::General))
         .map_err(|e| e.to_string())?;

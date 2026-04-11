@@ -65,7 +65,7 @@ export default function ClawPage(props: {
     if (!name) return;
     try {
       const info = await invoke<{ current: string; latest: string; has_upgrade: boolean; is_security_release: boolean }>(
-        "check_openclaw_update", { name }
+        "check_instance_update", { name }
       );
       if (info.has_upgrade) {
         setUpdateInfo({ instance: name, current: info.current, latest: info.latest, security: info.is_security_release });
@@ -79,7 +79,7 @@ export default function ClawPage(props: {
     setUpgradeProgress(0);
     setUpgradeMessage("Starting...");
     try {
-      await invoke("upgrade_openclaw", { name: activeTab(), targetVersion: null });
+      await invoke("upgrade_instance", { name: activeTab(), targetVersion: null });
     } catch (e) {
       setUpgrading(false);
       setUpgradeError(String(e));

@@ -211,8 +211,8 @@ fn main() {
             ipc::save_bridge_config,
             ipc::open_url_in_browser,
             ipc::create_default_config,
-            ipc::check_openclaw_update,
-            ipc::upgrade_openclaw,
+            ipc::check_instance_update,
+            ipc::upgrade_instance,
             ipc::claw::list_claw_types,
         ])
         .on_window_event(|window, event| {
