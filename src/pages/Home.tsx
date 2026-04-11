@@ -1,6 +1,33 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { Instance, ClawType } from "../types";
+
+function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) => void; onClose: () => void }) {
+  return (
+    <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={props.onClose}>
+      <div class="bg-gray-800 rounded-xl p-5 w-80 max-h-[80vh] overflow-y-auto shadow-xl" onClick={(e: MouseEvent) => e.stopPropagation()}>
+        <h3 class="text-base font-semibold text-white mb-1">New Instance</h3>
+        <p class="text-xs text-gray-400 mb-4">Choose a claw type to install</p>
+        <div class="space-y-1">
+          <For each={props.clawTypes}>
+            {(claw) => (
+              <button
+                class="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg hover:bg-gray-700 transition-colors text-left"
+                onClick={() => props.onSelect(claw.id)}
+              >
+                <span class="text-lg">{claw.logo || "📦"}</span>
+                <div class="flex-1">
+                  <div class="text-sm text-white">{claw.display_name}</div>
+                  <div class="text-[10px] text-gray-500">{claw.npm_package}</div>
+                </div>
+              </button>
+            )}
+          </For>
+        </div>
+      </div>
+    </div>
+  );
+}
 type Lang = "zh-CN" | "en";
 type StatusDetail = { processes: string; resources: string; gateway_log: string };
 
@@ -37,6 +64,7 @@ export default function Home(props: {
   const [lang, setLang] = createSignal<Lang>("zh-CN");
   const l = () => t[lang()];
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
+  const [showClawPicker, setShowClawPicker] = createSignal(false);
 
   // Status modal
   const [statusFor, setStatusFor] = createSignal<string | null>(null);
@@ -102,10 +130,10 @@ export default function Home(props: {
       <section class="mb-6">
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">{l().instances}</h2>
-          <Show when={props.onAddInstance}>
+          <Show when={props.onAddInstance && props.clawTypes && props.clawTypes.length > 0}>
             <button
               class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white"
-              onClick={() => props.onAddInstance?.()}
+              onClick={() => setShowClawPicker(true)}
             >+ Add</button>
           </Show>
         </div>
@@ -224,6 +252,14 @@ export default function Home(props: {
         </div>
       </Show>
 
+      {/* Claw type picker dialog */}
+      <Show when={showClawPicker()}>
+        <ClawTypePicker
+          clawTypes={props.clawTypes || []}
+          onSelect={(id) => { setShowClawPicker(false); props.onAddInstance?.(id); }}
+          onClose={() => setShowClawPicker(false)}
+        />
+      </Show>
     </div>
   );
 }

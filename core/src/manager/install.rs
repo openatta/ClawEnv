@@ -111,9 +111,14 @@ pub async fn install(
     let mirrors_config = config.config().clawenv.mirrors.clone();
 
     // ---- Step 2: Create VM (provision = system packages only) ----
-    let vm_exists = backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false);
+    // Check if VM exists AND has basic packages (node/npm). A VM that exists but
+    // wasn't fully provisioned (e.g., interrupted install) is treated as non-existent.
+    let vm_ready = match backend.exec("node --version 2>/dev/null").await {
+        Ok(o) => o.trim().starts_with('v'),
+        Err(_) => false,
+    };
 
-    if !vm_exists {
+    if !vm_ready {
         send(&tx, "Creating VM (installing system packages)...", 12, InstallStage::CreateVm).await;
 
         let proxy_config = &config.config().clawenv.proxy;
@@ -186,22 +191,25 @@ pub async fn install(
         heartbeat.abort();
         send(&tx, "VM created with system packages", 38, InstallStage::CreateVm).await;
     } else {
-        send(&tx, "VM already exists", 38, InstallStage::CreateVm).await;
+        send(&tx, "VM already provisioned", 38, InstallStage::CreateVm).await;
     }
 
-    // Wait for SSH to stabilize (provision may restart sshd)
-    send(&tx, "Waiting for VM SSH to stabilize...", 39, InstallStage::BootVm).await;
+    // Ensure VM is running and reachable
+    send(&tx, "Ensuring VM is running...", 39, InstallStage::BootVm).await;
+    let mut vm_ok = false;
     for attempt in 1..=10 {
         match backend.exec("echo ok").await {
-            Ok(o) if o.contains("ok") => break,
+            Ok(o) if o.contains("ok") => { vm_ok = true; break; }
             _ => {
-                if attempt == 10 {
-                    // Last resort: try starting the VM
+                if attempt == 1 || attempt == 5 {
                     backend.start().await.ok();
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
         }
+    }
+    if !vm_ok {
+        anyhow::bail!("VM is not reachable after 10 attempts. Check sandbox status.");
     }
 
     // Apply mirrors inside the running VM (more reliable than provision-time)
@@ -297,6 +305,18 @@ pub async fn install(
         "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
     )).await?;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // ---- Post-install verification ----
+    send(&tx, "Verifying installation...", 90, InstallStage::StartOpenClaw).await;
+    let verify = backend.exec(&format!("which {} 2>/dev/null", desc.cli_binary)).await
+        .map(|o| !o.trim().is_empty()).unwrap_or(false);
+    if !verify {
+        anyhow::bail!(
+            "{} binary not found after installation. The install may have failed silently. \
+             Check sandbox logs or try reinstalling.",
+            desc.display_name
+        );
+    }
 
     // ---- Step 5: Save config ----
     send(&tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
