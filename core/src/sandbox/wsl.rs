@@ -177,7 +177,10 @@ impl SandboxBackend for WslBackend {
                 // Run provision as a single script inside WSL (avoids pipe timeout)
                 // Write script → run with nohup → poll done file
                 let proxy = &opts.proxy_script;
-                let version = &opts.claw_version;
+                // Resolve the claw descriptor to get the correct npm package name
+                let claw_reg = crate::claw::ClawRegistry::load();
+                let desc = claw_reg.get(&opts.claw_type);
+                let npm_install = desc.npm_install_cmd(&opts.claw_version);
                 let browser_cmd = if opts.install_browser {
                     "apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont"
                 } else {
@@ -203,8 +206,8 @@ echo "clawenv ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers
 echo "STAGE:ssh" >> "$LOG"
 ssh-keygen -A >> "$LOG" 2>&1
 
-echo "STAGE:openclaw" >> "$LOG"
-npm install -g --loglevel http openclaw@{version} >> "$LOG" 2>&1
+echo "STAGE:claw" >> "$LOG"
+{npm_install} >> "$LOG" 2>&1
 
 echo "STAGE:browser" >> "$LOG"
 {browser_cmd} >> "$LOG" 2>&1
@@ -259,6 +262,7 @@ echo "0" > "$DONE"
                     }
                 }
             }
+            _ => anyhow::bail!("Install mode not supported by WSL2 backend"),
         }
         Ok(())
     }

@@ -10,15 +10,21 @@ pub struct VersionInfo {
     pub has_upgrade: bool,
 }
 
-/// Check npm registry for the latest version of OpenClaw.
-pub async fn check_latest_version(current_version: &str) -> Result<VersionInfo> {
+/// Check npm registry for the latest version of a claw package.
+/// `npm_registry` defaults to "https://registry.npmjs.org" if empty.
+/// `npm_package` defaults to "openclaw" if empty.
+pub async fn check_latest_version(current_version: &str, npm_registry: &str, npm_package: &str) -> Result<VersionInfo> {
+    let registry = if npm_registry.is_empty() { "https://registry.npmjs.org" } else { npm_registry };
+    let package = if npm_package.is_empty() { "openclaw" } else { npm_package };
+    let url = format!("{}/{}/latest", registry.trim_end_matches('/'), package);
+
     let client = reqwest::Client::builder()
         .user_agent("ClawEnv/0.1")
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
     let resp = client
-        .get("https://registry.npmjs.org/openclaw/latest")
+        .get(&url)
         .send()
         .await?;
 

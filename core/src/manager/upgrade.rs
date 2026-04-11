@@ -1,14 +1,16 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
+use crate::claw::ClawRegistry;
 use crate::config::{ConfigManager, InstanceConfig};
 use crate::manager::instance::backend_for_instance;
 use crate::sandbox::SandboxType;
 use crate::update::checker::{self, VersionInfo};
 
-/// Check if an upgrade is available for an instance
-pub async fn check_upgrade(instance: &InstanceConfig) -> Result<VersionInfo> {
-    checker::check_latest_version(&instance.version).await
+/// Check if an upgrade is available for an instance.
+/// `npm_registry` can be empty to use the default registry.
+pub async fn check_upgrade(instance: &InstanceConfig, npm_registry: &str, npm_package: &str) -> Result<VersionInfo> {
+    checker::check_latest_version(&instance.version, npm_registry, npm_package).await
 }
 
 /// Progress event for upgrade UI
@@ -34,19 +36,21 @@ pub async fn upgrade_instance(
         .ok_or_else(|| anyhow::anyhow!("Instance '{}' not found", instance_name))?
         .clone();
 
+    let registry = ClawRegistry::load();
+    let desc = registry.get(&instance.claw_type);
     let backend = backend_for_instance(&instance)?;
     let version = target_version.unwrap_or("latest");
 
     // 1. Stop gateway before upgrade
     send(tx, "Stopping gateway...", 20, "prepare").await;
-    backend.exec(&crate::platform::process::kill_by_name_cmd("openclaw gateway")).await.ok();
+    backend.exec(&crate::platform::process::kill_by_name_cmd(&desc.process_name())).await.ok();
 
-    // 3. Run npm upgrade
-    send(tx, &format!("Upgrading OpenClaw to {version}..."), 25, "install").await;
+    // 2. Run npm upgrade
+    let install_cmd = desc.npm_install_verbose_cmd(version);
+    send(tx, &format!("Upgrading {} to {version}...", desc.display_name), 25, "install").await;
 
     if instance.sandbox_type == SandboxType::Native {
-        // Native: direct exec (no pipe timeout issue on local machine)
-        let cmd = format!("npm install -g openclaw@{version} 2>&1");
+        // Native: direct exec
         let (progress_tx, mut progress_rx) = mpsc::channel::<String>(64);
         let tx_ui = tx.clone();
         let ui_task = tokio::spawn(async move {
@@ -61,18 +65,18 @@ pub async fn upgrade_instance(
                 }
             }
         });
-        backend.exec_with_progress(&cmd, &progress_tx).await?;
+        backend.exec_with_progress(&install_cmd, &progress_tx).await?;
         drop(progress_tx);
         ui_task.await.ok();
     } else {
-        // Sandbox: background script + polling (same as install)
+        // Sandbox: background script + polling
         let log = "/tmp/clawenv-upgrade.log";
         let done = "/tmp/clawenv-upgrade.done";
         backend.exec(&format!("rm -f {log} {done}")).await?;
         backend.exec(&format!(
             r#"cat > /tmp/clawenv-upgrade.sh << 'UPGEOF'
 #!/bin/sh
-sudo npm install -g --loglevel verbose openclaw@{version} > {log} 2>&1
+sudo {install_cmd} > {log} 2>&1
 echo $? > {done}
 UPGEOF
 chmod +x /tmp/clawenv-upgrade.sh"#
@@ -121,20 +125,21 @@ chmod +x /tmp/clawenv-upgrade.sh"#
         }
     }
 
-    // 4. Verify new version
+    // 3. Verify new version
     send(tx, "Verifying upgrade...", 85, "verify").await;
-    let new_ver = backend.exec("openclaw --version 2>/dev/null || echo unknown").await?;
+    let new_ver = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await?;
     let new_ver = new_ver.trim().to_string();
 
-    // 5. Restart gateway
+    // 4. Restart gateway
     send(tx, "Restarting gateway...", 90, "restart").await;
-    let port = instance.openclaw.gateway_port;
+    let port = instance.gateway.gateway_port;
+    let gateway_cmd = desc.gateway_start_cmd(port);
     backend.exec(&format!(
-        "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
+        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
     )).await?;
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // 6. Update config
+    // 5. Update config
     send(tx, "Saving configuration...", 95, "config").await;
     for inst in config.config_mut().instances.iter_mut() {
         if inst.name == instance_name {

@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 
+use crate::claw::ClawRegistry;
 use crate::config::{ConfigManager, InstanceConfig};
 use crate::monitor::{InstanceHealth, InstanceMonitor};
 use crate::platform::{network, process};
@@ -12,7 +13,7 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
     match instance.sandbox_type {
         SandboxType::LimaAlpine => Ok(Box::new(LimaBackend::new(&instance.name))),
         SandboxType::Wsl2Alpine => Ok(Box::new(WslBackend::new(&instance.name))),
-        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(&instance.name, instance.openclaw.gateway_port))),
+        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(&instance.name, instance.gateway.gateway_port))),
         SandboxType::Native => Ok(Box::new(native_backend(&instance.name))),
     }
 }
@@ -42,11 +43,13 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         }
     }
 
-    let port = instance.openclaw.gateway_port;
+    let registry = ClawRegistry::load();
+    let desc = registry.get(&instance.claw_type);
+    let port = instance.gateway.gateway_port;
 
     // Start ttyd (sandbox only)
     if instance.sandbox_type != SandboxType::Native {
-        let ttyd_port = instance.openclaw.ttyd_port;
+        let ttyd_port = instance.gateway.ttyd_port;
         let ttyd_check = backend.exec(&process::check_process_cmd(&format!("ttyd.*-p {ttyd_port}")))
             .await.unwrap_or_default();
         if !ttyd_check.contains("running") {
@@ -58,11 +61,12 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     // Always kill stale gateway then restart fresh
-    backend.exec(&process::kill_by_name_cmd("openclaw gateway")).await.ok();
+    backend.exec(&process::kill_by_name_cmd(&desc.process_name())).await.ok();
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
+    let gateway_cmd = desc.gateway_start_cmd(port);
     backend.exec(&format!(
-        "nohup openclaw gateway --port {port} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &"
+        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
     )).await?;
 
     // Wait for gateway to become responsive (up to 15s)
@@ -82,11 +86,13 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     Ok(())
 }
 
-/// Stop an OpenClaw instance — force kill all processes
+/// Stop a claw instance — force kill all processes
 pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
+    let registry = ClawRegistry::load();
+    let desc = registry.get(&instance.claw_type);
     let backend = backend_for_instance(instance)?;
     // Force kill gateway and ttyd
-    backend.exec(&process::kill_by_name_cmd("openclaw gateway")).await.ok();
+    backend.exec(&process::kill_by_name_cmd(&desc.process_name())).await.ok();
     backend.exec(&process::kill_by_name_cmd("ttyd")).await.ok();
     backend.stop().await?;
     tracing::info!("Instance '{}' stopped", instance.name);
@@ -106,7 +112,7 @@ pub async fn instance_health(instance: &InstanceConfig) -> InstanceHealth {
         Ok(b) => b,
         Err(_) => return InstanceHealth::Unreachable,
     };
-    InstanceMonitor::check_health_with_port(backend.as_ref(), instance.openclaw.gateway_port).await
+    InstanceMonitor::check_health_with_port(backend.as_ref(), instance.gateway.gateway_port).await
 }
 
 /// Get instance by name from config

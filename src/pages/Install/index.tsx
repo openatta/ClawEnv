@@ -9,21 +9,28 @@ type SystemProxy = { detected: boolean; source: string; http_proxy: string; http
 type CheckItem = { name: string; ok: boolean; detail: string; info_only?: boolean };
 type SystemCheckInfo = { os: string; arch: string; memory_gb: number; disk_free_gb: number; sandbox_backend: string; sandbox_available: boolean; checks: CheckItem[] };
 
-const INSTALL_STAGES = [
-  { key: "detect_platform", label: "检测平台 / Detect Platform" },
-  { key: "ensure_prerequisites", label: "检查前置条件 / Prerequisites" },
-  { key: "create_vm", label: "创建虚拟机 / Create VM" },
-  { key: "boot_vm", label: "启动虚拟机 / Boot VM" },
-  { key: "configure_proxy", label: "配置代理 / Configure Proxy" },
-  { key: "install_deps", label: "安装依赖 / Install Dependencies" },
-  { key: "install_open_claw", label: "安装 OpenClaw / Install OpenClaw" },
-  { key: "store_api_key", label: "存储 API Key / Store API Key" },
-  { key: "install_browser", label: "安装浏览器 / Install Browser" },
-  { key: "start_open_claw", label: "启动 OpenClaw / Start OpenClaw" },
-  { key: "save_config", label: "保存配置 / Save Config" },
-];
+function makeInstallStages(name: string) {
+  return [
+    { key: "detect_platform", label: "检测平台 / Detect Platform" },
+    { key: "ensure_prerequisites", label: "检查前置条件 / Prerequisites" },
+    { key: "create_vm", label: "创建虚拟机 / Create VM" },
+    { key: "boot_vm", label: "启动虚拟机 / Boot VM" },
+    { key: "configure_proxy", label: "配置代理 / Configure Proxy" },
+    { key: "install_deps", label: "安装依赖 / Install Dependencies" },
+    { key: "install_open_claw", label: `安装 ${name} / Install ${name}` },
+    { key: "store_api_key", label: "存储 API Key / Store API Key" },
+    { key: "install_browser", label: "安装浏览器 / Install Browser" },
+    { key: "start_open_claw", label: `启动 ${name} / Start ${name}` },
+    { key: "save_config", label: "保存配置 / Save Config" },
+  ];
+}
 
-export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void; defaultInstanceName?: string }) {
+export default function InstallWizard(props: { onComplete: (instances: Instance[]) => void; onBack?: () => void; defaultInstanceName?: string; clawType?: string }) {
+  const clawType = () => props.clawType || "openclaw";
+  // Derive a display name — capitalize first letter of each word for now.
+  // Once the claw registry IPC is available, this could be fetched from backend.
+  const clawDisplayName = () => clawType().split("-").map(w => w.charAt(0).toUpperCase() + w.slice(1)).join("");
+  const INSTALL_STAGES = makeInstallStages(clawDisplayName());
   const [step, setStep] = createSignal(1);
   const totalSteps = 7;
 
@@ -235,10 +242,10 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
 
     try {
       await invoke("install_openclaw", {
-        instanceName: instanceName(), clawVersion: "latest",
+        instanceName: instanceName(), clawType: clawType(), clawVersion: "latest",
         apiKey: apiKey() || null, useNative: installMethod() === "native",
         installBrowser: installBrowser(), installMcpBridge: installMcpBridge(),
-        gatewayPort: 0, // auto-allocate next available port
+        gatewayPort: 0,
       });
     } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
   }
@@ -319,24 +326,24 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                 </div>
                 <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 mb-4 text-sm text-gray-300 space-y-2">
                   {zh ? (<>
-                    <p><strong>ClawEnv</strong> 是 <strong>OpenClaw</strong>（开源 AI Agent 框架）的跨平台安装器与管理工具。</p>
-                    <p>它在您的系统上创建安全隔离的沙盒环境（Alpine Linux），让 OpenClaw 安全运行而不影响宿主系统。</p>
+                    <p><strong>ClawEnv</strong> 是 <strong>{clawDisplayName()}</strong> 的跨平台沙盒安装器与管理工具。</p>
+                    <p>它在您的系统上创建安全隔离的沙盒环境（Alpine Linux），让 {clawDisplayName()} 安全运行而不影响宿主系统。</p>
                     <p class="text-gray-400">安装向导将：</p>
                     <ul class="list-disc list-inside text-gray-400 space-y-1">
                       <li>检查系统是否满足要求（操作系统、内存、磁盘空间）</li>
                       <li>配置网络和代理设置</li>
-                      <li>下载并在沙盒中安装 OpenClaw</li>
+                      <li>下载并在沙盒中安装 {clawDisplayName()}</li>
                       <li>安全地将 API Key 存储在系统钥匙串中</li>
                     </ul>
                     <p class="text-gray-500 text-xs mt-2">支持平台：macOS (Lima)、Windows (WSL2)、Linux (Podman)</p>
                   </>) : (<>
-                    <p><strong>ClawEnv</strong> is a cross-platform installer and manager for <strong>OpenClaw</strong>, the open-source AI Agent framework.</p>
-                    <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so OpenClaw runs safely without affecting your host OS.</p>
+                    <p><strong>ClawEnv</strong> is a cross-platform sandbox installer and manager for <strong>{clawDisplayName()}</strong>.</p>
+                    <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so {clawDisplayName()} runs safely without affecting your host OS.</p>
                     <p class="text-gray-400">This wizard will:</p>
                     <ul class="list-disc list-inside text-gray-400 space-y-1">
                       <li>Check your system meets requirements (OS, memory, disk)</li>
                       <li>Configure network & proxy settings</li>
-                      <li>Download and install OpenClaw in a sandbox</li>
+                      <li>Download and install {clawDisplayName()} in a sandbox</li>
                       <li>Securely store your API key in system keychain</li>
                     </ul>
                     <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
@@ -502,8 +509,8 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                       <div class="text-sm font-medium">MCP Bridge Plugin <span class="text-green-400 text-xs">({iLang() === "zh-CN" ? "推荐" : "recommended"})</span></div>
                       <div class="text-xs text-gray-400 mt-1">
                         {iLang() === "zh-CN"
-                          ? "使 OpenClaw Agent 能通过安全的权限控制桥接访问宿主机的文件、命令和工具"
-                          : "Enables OpenClaw agents to access host machine files, commands, and tools through a secure, permission-controlled bridge."}
+                          ? `使 ${clawDisplayName()} Agent 能通过安全的权限控制桥接访问宿主机的文件、命令和工具`
+                          : `Enables ${clawDisplayName()} agents to access host machine files, commands, and tools through a secure, permission-controlled bridge.`}
                       </div>
                       {!installMcpBridge() && (
                         <div class="text-xs text-yellow-500 mt-1">
@@ -538,7 +545,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
           {step() === 5 && (
             <div>
               <h2 class="text-xl font-bold mb-3">API Key</h2>
-              <p class="text-sm text-gray-400 mb-3">Enter your OpenClaw API key. Stored securely in system keychain.</p>
+              <p class="text-sm text-gray-400 mb-3">Enter your {clawDisplayName()} API key. Stored securely in system keychain.</p>
               <div class="flex gap-2 items-center mb-2">
                 <input type="password" placeholder="sk-..." value={apiKey()} onInput={e => setApiKey(e.currentTarget.value)}
                   class="bg-gray-800 border border-gray-600 rounded px-3 py-2 w-80 text-sm" />
@@ -600,7 +607,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
           {step() === 7 && (
             <div>
               <h2 class="text-xl font-bold mb-3">Installation Complete!</h2>
-              <p class="text-sm text-gray-400 mb-3">OpenClaw is running in a secure sandbox.</p>
+              <p class="text-sm text-gray-400 mb-3">{clawDisplayName()} is running in a secure sandbox.</p>
               <div class="bg-gray-800 rounded-lg p-3 border border-gray-700">
                 <For each={INSTALL_STAGES}>
                   {(s) => <div class="flex items-center gap-2 text-xs text-green-400 py-0.5"><span>✓</span>{s.label}</div>}

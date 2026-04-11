@@ -5,8 +5,11 @@ use tauri::Emitter;
 #[tauri::command]
 pub async fn check_openclaw_update(name: String) -> Result<clawenv_core::update::checker::VersionInfo, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    upgrade::check_upgrade(inst).await.map_err(|e| e.to_string())
+    let registry = clawenv_core::claw::ClawRegistry::load();
+    let desc = registry.get(&inst.claw_type);
+    upgrade::check_upgrade(inst, &npm_registry, &desc.npm_package).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

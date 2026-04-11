@@ -1,3 +1,4 @@
+use clawenv_core::claw::ClawRegistry;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 
@@ -6,10 +7,14 @@ use clawenv_core::manager::instance;
 pub async fn get_gateway_token(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let registry = ClawRegistry::load();
+    let desc = registry.get(&inst.claw_type);
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let result = backend.exec(
-        "cat ~/.openclaw/openclaw.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'"
-    ).await.map_err(|e| e.to_string())?;
+    // Try claw-specific config path, then fallback to generic patterns
+    let result = backend.exec(&format!(
+        "cat ~/.{id}/{id}.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'",
+        id = desc.id
+    )).await.map_err(|e| e.to_string())?;
     Ok(result.trim().to_string())
 }
 

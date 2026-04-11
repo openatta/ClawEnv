@@ -1,12 +1,5 @@
 import { createSignal } from "solid-js";
-
-type Instance = {
-  name: string;
-  sandbox_type: string;
-  version: string;
-  gateway_port: number;
-  ttyd_port: number;
-};
+import type { Instance } from "../types";
 
 type Props = {
   instances: Instance[];
@@ -17,18 +10,27 @@ type Props = {
 export default function UpgradePrompt(props: Props) {
   const [upgrading, setUpgrading] = createSignal(false);
 
+  // Collect unique claw display names from instances
+  const clawNames = () => {
+    const names = new Set(props.instances.map((i) => i.display_name || i.claw_type || "Claw"));
+    return Array.from(names).join(", ");
+  };
+
   return (
     <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-md w-full shadow-2xl">
-        <h2 class="text-lg font-bold mb-1">OpenClaw Update Available</h2>
+        <h2 class="text-lg font-bold mb-1">Update Available</h2>
         <p class="text-sm text-gray-400 mb-4">
-          A newer version of OpenClaw is available for your instances.
+          A newer version of {clawNames()} is available for your instances.
         </p>
 
         <div class="bg-gray-900 rounded-lg p-3 mb-4 text-sm">
           {props.instances.map((inst) => (
             <div class="flex justify-between py-1">
-              <span>{inst.name}</span>
+              <span class="flex items-center gap-2">
+                <span>{inst.logo}</span>
+                <span>{inst.name}</span>
+              </span>
               <span class="text-gray-400">v{inst.version}</span>
             </div>
           ))}
@@ -45,11 +47,7 @@ export default function UpgradePrompt(props: Props) {
           <button
             class="px-4 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
             disabled={upgrading()}
-            onClick={() => {
-              // For now, skip upgrade and go to main UI
-              // Real upgrade would call invoke("upgrade_instance") per instance
-              props.onSkip();
-            }}
+            onClick={() => { props.onSkip(); }}
           >
             {upgrading() ? "Upgrading..." : "Update Now"}
           </button>

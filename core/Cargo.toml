@@ -22,3 +22,6 @@ sha2          = "0.10"
 hex           = "0.4"
 axum          = "0.8"
 tower         = "0.5"
+
+[dev-dependencies]
+mockall       = "0.13"

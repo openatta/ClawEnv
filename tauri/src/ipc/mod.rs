@@ -1,4 +1,5 @@
 mod bridge;
+pub mod claw;
 mod install;
 mod instance;
 mod network;

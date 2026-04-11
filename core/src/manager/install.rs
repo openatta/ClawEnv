@@ -1,7 +1,8 @@
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use crate::config::{keychain, ConfigManager, InstanceConfig, OpenClawConfig, ResourceConfig};
+use crate::claw::ClawRegistry;
+use crate::config::{keychain, mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
 use crate::platform::network;
 use crate::sandbox::{
     detect_backend, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
@@ -24,6 +25,8 @@ pub fn validate_instance_name(name: &str) -> Result<()> {
 #[derive(Debug, Clone)]
 pub struct InstallOptions {
     pub instance_name: String,
+    /// Claw type ID — key into ClawRegistry (e.g., "openclaw", "zeroclaw")
+    pub claw_type: String,
     pub claw_version: String,
     pub install_mode: InstallMode,
     pub install_browser: bool,
@@ -37,6 +40,7 @@ impl Default for InstallOptions {
     fn default() -> Self {
         Self {
             instance_name: "default".into(),
+            claw_type: "openclaw".into(),
             claw_version: "latest".into(),
             install_mode: InstallMode::OnlineBuild,
             install_browser: false,
@@ -86,11 +90,16 @@ pub async fn install(
     validate_instance_name(&opts.instance_name)?;
 
     // Dispatch: Native vs Sandbox
-    if opts.use_native {
+    // NativeBundle always goes through native path regardless of use_native flag
+    if opts.use_native || matches!(opts.install_mode, InstallMode::NativeBundle { .. }) {
         return super::install_native::install_native(&opts, config, &tx).await;
     }
 
     // ---- Sandbox path below ----
+    // Resolve the claw descriptor for this install
+    let registry = ClawRegistry::load();
+    let desc = registry.get_strict(&opts.claw_type)?;
+
     send(&tx, "Detecting platform...", 5, InstallStage::DetectPlatform).await;
     let backend: Box<dyn SandboxBackend> = detect_backend()?;
 
@@ -99,6 +108,7 @@ pub async fn install(
     send(&tx, &format!("{} ready", backend.name()), 10, InstallStage::EnsurePrerequisites).await;
 
     let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
+    let mirrors_config = config.config().clawenv.mirrors.clone();
 
     // ---- Step 2: Create VM (provision = system packages only) ----
     let vm_exists = backend.exec("echo ok").await.map(|o| o.contains("ok")).unwrap_or(false);
@@ -107,18 +117,42 @@ pub async fn install(
         send(&tx, "Creating VM (installing system packages)...", 12, InstallStage::CreateVm).await;
 
         let proxy_config = &config.config().clawenv.proxy;
-        let proxy_script = if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
+
+        let mut provision_preamble = String::new();
+
+        // Proxy exports
+        if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
             let https = if proxy_config.https_proxy.is_empty() { &proxy_config.http_proxy } else { &proxy_config.https_proxy };
-            format!(
-                "export http_proxy=\"{}\" https_proxy=\"{}\" HTTP_PROXY=\"{}\" HTTPS_PROXY=\"{}\" no_proxy=\"localhost,127.0.0.1\"",
+            provision_preamble.push_str(&format!(
+                "export http_proxy=\"{}\" https_proxy=\"{}\" HTTP_PROXY=\"{}\" HTTPS_PROXY=\"{}\" no_proxy=\"localhost,127.0.0.1\"\n",
                 proxy_config.http_proxy, https, proxy_config.http_proxy, https
-            )
+            ));
+        }
+
+        // Mirror sources (Alpine APK + npm registry)
+        provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable"));
+        provision_preamble.push_str(&mirrors::npm_registry_script(&mirrors_config));
+
+        let proxy_script = if provision_preamble.trim().is_empty() {
+            "# No proxy / mirrors".to_string()
         } else {
-            "# No proxy".to_string()
+            provision_preamble
+        };
+
+        let alpine_mirror = if mirrors_config.is_default() {
+            String::new()
+        } else {
+            mirrors_config.alpine_repo_url().to_string()
+        };
+        let npm_registry = if mirrors_config.is_default() {
+            String::new()
+        } else {
+            mirrors_config.npm_registry_url().to_string()
         };
 
         let sandbox_opts = SandboxOpts {
             instance_name: opts.instance_name.clone(),
+            claw_type: opts.claw_type.clone(),
             claw_version: opts.claw_version.clone(),
             alpine_version: "latest-stable".into(),
             memory_mb: 512,
@@ -127,6 +161,8 @@ pub async fn install(
             install_mode: opts.install_mode.clone(),
             proxy_script,
             gateway_port: opts.gateway_port,
+            alpine_mirror,
+            npm_registry,
         };
 
         // Heartbeat while VM creates
@@ -168,26 +204,33 @@ pub async fn install(
         }
     }
 
-    // ---- Step 3: Install OpenClaw via background script + polling ----
-    let oc_installed = backend.exec("which openclaw 2>/dev/null").await
-        .map(|o| !o.trim().is_empty()).unwrap_or(false);
-
-    if !oc_installed {
-        send(&tx, "Installing OpenClaw (5-10 min, runs in background)...", 40, InstallStage::InstallOpenClaw).await;
-        vm_background_install(backend.as_ref(), &tx, &opts.claw_version).await?;
-        send(&tx, "OpenClaw installed", 70, InstallStage::InstallOpenClaw).await;
-    } else {
-        send(&tx, "OpenClaw already installed", 70, InstallStage::InstallOpenClaw).await;
+    // Apply mirrors inside the running VM (more reliable than provision-time)
+    if !mirrors_config.is_default() {
+        send(&tx, "Configuring package mirrors...", 39, InstallStage::ConfigureProxy).await;
+        mirrors::apply_mirrors(backend.as_ref(), &mirrors_config).await?;
     }
 
-    let oc_version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await.unwrap_or_default();
+    // ---- Step 3: Install claw via background script + polling ----
+    let claw_installed = backend.exec(&format!("which {} 2>/dev/null", desc.cli_binary)).await
+        .map(|o| !o.trim().is_empty()).unwrap_or(false);
+
+    if !claw_installed {
+        send(&tx, &format!("Installing {} (5-10 min, runs in background)...", desc.display_name), 40, InstallStage::InstallOpenClaw).await;
+        vm_background_install(backend.as_ref(), &tx, &desc.npm_install_verbose_cmd(&opts.claw_version), &desc.display_name).await?;
+        send(&tx, &format!("{} installed", desc.display_name), 70, InstallStage::InstallOpenClaw).await;
+    } else {
+        send(&tx, &format!("{} already installed", desc.display_name), 70, InstallStage::InstallOpenClaw).await;
+    }
+
+    let claw_version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
 
     // ---- Step 4: Post-install config (all short exec calls) ----
     if let Some(ref api_key) = opts.api_key {
         send(&tx, "Storing API key...", 72, InstallStage::StoreApiKey).await;
         keychain::store_api_key(&opts.instance_name, api_key)?;
-        let esc = shell_escape(api_key);
-        backend.exec(&format!("openclaw config set apiKey '{esc}' 2>/dev/null || true")).await?;
+        if let Some(cmd) = desc.set_apikey_cmd(&shell_escape(api_key)) {
+            backend.exec(&format!("{cmd} 2>/dev/null || true")).await?;
+        }
     }
 
     // Host IP
@@ -203,8 +246,8 @@ pub async fn install(
         SandboxType::Native => "127.0.0.1".into(),
     };
 
-    // MCP Bridge
-    if opts.install_mcp_bridge {
+    // MCP Bridge (only if the claw supports it)
+    if opts.install_mcp_bridge && desc.supports_mcp {
         send(&tx, "Installing MCP Bridge plugin...", 78, InstallStage::StartOpenClaw).await;
         let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
         let mcp_dir = "/workspace/mcp-bridge";
@@ -213,19 +256,27 @@ pub async fn install(
 
         let bridge_url = format!("http://{host_ip}:3100");
         let token = backend.exec(
-            "cat ~/.openclaw/openclaw.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'"
+            &format!("cat ~/.{id}/{id}.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'",
+                id = desc.id)
         ).await.unwrap_or_default();
         let token = token.trim();
         if !token.is_empty() {
-            backend.exec(&format!(
-                "OPENCLAW_GATEWAY_URL=ws://127.0.0.1:{p} OPENCLAW_GATEWAY_TOKEN={token} openclaw mcp set clawenv '{{\"command\":\"node\",\"args\":[\"{mcp_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}' 2>/dev/null || true",
-                p = opts.gateway_port
-            )).await?;
+            if let Some(mcp_cmd) = desc.mcp_register_cmd(
+                "clawenv",
+                &format!("{{\"command\":\"node\",\"args\":[\"{mcp_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}")
+            ) {
+                let env_prefix = format!(
+                    "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token}",
+                    id_upper = desc.id.to_uppercase(),
+                    p = opts.gateway_port,
+                );
+                backend.exec(&format!("{env_prefix} {mcp_cmd} 2>/dev/null || true")).await?;
+            }
         }
     }
 
     // Browser (optional, post-install via background script)
-    if opts.install_browser {
+    if opts.install_browser && desc.supports_browser {
         send(&tx, "Installing browser (background)...", 80, InstallStage::InstallBrowser).await;
         vm_background_run(
             backend.as_ref(), &tx,
@@ -241,9 +292,9 @@ pub async fn install(
     backend.exec(&format!(
         "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
     )).await?;
+    let gateway_cmd = desc.gateway_start_cmd(opts.gateway_port);
     backend.exec(&format!(
-        "nohup openclaw gateway --port {} --allow-unconfigured > /tmp/openclaw-gateway.log 2>&1 &",
-        opts.gateway_port
+        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
     )).await?;
     tokio::time::sleep(std::time::Duration::from_secs(3)).await;
 
@@ -252,13 +303,13 @@ pub async fn install(
     config.config_mut().instances.retain(|i| i.name != opts.instance_name);
     config.config_mut().instances.push(InstanceConfig {
         name: opts.instance_name.clone(),
-        claw_type: "openclaw".into(),
-        version: oc_version.trim().to_string(),
+        claw_type: opts.claw_type.clone(),
+        version: claw_version.trim().to_string(),
         sandbox_type,
         sandbox_id: format!("clawenv-{}", opts.instance_name),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
-        openclaw: OpenClawConfig {
+        gateway: GatewayConfig {
             gateway_port: opts.gateway_port,
             ttyd_port,
             webchat_enabled: true,
@@ -275,13 +326,14 @@ pub async fn install(
     Ok(())
 }
 
-/// Run `npm install -g openclaw` as a background script in the VM.
+/// Run npm install for any claw as a background script in the VM.
+/// `install_cmd` is the full command, e.g., "npm install -g --loglevel verbose openclaw@latest"
 /// Polls a done-marker file every 5 seconds using short exec() calls.
-/// The npm process runs independently — no pipe lifetime dependency.
 async fn vm_background_install(
     backend: &dyn SandboxBackend,
     tx: &mpsc::Sender<InstallProgress>,
-    version: &str,
+    install_cmd: &str,
+    display_name: &str,
 ) -> Result<()> {
     let log = "/tmp/clawenv-npm.log";
     let done = "/tmp/clawenv-npm.done";
@@ -293,7 +345,7 @@ async fn vm_background_install(
     backend.exec(&format!(
         r#"cat > /tmp/clawenv-npm.sh << 'SCRIPTEOF'
 #!/bin/sh
-sudo npm install -g --loglevel verbose openclaw@{version} > {log} 2>&1
+sudo {install_cmd} > {log} 2>&1
 echo $? > {done}
 SCRIPTEOF
 chmod +x /tmp/clawenv-npm.sh"#
@@ -336,7 +388,7 @@ chmod +x /tmp/clawenv-npm.sh"#
         } else {
             idle += 5;
             let pct = std::cmp::min(40 + (elapsed / 12) as u8, 68);
-            send(tx, &format!("Installing OpenClaw... ({elapsed}s)"), pct, InstallStage::InstallOpenClaw).await;
+            send(tx, &format!("Installing {display_name}... ({elapsed}s)"), pct, InstallStage::InstallOpenClaw).await;
         }
 
         // Check completion

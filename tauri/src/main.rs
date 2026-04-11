@@ -140,9 +140,12 @@ fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 loop {
                     if let Ok(mut config) = ConfigManager::load() {
+                        let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
                         let instances = config.instances().to_vec();
                         for inst in &instances {
-                            match clawenv_core::update::checker::check_latest_version(&inst.version).await {
+                            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+                            let npm_pkg = claw_reg.get(&inst.claw_type).npm_package.clone();
+                            match clawenv_core::update::checker::check_latest_version(&inst.version, &npm_registry, &npm_pkg).await {
                                 Ok(info) => {
                                     // Cache the result
                                     if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == inst.name) {
@@ -210,6 +213,7 @@ fn main() {
             ipc::create_default_config,
             ipc::check_openclaw_update,
             ipc::upgrade_openclaw,
+            ipc::claw::list_claw_types,
         ])
         .on_window_event(|window, event| {
             // Close button hides the window instead of quitting — app stays in tray

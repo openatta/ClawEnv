@@ -136,7 +136,7 @@ fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'st
             let check = std::process::Command::new("sh")
                 .args(["-c", &format!(
                     "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
-                    inst.openclaw.gateway_port
+                    inst.gateway.gateway_port
                 )])
                 .output();
             match check {
@@ -154,7 +154,7 @@ fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'st
             let check = std::process::Command::new("sh")
                 .args(["-c", &format!(
                     "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
-                    inst.openclaw.gateway_port
+                    inst.gateway.gateway_port
                 )])
                 .output();
             match check {

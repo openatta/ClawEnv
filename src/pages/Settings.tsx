@@ -196,7 +196,7 @@ export default function Settings() {
             <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">About</h2>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-400">
               <p>ClawEnv v0.2.0</p>
-              <p>OpenClaw sandbox installer & manager</p>
+              <p>Claw ecosystem sandbox installer & manager</p>
             </div>
           </section>
         </Show>

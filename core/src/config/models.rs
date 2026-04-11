@@ -27,6 +27,8 @@ pub struct ClawEnvConfig {
     #[serde(default)]
     pub proxy: ProxyConfig,
     #[serde(default)]
+    pub mirrors: MirrorsConfig,
+    #[serde(default)]
     pub bridge: BridgeConfig,
 }
 
@@ -91,8 +93,8 @@ pub struct InstanceConfig {
     pub created_at: String,
     #[serde(default)]
     pub last_upgraded_at: String,
-    #[serde(default)]
-    pub openclaw: OpenClawConfig,
+    #[serde(default, alias = "openclaw")]
+    pub gateway: GatewayConfig,
     #[serde(default)]
     pub resources: ResourceConfig,
     #[serde(default)]
@@ -105,7 +107,7 @@ pub struct InstanceConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct OpenClawConfig {
+pub struct GatewayConfig {
     #[serde(default = "default_gateway_port")]
     pub gateway_port: u16,
     #[serde(default = "default_ttyd_port")]
@@ -218,6 +220,70 @@ impl Default for ProxyConfig {
     }
 }
 
+/// Mirror configuration for package sources.
+/// Supports presets ("default", "china") or fully custom URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MirrorsConfig {
+    /// Preset: "default" (official sources), "china" (domestic mirrors), "custom"
+    #[serde(default = "default_mirror_preset")]
+    pub preset: String,
+    /// Alpine APK repository base URL (e.g., "https://mirrors.aliyun.com/alpine")
+    #[serde(default)]
+    pub alpine_repo: String,
+    /// npm registry URL (e.g., "https://registry.npmmirror.com")
+    #[serde(default)]
+    pub npm_registry: String,
+    /// Node.js binary download base URL (e.g., "https://npmmirror.com/mirrors/node")
+    #[serde(default)]
+    pub nodejs_dist: String,
+}
+
+fn default_mirror_preset() -> String { "default".into() }
+
+impl MirrorsConfig {
+    /// Resolve effective URLs: if preset is "china" or "default", use known URLs;
+    /// if "custom", use the user-provided fields.
+    pub fn alpine_repo_url(&self) -> &str {
+        if !self.alpine_repo.is_empty() { return &self.alpine_repo; }
+        match self.preset.as_str() {
+            "china" => "https://mirrors.aliyun.com/alpine",
+            _ => "https://dl-cdn.alpinelinux.org/alpine",
+        }
+    }
+
+    pub fn npm_registry_url(&self) -> &str {
+        if !self.npm_registry.is_empty() { return &self.npm_registry; }
+        match self.preset.as_str() {
+            "china" => "https://registry.npmmirror.com",
+            _ => "https://registry.npmjs.org",
+        }
+    }
+
+    pub fn nodejs_dist_url(&self) -> &str {
+        if !self.nodejs_dist.is_empty() { return &self.nodejs_dist; }
+        match self.preset.as_str() {
+            "china" => "https://npmmirror.com/mirrors/node",
+            _ => "https://nodejs.org/dist",
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.preset == "default" && self.alpine_repo.is_empty()
+            && self.npm_registry.is_empty() && self.nodejs_dist.is_empty()
+    }
+}
+
+impl Default for MirrorsConfig {
+    fn default() -> Self {
+        Self {
+            preset: "default".into(),
+            alpine_repo: String::new(),
+            npm_registry: String::new(),
+            nodejs_dist: String::new(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BridgeConfig {
     #[serde(default)]
@@ -240,7 +306,7 @@ impl Default for BridgeConfig {
     }
 }
 
-impl Default for OpenClawConfig {
+impl Default for GatewayConfig {
     fn default() -> Self {
         Self {
             gateway_port: 3000,

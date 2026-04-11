@@ -38,5 +38,7 @@ provision:
   script: |
     #!/bin/sh
     {PROXY_SCRIPT}
+    {MIRRORS_SCRIPT}
+    apk update
     apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3
     ssh-keygen -A

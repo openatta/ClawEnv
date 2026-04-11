@@ -1,0 +1,158 @@
+# ClawEnv — Built-in Claw Product Registry
+# Each [[claw]] entry defines how to install, run, and manage a claw variant.
+
+[[claw]]
+id = "openclaw"
+display_name = "OpenClaw"
+logo = "🦞"
+npm_package = "openclaw"
+cli_binary = "openclaw"
+gateway_cmd = "gateway --port {port} --allow-unconfigured"
+version_cmd = "--version"
+config_apikey_cmd = "config set apiKey '{key}'"
+mcp_set_cmd = "mcp set {name} '{json}'"
+default_port = 3000
+supports_mcp = true
+supports_browser = true
+
+[[claw]]
+id = "zeroclaw"
+display_name = "ZeroClaw"
+logo = "⚡"
+npm_package = "zeroclaw"
+cli_binary = "zeroclaw"
+gateway_cmd = "serve --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set api-key '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = true
+
+[[claw]]
+id = "autoclaw"
+display_name = "智谱 AutoClaw"
+logo = "🧠"
+npm_package = "@zhipu/autoclaw"
+cli_binary = "autoclaw"
+gateway_cmd = "start --port {port}"
+version_cmd = "version"
+config_apikey_cmd = "auth set-key '{key}'"
+mcp_set_cmd = ""
+default_port = 8080
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "qclaw"
+display_name = "腾讯 QClaw"
+logo = "💬"
+npm_package = "qclaw"
+cli_binary = "qclaw"
+gateway_cmd = "serve --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set apiKey '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "kimi-claw"
+display_name = "Kimi Claw"
+logo = "🌙"
+npm_package = "kimi-claw"
+cli_binary = "kimi-claw"
+gateway_cmd = "gateway --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set api-key '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "easyclaw"
+display_name = "猎豹 EasyClaw"
+logo = "🐆"
+npm_package = "easyclaw"
+cli_binary = "easyclaw"
+gateway_cmd = "start --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set key '{key}'"
+mcp_set_cmd = ""
+default_port = 9000
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "duclaw"
+display_name = "百度 DuClaw"
+logo = "🐻"
+npm_package = "duclaw"
+cli_binary = "duclaw"
+gateway_cmd = "serve --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set apiKey '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = true
+
+[[claw]]
+id = "arkclaw"
+display_name = "字节 ArkClaw"
+logo = "🚀"
+npm_package = "arkclaw"
+cli_binary = "arkclaw"
+gateway_cmd = "serve --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "auth set '{key}'"
+mcp_set_cmd = ""
+default_port = 8080
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "maxclaw"
+display_name = "MiniMax MaxClaw"
+logo = "✨"
+npm_package = "maxclaw"
+cli_binary = "maxclaw"
+gateway_cmd = "start --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set apiKey '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = false
+
+[[claw]]
+id = "chatclaw"
+display_name = "智麻 ChatClaw"
+logo = "💭"
+npm_package = "chatclaw"
+cli_binary = "chatclaw"
+gateway_cmd = "serve --port {port}"
+version_cmd = "--version"
+config_apikey_cmd = "config set key '{key}'"
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = false
+
+# ---- US Big Tech (verified from official docs) ----
+
+[[claw]]
+id = "nemoclaw"
+display_name = "NVIDIA NemoClaw"
+logo = "🟢"
+npm_package = "nemoclaw"
+cli_binary = "nemoclaw"
+gateway_cmd = "start"
+version_cmd = "--version"
+config_apikey_cmd = ""
+mcp_set_cmd = ""
+default_port = 3000
+supports_mcp = false
+supports_browser = true

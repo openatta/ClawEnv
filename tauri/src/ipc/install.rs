@@ -12,6 +12,7 @@ static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
 pub async fn install_openclaw(
     app: tauri::AppHandle,
     instance_name: String,
+    claw_type: Option<String>,
     claw_version: String,
     api_key: Option<String>,
     use_native: bool,
@@ -30,7 +31,7 @@ pub async fn install_openclaw(
 
     // Auto-allocate port: find next free gateway port not used by existing instances
     let actual_port = if gateway_port == 0 {
-        let used: Vec<u16> = config.instances().iter().map(|i| i.openclaw.gateway_port).collect();
+        let used: Vec<u16> = config.instances().iter().map(|i| i.gateway.gateway_port).collect();
         let mut p = 3000u16;
         while used.contains(&p) { p += 1; }
         p
@@ -38,8 +39,10 @@ pub async fn install_openclaw(
         gateway_port
     };
 
+    let resolved_claw_type = claw_type.unwrap_or_else(|| "openclaw".into());
     let opts = install::InstallOptions {
         instance_name,
+        claw_type: resolved_claw_type.clone(),
         claw_version,
         install_mode: InstallMode::OnlineBuild,
         install_browser,
@@ -68,7 +71,7 @@ pub async fn install_openclaw(
                 crate::tray::send_notification(
                     &app_complete,
                     "Install Complete",
-                    "OpenClaw has been installed successfully",
+                    &format!("{} has been installed successfully", resolved_claw_type),
                 );
             }
             Err(e) => {
@@ -77,7 +80,7 @@ pub async fn install_openclaw(
                 crate::tray::send_notification(
                     &app_complete,
                     "Install Failed",
-                    &format!("OpenClaw installation failed: {}", err_msg),
+                    &format!("{} installation failed: {}", resolved_claw_type, err_msg),
                 );
             }
         }

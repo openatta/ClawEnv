@@ -38,9 +38,10 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
     }
 
     // 3. 检查升级（超时 3 秒，失败则忽略）
+    let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
     let has_upgrade = tokio::time::timeout(
         Duration::from_secs(3),
-        check_upgrade_available(&instances[0]),
+        check_upgrade_available(&instances[0], &npm_registry),
     )
     .await
     .unwrap_or(Ok(false))
@@ -53,30 +54,36 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
     }
 }
 
-async fn check_upgrade_available(instance: &InstanceConfig) -> Result<bool> {
-    let info = crate::update::checker::check_latest_version(&instance.version).await?;
+async fn check_upgrade_available(instance: &InstanceConfig, npm_registry: &str) -> Result<bool> {
+    let registry = crate::claw::ClawRegistry::load();
+    let desc = registry.get(&instance.claw_type);
+    let info = crate::update::checker::check_latest_version(&instance.version, npm_registry, &desc.npm_package).await?;
     Ok(info.has_upgrade)
 }
 
-/// Auto-start OpenClaw after installation completes.
+/// Auto-start a claw instance after installation completes.
 /// Called after install wizard finishes successfully.
 pub async fn post_install_start(instance: &InstanceConfig) -> Result<()> {
     use crate::manager::instance::backend_for_instance;
     use crate::monitor::InstanceMonitor;
 
+    let registry = crate::claw::ClawRegistry::load();
+    let desc = registry.get(&instance.claw_type);
+    let gateway_cmd = desc.gateway_start_cmd(instance.gateway.gateway_port);
+
     let backend = backend_for_instance(instance)?;
     backend.start().await?;
-    backend.exec("openclaw start --daemon").await?;
+    backend.exec(&format!("nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &")).await?;
 
     // Wait for health check (up to 30 seconds)
     for _ in 0..30 {
         let health = InstanceMonitor::check_health(backend.as_ref()).await;
         if health == crate::monitor::InstanceHealth::Running {
-            tracing::info!("OpenClaw started successfully for '{}'", instance.name);
+            tracing::info!("{} started successfully for '{}'", desc.display_name, instance.name);
             return Ok(());
         }
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
 
-    anyhow::bail!("OpenClaw failed to start within 30 seconds")
+    anyhow::bail!("{} failed to start within 30 seconds", desc.display_name)
 }

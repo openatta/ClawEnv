@@ -16,7 +16,7 @@ impl PodmanBackend {
     pub fn new(instance_name: &str, version: &str) -> Self {
         Self {
             container_name: format!("clawenv-{instance_name}"),
-            image_tag: format!("clawenv/openclaw:{version}"),
+            image_tag: format!("clawenv/{instance_name}:{version}"),
             port: 3000,
         }
     }
@@ -199,15 +199,33 @@ impl SandboxBackend for PodmanBackend {
 
                 let install_browser = if opts.install_browser { "true" } else { "false" };
 
-                self.podman_run(&[
-                    "build",
-                    "-t", &self.image_tag,
-                    "--build-arg", &format!("OPENCLAW_VERSION={}", opts.claw_version),
-                    "--build-arg", &format!("INSTALL_BROWSER={}", install_browser),
-                    "-f", &containerfile.to_string_lossy(),
-                    &context_dir.to_string_lossy(),
-                ]).await?;
+                // Resolve claw package name from descriptor
+                let claw_reg = crate::claw::ClawRegistry::load();
+                let desc = claw_reg.get(&opts.claw_type);
+
+                let mut build_args = vec![
+                    "build".to_string(),
+                    "-t".to_string(), self.image_tag.clone(),
+                    "--build-arg".to_string(), format!("CLAW_PACKAGE={}", desc.npm_package),
+                    "--build-arg".to_string(), format!("CLAW_VERSION={}", opts.claw_version),
+                    "--build-arg".to_string(), format!("INSTALL_BROWSER={}", install_browser),
+                ];
+                if !opts.alpine_mirror.is_empty() {
+                    build_args.push("--build-arg".to_string());
+                    build_args.push(format!("ALPINE_MIRROR={}", opts.alpine_mirror));
+                }
+                if !opts.npm_registry.is_empty() {
+                    build_args.push("--build-arg".to_string());
+                    build_args.push(format!("NPM_REGISTRY={}", opts.npm_registry));
+                }
+                build_args.push("-f".to_string());
+                build_args.push(containerfile.to_string_lossy().to_string());
+                build_args.push(context_dir.to_string_lossy().to_string());
+
+                let arg_refs: Vec<&str> = build_args.iter().map(|s| s.as_str()).collect();
+                self.podman_run(&arg_refs).await?;
             }
+            _ => anyhow::bail!("Install mode not supported by Podman backend"),
         }
 
         tracing::info!("Podman image '{}' ready", self.image_tag);

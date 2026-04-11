@@ -70,8 +70,15 @@ export NO_PROXY="{no_proxy}"
     Ok(())
 }
 
-/// Test proxy connectivity by attempting to reach Alpine CDN
-pub async fn test_proxy(proxy: &ProxyConfig) -> Result<()> {
+/// Test proxy connectivity by attempting to reach Alpine CDN.
+/// `alpine_url` allows testing against a mirror instead of the default CDN.
+pub async fn test_proxy(proxy: &ProxyConfig, alpine_url: &str) -> Result<()> {
+    let test_url = if alpine_url.is_empty() {
+        "https://dl-cdn.alpinelinux.org/alpine/latest-stable/"
+    } else {
+        alpine_url
+    };
+
     let client = if proxy.enabled && !proxy.http_proxy.is_empty() {
         let proxy_url = proxy_url_with_auth(proxy)?;
         let reqwest_proxy = reqwest::Proxy::all(&proxy_url)?;
@@ -81,7 +88,7 @@ pub async fn test_proxy(proxy: &ProxyConfig) -> Result<()> {
     };
 
     let resp = client
-        .head("https://dl-cdn.alpinelinux.org/alpine/latest-stable/")
+        .head(test_url)
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await?;

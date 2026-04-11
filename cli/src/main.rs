@@ -10,10 +10,13 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Install OpenClaw in a sandbox
+    /// Install a claw product in a sandbox
     Install {
         #[arg(long, default_value = "sandbox")]
         mode: String,
+        /// Claw type to install (e.g., openclaw, zeroclaw, autoclaw)
+        #[arg(long, default_value = "openclaw")]
+        claw_type: String,
         #[arg(long, default_value = "latest")]
         version: String,
         #[arg(long, default_value = "default")]
@@ -24,8 +27,8 @@ enum Commands {
         /// Install browser (Chromium + noVNC)
         #[arg(long)]
         browser: bool,
-        /// Gateway port
-        #[arg(long, default_value = "3000")]
+        /// Gateway port (0 = auto)
+        #[arg(long, default_value = "0")]
         port: u16,
     },
     /// Uninstall an instance
@@ -38,6 +41,9 @@ enum Commands {
         /// Instance name
         #[arg(long)]
         name: String,
+        /// Claw type (e.g., openclaw, zeroclaw)
+        #[arg(long, default_value = "openclaw")]
+        claw_type: String,
         /// Gateway port (auto-assigned if not specified)
         #[arg(long)]
         port: Option<u16>,
@@ -116,10 +122,17 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Install { mode, version, name, image, browser, port } => {
+        Commands::Install { mode, claw_type, version, name, image, browser, port } => {
             use clawenv_core::config::{ConfigManager, UserMode};
             use clawenv_core::manager::install::{self, InstallOptions};
             use clawenv_core::sandbox::{InstallMode, ImageSource};
+
+            // Validate claw_type
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let desc = claw_reg.get_strict(&claw_type).map_err(|e| {
+                eprintln!("{e}");
+                e
+            })?;
 
             let install_mode = if let Some(ref img_path) = image {
                 InstallMode::PrebuiltImage {
@@ -129,15 +142,19 @@ async fn main() -> Result<()> {
                 InstallMode::OnlineBuild
             };
 
+            // Auto-allocate port if 0
+            let actual_port = if port == 0 { desc.default_port } else { port };
+
             let opts = InstallOptions {
                 instance_name: name,
+                claw_type: claw_type.clone(),
                 claw_version: version,
                 install_mode,
                 install_browser: browser,
-                install_mcp_bridge: true,
+                install_mcp_bridge: desc.supports_mcp,
                 api_key: None,
                 use_native: mode == "native",
-                gateway_port: port,
+                gateway_port: actual_port,
             };
 
             let mut config = ConfigManager::load()
@@ -154,7 +171,7 @@ async fn main() -> Result<()> {
                 }
             });
 
-            println!("Installing OpenClaw...\n");
+            println!("Installing {} ({})...\n", desc.display_name, claw_type);
             install::install(opts, &mut config, tx).await?;
             print_task.await?;
             println!("\nDone!");
@@ -166,33 +183,34 @@ async fn main() -> Result<()> {
             println!("Instance '{name}' removed.");
         }
 
-        Commands::Create { name, port } => {
-            use clawenv_core::config::{ConfigManager, UserMode, InstanceConfig, OpenClawConfig, ResourceConfig};
+        Commands::Create { name, claw_type, port } => {
+            use clawenv_core::config::{ConfigManager, UserMode, InstanceConfig, GatewayConfig, ResourceConfig};
             use clawenv_core::sandbox::SandboxType;
+
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let desc = claw_reg.get_strict(&claw_type)?;
 
             let mut config = ConfigManager::load()
                 .or_else(|_| ConfigManager::create_default(UserMode::Developer))?;
 
-            // Check if instance already exists
             if config.instances().iter().any(|i| i.name == name) {
                 anyhow::bail!("Instance '{name}' already exists");
             }
 
-            // Auto-assign port if not specified
             let gateway_port = port.unwrap_or_else(|| {
                 let max_port = config.instances().iter()
-                    .map(|i| i.openclaw.gateway_port)
+                    .map(|i| i.gateway.gateway_port)
                     .max()
-                    .unwrap_or(2999);
+                    .unwrap_or(desc.default_port.saturating_sub(1));
                 max_port + 1
             });
 
-            println!("Creating instance '{name}' on port {gateway_port}...");
+            println!("Creating {} instance '{name}' on port {gateway_port}...", desc.display_name);
 
-            // Create sandbox
             let sandbox_type = SandboxType::from_os();
             let opts = clawenv_core::sandbox::SandboxOpts {
                 instance_name: name.clone(),
+                claw_type: claw_type.clone(),
                 claw_version: "latest".into(),
                 alpine_version: "latest-stable".into(),
                 memory_mb: 512,
@@ -200,22 +218,23 @@ async fn main() -> Result<()> {
                 install_browser: false,
                 install_mode: clawenv_core::sandbox::InstallMode::OnlineBuild,
                 proxy_script: String::new(),
-                gateway_port: 3000,
+                gateway_port,
+                alpine_mirror: String::new(),
+                npm_registry: String::new(),
             };
 
             let backend = clawenv_core::sandbox::detect_backend()?;
             backend.create(&opts).await?;
 
-            // Save to config
             config.config_mut().instances.push(InstanceConfig {
                 name: name.clone(),
-                claw_type: "openclaw".into(),
+                claw_type: claw_type.clone(),
                 version: "pending".into(),
                 sandbox_type,
                 sandbox_id: format!("clawenv-{name}"),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_upgraded_at: String::new(),
-                openclaw: OpenClawConfig {
+                gateway: GatewayConfig {
                     gateway_port,
                     ttyd_port: gateway_port + 4681,
                     webchat_enabled: true,
@@ -251,7 +270,7 @@ async fn main() -> Result<()> {
                                 "{:<15} {:<12} {:<10} {:<15} {:>5}",
                                 inst.name, inst.claw_type, inst.version,
                                 format!("{:?}", inst.sandbox_type),
-                                inst.openclaw.gateway_port,
+                                inst.gateway.gateway_port,
                             );
                             println!("  {status}");
                         }
@@ -296,14 +315,14 @@ async fn main() -> Result<()> {
                     "version": inst.version,
                     "sandbox_type": format!("{:?}", inst.sandbox_type),
                     "health": format!("{:?}", health),
-                    "gateway_port": inst.openclaw.gateway_port,
+                    "gateway_port": inst.gateway.gateway_port,
                 }));
             } else {
                 println!("Instance: {}", inst.name);
                 println!("Version:  {}", inst.version);
                 println!("Sandbox:  {:?}", inst.sandbox_type);
                 println!("Health:   {:?}", health);
-                println!("Gateway:  127.0.0.1:{}", inst.openclaw.gateway_port);
+                println!("Gateway:  127.0.0.1:{}", inst.gateway.gateway_port);
             }
         }
 
@@ -311,9 +330,15 @@ async fn main() -> Result<()> {
             let name = resolve_name(name);
             let config = clawenv_core::config::ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let desc = claw_reg.get(&inst.claw_type);
             let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
-            let cmd = if follow { "openclaw logs -f" } else { "openclaw logs --lines 100" };
-            let output = backend.exec(cmd).await?;
+            let cmd = if follow {
+                format!("{} logs -f", desc.cli_binary)
+            } else {
+                format!("{} logs --lines 100", desc.cli_binary)
+            };
+            let output = backend.exec(&cmd).await?;
             print!("{output}");
         }
 
@@ -345,9 +370,12 @@ async fn main() -> Result<()> {
         Commands::UpdateCheck { name } => {
             let name = resolve_name(name);
             let config = clawenv_core::config::ConfigManager::load()?;
+            let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let desc = claw_reg.get(&inst.claw_type);
             println!("Checking for updates...");
-            match clawenv_core::update::checker::check_latest_version(&inst.version).await {
+            match clawenv_core::update::checker::check_latest_version(&inst.version, &npm_registry, &desc.npm_package).await {
                 Ok(info) => {
                     if info.has_upgrade {
                         println!("Update available: {} → {}", info.current, info.latest);
@@ -379,8 +407,10 @@ async fn main() -> Result<()> {
             println!("Exporting instance '{name}'...");
 
             // Get version info
-            let version = backend.exec("openclaw --version 2>/dev/null || echo unknown").await.unwrap_or_default();
-            println!("  OpenClaw: {}", version.trim());
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let desc = claw_reg.get(&inst.claw_type);
+            let version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
+            println!("  {}: {}", desc.display_name, version.trim());
 
             // Stop VM for clean export
             println!("  Stopping instance...");

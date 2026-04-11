@@ -30,7 +30,7 @@ docs/            # 规格文档（SSOT，共 11 个文件）
 4. **浏览器安全边界**：Chromium 必须安装在沙盒内部，不得调用宿主机浏览器。noVNC 仅传输画面像素流。
 5. **启动器路由**：`App.tsx` 的 `LaunchState` 状态机是唯一顶层路由入口，不得在组件内直接跳转。
 6. **System Tray 生命周期**：托盘在 Tauri `setup` 阶段初始化，不依赖主窗口。主窗口关闭时继续在托盘运行。
-7. **OpenClaw 页是 WebView**：不自己实现管理 UI，内嵌加载 OpenClaw 自带的 Web 管理面板。
+7. **Claw 管理页是 WebView**：不自己实现管理 UI，内嵌加载各 Claw 产品自带的 Web 管理面板。ClawPage 组件通过 ClawDescriptor 动态适配不同产品。
 
 ## 开发命令
 

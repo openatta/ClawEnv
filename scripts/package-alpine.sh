@@ -45,23 +45,26 @@ PLATFORM=$(detect_platform)
 echo "Platform:   $PLATFORM"
 echo ""
 
-# Get OpenClaw version from inside the sandbox
-get_oc_version() {
+# Detect which claw binary is installed inside the sandbox
+get_claw_version() {
+    local cmd="for bin in openclaw zeroclaw autoclaw qclaw kimi-claw easyclaw duclaw arkclaw maxclaw chatclaw; do which \$bin >/dev/null 2>&1 && echo \"\$bin \$(\$bin --version 2>/dev/null || echo unknown)\" && exit 0; done; echo 'unknown unknown'"
     case "$PLATFORM" in
         macos)
-            limactl shell "$VM_NAME" -- sh -c "openclaw --version 2>/dev/null || echo 'unknown'" 2>/dev/null | head -1
+            limactl shell "$VM_NAME" -- sh -c "$cmd" 2>/dev/null | head -1
             ;;
         linux)
-            podman exec "$VM_NAME" sh -c "openclaw --version 2>/dev/null || echo 'unknown'" 2>/dev/null | head -1
+            podman exec "$VM_NAME" sh -c "$cmd" 2>/dev/null | head -1
             ;;
         windows)
-            wsl -d "ClawEnv-Alpine" -- sh -c "openclaw --version 2>/dev/null || echo 'unknown'" 2>/dev/null | head -1
+            wsl -d "ClawEnv-Alpine" -- sh -c "$cmd" 2>/dev/null | head -1
             ;;
     esac
 }
 
-OC_VERSION=$(get_oc_version)
-echo "OpenClaw:   $OC_VERSION"
+CLAW_INFO=$(get_claw_version)
+CLAW_BIN=$(echo "$CLAW_INFO" | awk '{print $1}')
+CLAW_VERSION=$(echo "$CLAW_INFO" | awk '{print $2}')
+echo "Claw:       $CLAW_BIN $CLAW_VERSION"
 echo ""
 
 case "$PLATFORM" in
@@ -159,7 +162,8 @@ instance = "$INSTANCE"
 platform = "$PLATFORM"
 arch = "$(uname -m)"
 created_at = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-openclaw_version = "$OC_VERSION"
+claw_binary = "$CLAW_BIN"
+claw_version = "$CLAW_VERSION"
 
 [image]
 file = "$(basename "$OUTFILE")"

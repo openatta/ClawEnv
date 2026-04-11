@@ -1,6 +1,14 @@
 FROM alpine:latest
 LABEL maintainer="ClawEnv"
 
+# Optional: custom Alpine mirror (e.g., mirrors.aliyun.com/alpine for China)
+ARG ALPINE_MIRROR=""
+RUN if [ -n "$ALPINE_MIRROR" ]; then \
+    ALPINE_VER=$(cat /etc/alpine-release | cut -d. -f1,2) && \
+    echo "${ALPINE_MIRROR}/v${ALPINE_VER}/main" > /etc/apk/repositories && \
+    echo "${ALPINE_MIRROR}/v${ALPINE_VER}/community" >> /etc/apk/repositories; \
+    fi
+
 # System packages + build tools for native npm modules
 RUN apk update && apk add --no-cache \
     nodejs npm git curl bash ca-certificates \
@@ -10,9 +18,14 @@ RUN apk update && apk add --no-cache \
 # Generate SSH host keys
 RUN ssh-keygen -A
 
-# Install OpenClaw
-ARG OPENCLAW_VERSION=latest
-RUN npm install -g openclaw@${OPENCLAW_VERSION} && openclaw --version
+# Optional: custom npm registry (e.g., registry.npmmirror.com for China)
+ARG NPM_REGISTRY=""
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi
+
+# Install claw product (override with --build-arg CLAW_PACKAGE=zeroclaw)
+ARG CLAW_PACKAGE=openclaw
+ARG CLAW_VERSION=latest
+RUN npm install -g ${CLAW_PACKAGE}@${CLAW_VERSION}
 
 # Optional: browser automation
 ARG INSTALL_BROWSER=false
@@ -23,12 +36,16 @@ RUN if [ "$INSTALL_BROWSER" = "true" ]; then \
 # Create clawenv user (consistent across Lima/WSL2/Podman)
 RUN adduser -D -s /bin/bash clawenv \
     && echo "clawenv ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers \
-    && mkdir -p /home/clawenv/.openclaw /workspace \
+    && mkdir -p /home/clawenv/.clawenv /workspace \
     && chown -R clawenv:clawenv /home/clawenv /workspace
 
 USER clawenv
 WORKDIR /home/clawenv
 
-VOLUME ["/workspace", "/home/clawenv/.openclaw"]
+VOLUME ["/workspace", "/home/clawenv/.clawenv"]
 EXPOSE 3000
-CMD ["openclaw", "gateway", "--port", "3000", "--allow-unconfigured"]
+
+# Default CMD uses the installed claw binary; overridden at runtime by ClawEnv
+# based on the ClawDescriptor's gateway_cmd.
+# Shell form needed to expand the build-arg variable.
+CMD ${CLAW_PACKAGE} gateway --port 3000 --allow-unconfigured

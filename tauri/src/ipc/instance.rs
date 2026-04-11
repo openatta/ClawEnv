@@ -1,3 +1,4 @@
+use clawenv_core::claw::ClawRegistry;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::launcher::{self, LaunchState};
 use clawenv_core::manager::instance;
@@ -22,12 +23,15 @@ pub fn get_openclaw_url(instance_name: Option<String>) -> Result<String, String>
         .find(|i| i.name == name)
         .ok_or_else(|| format!("Instance '{}' not found", name))?;
 
-    Ok(format!("http://127.0.0.1:{}", inst.openclaw.gateway_port))
+    Ok(format!("http://127.0.0.1:{}", inst.gateway.gateway_port))
 }
 
 #[derive(Debug, Serialize)]
 pub struct InstanceInfo {
     pub name: String,
+    pub claw_type: String,
+    pub display_name: String,
+    pub logo: String,
     pub sandbox_type: String,
     pub version: String,
     pub gateway_port: u16,
@@ -37,16 +41,23 @@ pub struct InstanceInfo {
 #[tauri::command]
 pub fn list_instances() -> Result<Vec<InstanceInfo>, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let registry = ClawRegistry::load();
 
     Ok(config
         .instances()
         .iter()
-        .map(|inst| InstanceInfo {
-            name: inst.name.clone(),
-            sandbox_type: format!("{:?}", inst.sandbox_type),
-            version: inst.version.clone(),
-            gateway_port: inst.openclaw.gateway_port,
-            ttyd_port: inst.openclaw.ttyd_port,
+        .map(|inst| {
+            let desc = registry.get(&inst.claw_type);
+            InstanceInfo {
+                name: inst.name.clone(),
+                claw_type: inst.claw_type.clone(),
+                display_name: desc.display_name.clone(),
+                logo: desc.logo.clone(),
+                sandbox_type: format!("{:?}", inst.sandbox_type),
+                version: inst.version.clone(),
+                gateway_port: inst.gateway.gateway_port,
+                ttyd_port: inst.gateway.ttyd_port,
+            }
         })
         .collect())
 }
@@ -72,9 +83,9 @@ pub async fn get_instance_status_detail(name: String) -> Result<InstanceStatusDe
         "echo '--- Memory ---' && free -m 2>/dev/null || cat /proc/meminfo 2>/dev/null | head -5; echo ''; echo '--- Disk ---' && df -h / 2>/dev/null; echo ''; echo '--- Uptime ---' && uptime 2>/dev/null"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
 
-    // Read the actual running gateway log (not the startup wrapper log)
+    // Read gateway log — uses the unified log path from install/instance management
     let gateway_log = backend.exec(
-        "cat /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -100 || tail -80 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log found'"
+        "tail -100 /tmp/clawenv-gateway.log 2>/dev/null || echo 'No gateway log found'"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
 
     Ok(InstanceStatusDetail { processes, resources, gateway_log })
@@ -86,25 +97,27 @@ pub async fn get_instance_logs(name: String) -> Result<String, String> {
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
     let log = backend.exec(
-        "cat /tmp/openclaw/openclaw-*.log 2>/dev/null | tail -100 || tail -100 /tmp/openclaw-gateway.log 2>/dev/null || echo 'No gateway log'"
+        "tail -100 /tmp/clawenv-gateway.log 2>/dev/null || echo 'No gateway log'"
     ).await.unwrap_or_else(|e| format!("Error: {e}"));
     Ok(log)
 }
 
 #[tauri::command]
-pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<String>) -> Result<(), String> {
+pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<String>, claw_type: Option<String>) -> Result<(), String> {
     let name = instance_name.unwrap_or_else(|| "default".into());
+    let ct = claw_type.unwrap_or_else(|| "openclaw".into());
+    let registry = ClawRegistry::load();
+    let desc = registry.get(&ct);
     let label = format!("install-{name}");
-    let url = format!("/index.html?mode=install&name={name}");
+    let url = format!("/index.html?mode=install&name={name}&clawType={ct}");
 
-    // If window already exists, focus it
     if let Some(win) = app.get_webview_window(&label) {
         let _ = win.set_focus();
         return Ok(());
     }
 
     WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App(url.into()))
-        .title(format!("Install OpenClaw — {name}"))
+        .title(format!("Install {} — {name}", desc.display_name))
         .inner_size(900.0, 650.0)
         .resizable(true)
         .build()
@@ -214,8 +227,8 @@ pub async fn edit_instance_ports(
 
     // Update config
     if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == name) {
-        entry.openclaw.gateway_port = gateway_port;
-        entry.openclaw.ttyd_port = ttyd_port;
+        entry.gateway.gateway_port = gateway_port;
+        entry.gateway.ttyd_port = ttyd_port;
     }
     config.save().map_err(|e| e.to_string())?;
 

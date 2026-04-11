@@ -1,9 +1,10 @@
 import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Instance, UpgradeInfo, UpgradeProgress } from "../types";
+import type { Instance, ClawType, UpgradeInfo, UpgradeProgress } from "../types";
 
-export default function OpenClawPage(props: {
+export default function ClawPage(props: {
+  clawType: ClawType;
   instances: Instance[];
   healths: Record<string, string>;
   onInstancesChanged?: () => void;
@@ -22,7 +23,6 @@ export default function OpenClawPage(props: {
     return "bg-red-500";
   }
 
-  // actionLoading format: "action:instanceName" e.g. "start:default"
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal("");
   const [showDeleteConfirm, setShowDeleteConfirm] = createSignal(false);
@@ -36,7 +36,6 @@ export default function OpenClawPage(props: {
   const [upgradeMessage, setUpgradeMessage] = createSignal("");
   const [upgradeError, setUpgradeError] = createSignal("");
 
-  // Listen for update-available events from background checker
   onMount(async () => {
     const unUpdate = await listen<UpgradeInfo>("update-available", (ev) => {
       if (ev.payload.instance === activeTab()) {
@@ -47,7 +46,7 @@ export default function OpenClawPage(props: {
       setUpgradeProgress(ev.payload.percent);
       setUpgradeMessage(ev.payload.message);
     });
-    const unComplete = await listen<string>("upgrade-complete", (ev) => {
+    const unComplete = await listen<string>("upgrade-complete", () => {
       setUpgrading(false);
       setShowUpgrade(false);
       setUpdateInfo(null);
@@ -58,8 +57,6 @@ export default function OpenClawPage(props: {
       setUpgradeError(String(ev.payload));
     });
     onCleanup(() => { unUpdate(); unProgress(); unComplete(); unFailed(); });
-
-    // Also check now for active instance
     checkUpdate();
   });
 
@@ -73,7 +70,7 @@ export default function OpenClawPage(props: {
       if (info.has_upgrade) {
         setUpdateInfo({ instance: name, current: info.current, latest: info.latest, security: info.is_security_release });
       }
-    } catch { /* ignore check failures */ }
+    } catch { /* ignore */ }
   }
 
   async function startUpgrade() {
@@ -133,7 +130,7 @@ export default function OpenClawPage(props: {
 
   async function openInBrowser() {
     const inst = activeInstance();
-    const port = inst?.gateway_port ?? 3000;
+    const port = inst?.gateway_port ?? props.clawType.default_port;
     const token = gatewayToken();
     const url = token ? `http://127.0.0.1:${port}/?token=${token}` : `http://127.0.0.1:${port}`;
     try { await invoke("open_url_in_browser", { url }); }
@@ -145,7 +142,7 @@ export default function OpenClawPage(props: {
 
   // Config panel
   const [showConfig, setShowConfig] = createSignal(false);
-  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(3000);
+  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(props.clawType.default_port);
   const [cfgTtydPort, setCfgTtydPort] = createSignal(7681);
   const [cfgSaving, setCfgSaving] = createSignal(false);
   const [cfgError, setCfgError] = createSignal("");
@@ -164,14 +161,12 @@ export default function OpenClawPage(props: {
       setCaps(c);
     } catch { setCaps({}); }
     setShowConfig(true);
-    // Force set input values after dialog renders
     setTimeout(() => {
       if (gatewayPortRef) gatewayPortRef.value = String(inst.gateway_port);
       if (ttydPortRef) ttydPortRef.value = String(inst.ttyd_port);
     }, 0);
   }
 
-  // Check if ports conflict with other instances
   const portConflict = () => {
     const gp = cfgGatewayPort();
     const tp = cfgTtydPort();
@@ -206,14 +201,20 @@ export default function OpenClawPage(props: {
     finally { setCfgSaving(false); }
   }
 
+  // Shorthand for display name and logo
+  const dn = () => props.clawType.display_name;
+  const logo = () => props.clawType.logo;
+
   return (
     <div class="h-full flex flex-col">
-      {/* Top bar with + button */}
+      {/* Top bar */}
       <div class="flex items-center justify-between px-4 py-2 border-b border-gray-800 shrink-0">
-        <span class="font-medium">OpenClaw</span>
+        <span class="font-medium flex items-center gap-2">
+          <span class="text-lg">{logo()}</span> {dn()}
+        </span>
         <button
           class="w-6 h-6 flex items-center justify-center rounded bg-gray-700 hover:bg-indigo-600 text-sm font-bold"
-          title="New Instance"
+          title={`New ${dn()} Instance`}
           onClick={() => props.onAddInstance?.()}
         >+</button>
       </div>
@@ -239,11 +240,11 @@ export default function OpenClawPage(props: {
         </For>
       </div>
 
-      {/* Content area */}
+      {/* Content */}
       <div class="flex-1 flex items-center justify-center bg-gray-950">
         <Show when={!activeInstance()}>
           <div class="text-center text-gray-500">
-            <p class="mb-4">No instances yet</p>
+            <p class="mb-4">No {dn()} instances yet</p>
             <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
               onClick={() => props.onAddInstance?.()}>Create Instance</button>
           </div>
@@ -251,12 +252,11 @@ export default function OpenClawPage(props: {
 
         <Show when={activeInstance()}>
           <div class="text-center max-w-lg w-full">
-            {/* Icon + status */}
             <div class="mb-4">
-              <span class={`text-5xl ${isRunning() ? "" : "opacity-30"}`}>🦞</span>
+              <span class={`text-5xl ${isRunning() ? "" : "opacity-30"}`}>{logo()}</span>
             </div>
             <h2 class="text-xl font-bold mb-1">
-              {isRunning() ? "OpenClaw is Running" : "OpenClaw is Stopped"}
+              {isRunning() ? `${dn()} is Running` : `${dn()} is Stopped`}
             </h2>
             <p class="text-sm text-gray-400 mb-5">
               {isRunning()
@@ -268,41 +268,30 @@ export default function OpenClawPage(props: {
             <div class="flex items-center justify-center gap-2 mb-2">
               <Show when={!isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                  onClick={() => doAction("start")}>
-                  ▶ Start
-                </button>
+                  onClick={() => doAction("start")}>Start</button>
               </Show>
               <Show when={isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                  onClick={openInBrowser}>
-                  Open Control Panel ↗
-                </button>
+                  onClick={openInBrowser}>Open Control Panel</button>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                  onClick={() => doAction("stop")}>
-                  ⏹ Stop
-                </button>
+                  onClick={() => doAction("stop")}>Stop</button>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                  onClick={() => doAction("restart")}>
-                  ↻ Restart
-                </button>
+                  onClick={() => doAction("restart")}>Restart</button>
               </Show>
               <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                onClick={openConfig}>
-                ⚙ Configure
-              </button>
+                onClick={openConfig}>Configure</button>
               <button class="px-3 py-2 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-sm disabled:opacity-50 ml-2"
                 disabled={anyLoading()} onClick={() => setShowDeleteConfirm(true)}>
                 {loading("delete") ? "Deleting..." : "Delete"}
               </button>
             </div>
 
-            {/* Loading indicator */}
             <Show when={anyLoading()}>
               <div class="flex items-center justify-center gap-2 mb-2 text-sm text-indigo-300">
-                <span class="animate-pulse">●</span>
-                {loading("start") && "Starting instance, please wait..."}
+                <span class="animate-pulse">...</span>
+                {loading("start") && "Starting instance..."}
                 {loading("stop") && "Stopping instance..."}
-                {loading("restart") && "Restarting instance, please wait..."}
+                {loading("restart") && "Restarting instance..."}
                 {loading("delete") && "Deleting instance..."}
               </div>
             </Show>
@@ -316,37 +305,34 @@ export default function OpenClawPage(props: {
               }`}>
                 <div>
                   <span class={updateInfo()!.security ? "text-red-300" : "text-indigo-300"}>
-                    {updateInfo()!.security ? "⚠ Security update" : "Update available"}:
+                    {updateInfo()!.security ? "Security update" : "Update available"}:
                   </span>
                   <span class="text-gray-300 ml-1">
                     {updateInfo()!.current} → {updateInfo()!.latest}
                   </span>
                 </div>
                 <button class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs text-white"
-                  onClick={() => setShowUpgrade(true)}>
-                  Upgrade
-                </button>
+                  onClick={() => setShowUpgrade(true)}>Upgrade</button>
               </div>
             </Show>
 
             {/* Info table */}
             <div class="bg-gray-900 rounded-lg p-4 text-left text-xs text-gray-500 mx-auto max-w-xl">
-              <table class="w-full">
-                <tbody>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Instance</td><td>{activeInstance()?.name}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Version</td><td>{activeInstance()?.version}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
-                  <Show when={isRunning()}>
-                    <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "..."}</td></tr>
-                  </Show>
-                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Status</td>
-                    <td class={isRunning() ? "text-green-400" : "text-gray-500"}>
-                      {isRunning() ? "● running" : "○ " + activeHealth()}
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+              <table class="w-full"><tbody>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Instance</td><td>{activeInstance()?.name}</td></tr>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Type</td><td>{dn()}</td></tr>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Version</td><td>{activeInstance()?.version}</td></tr>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
+                <Show when={isRunning()}>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "..."}</td></tr>
+                </Show>
+                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Status</td>
+                  <td class={isRunning() ? "text-green-400" : "text-gray-500"}>
+                    {isRunning() ? "running" : activeHealth()}
+                  </td>
+                </tr>
+              </tbody></table>
             </div>
           </div>
         </Show>
@@ -362,7 +348,7 @@ export default function OpenClawPage(props: {
                 <label class="block text-xs text-gray-400 mb-1">Gateway Port</label>
                 <input ref={gatewayPortRef} type="number"
                   onInput={(e) => {
-                    const v = parseInt(e.currentTarget.value) || 3000;
+                    const v = parseInt(e.currentTarget.value) || props.clawType.default_port;
                     setCfgGatewayPort(v);
                     setCfgTtydPort(v + 4681);
                     if (ttydPortRef) ttydPortRef.value = String(v + 4681);
@@ -377,7 +363,7 @@ export default function OpenClawPage(props: {
               </div>
             </div>
             <Show when={!caps().port_edit}>
-              <p class="text-xs text-gray-500 mt-2">Port forwarding not supported by this backend. Config saved locally only.</p>
+              <p class="text-xs text-gray-500 mt-2">Port forwarding not supported by this backend.</p>
             </Show>
             {portConflict() && <p class="text-xs text-red-400 mt-2">{portConflict()}</p>}
             {cfgError() && !portConflict() && <p class="text-xs text-red-400 mt-2">{cfgError()}</p>}
@@ -398,7 +384,7 @@ export default function OpenClawPage(props: {
         </div>
       </Show>
 
-      {/* Delete confirmation dialog */}
+      {/* Delete confirmation */}
       <Show when={showDeleteConfirm()}>
         <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div class="bg-gray-800 border border-gray-700 rounded-xl p-6 max-w-sm shadow-2xl">
@@ -407,7 +393,7 @@ export default function OpenClawPage(props: {
               Are you sure you want to delete <strong>"{activeTab()}"</strong>?
             </p>
             <p class="text-xs text-gray-500 mb-4">
-              This will stop the instance and destroy the VM. All data inside the sandbox will be lost.
+              This will stop the instance and destroy the sandbox. All data will be lost.
             </p>
             <div class="flex gap-2 justify-end">
               <button class="px-4 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
@@ -424,19 +410,18 @@ export default function OpenClawPage(props: {
         <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-[420px] shadow-2xl">
             <h3 class="text-base font-bold mb-3">
-              {upgrading() ? "Upgrading..." : "Upgrade OpenClaw"}
+              {upgrading() ? "Upgrading..." : `Upgrade ${dn()}`}
             </h3>
-
             <Show when={!upgrading()}>
               <div class="text-sm text-gray-300 mb-2">
                 <span class="text-gray-400">Current:</span> {updateInfo()?.current}
               </div>
               <div class="text-sm text-gray-300 mb-4">
                 <span class="text-gray-400">Latest:</span> <span class="text-green-400">{updateInfo()?.latest}</span>
-                {updateInfo()?.security && <span class="text-red-400 ml-2">⚠ Security</span>}
+                {updateInfo()?.security && <span class="text-red-400 ml-2">Security</span>}
               </div>
               <p class="text-xs text-gray-500 mb-4">
-                The upgrade will stop the gateway, update OpenClaw, and restart.
+                The upgrade will stop the gateway, update {dn()}, and restart.
               </p>
               <div class="flex gap-2 justify-end">
                 <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
@@ -445,7 +430,6 @@ export default function OpenClawPage(props: {
                   onClick={startUpgrade}>Upgrade Now</button>
               </div>
             </Show>
-
             <Show when={upgrading()}>
               <div class="w-full bg-gray-700 rounded-full h-2 mb-2">
                 <div class="h-2 rounded-full bg-indigo-600 transition-all" style={{ width: `${upgradeProgress()}%` }} />

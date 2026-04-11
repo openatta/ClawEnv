@@ -1,6 +1,6 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import type { Instance } from "../types";
+import type { Instance, ClawType } from "../types";
 type Lang = "zh-CN" | "en";
 type StatusDetail = { processes: string; resources: string; gateway_log: string };
 
@@ -31,6 +31,8 @@ export default function Home(props: {
   instances: Instance[];
   healths: Record<string, string>;
   onHealthChange: () => void;
+  clawTypes?: ClawType[];
+  onAddInstance?: (clawType?: string) => void;
 }) {
   const [lang, setLang] = createSignal<Lang>("zh-CN");
   const l = () => t[lang()];
@@ -98,7 +100,15 @@ export default function Home(props: {
       </div>
 
       <section class="mb-6">
-        <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">{l().instances}</h2>
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">{l().instances}</h2>
+          <Show when={props.onAddInstance}>
+            <button
+              class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white"
+              onClick={() => props.onAddInstance?.()}
+            >+ Add</button>
+          </Show>
+        </div>
         <div class="space-y-3">
           <For each={props.instances}>
             {(inst) => {
@@ -110,8 +120,9 @@ export default function Home(props: {
                   <div class="flex items-center justify-between mb-2">
                     <div class="flex items-center gap-2">
                       <div class={`w-2 h-2 rounded-full ${healthColor[health()] || "bg-gray-500"}`} />
+                      <span class="text-sm">{inst.logo}</span>
                       <span class="font-medium">{inst.name}</span>
-                      <span class="text-xs text-gray-400">({inst.sandbox_type})</span>
+                      <span class="text-xs text-gray-400">{inst.display_name}</span>
                       <span class="text-xs text-gray-500">
                         {health() === "running" ? l().running : health() === "stopped" ? l().stopped : l().unreachable}
                       </span>

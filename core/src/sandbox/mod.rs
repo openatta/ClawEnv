@@ -3,6 +3,8 @@ mod native;
 mod wsl;
 mod podman;
 mod exec_helper;
+#[cfg(test)]
+pub mod mock;
 
 pub use lima::LimaBackend;
 pub use native::NativeBackend;
@@ -94,6 +96,9 @@ pub trait SandboxBackend: Send + Sync {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxOpts {
     pub instance_name: String,
+    /// Claw type ID (e.g., "openclaw", "zeroclaw") — used to look up the ClawDescriptor
+    #[serde(default = "default_claw_type")]
+    pub claw_type: String,
     pub claw_version: String,
     pub alpine_version: String,
     pub memory_mb: u32,
@@ -106,18 +111,25 @@ pub struct SandboxOpts {
     /// Gateway port (for Lima portForwards)
     #[serde(default = "default_gateway_port")]
     pub gateway_port: u16,
+    /// Custom Alpine mirror base URL (empty = default CDN)
+    #[serde(default)]
+    pub alpine_mirror: String,
+    /// Custom npm registry URL (empty = default npmjs.org)
+    #[serde(default)]
+    pub npm_registry: String,
 }
 
-fn default_gateway_port() -> u16 {
-    3000
-}
+fn default_claw_type() -> String { "openclaw".into() }
+fn default_gateway_port() -> u16 { 3000 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum InstallMode {
     /// 在线构建：下载 Alpine base + 逐步安装
     OnlineBuild,
-    /// 预构建镜像：下载或本地导入
+    /// 预构建镜像：下载或本地导入（沙盒用）
     PrebuiltImage { source: ImageSource },
+    /// Native 离线安装包：内含 Node.js + node_modules，解压即用
+    NativeBundle { path: std::path::PathBuf },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

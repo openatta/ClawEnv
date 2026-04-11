@@ -44,12 +44,16 @@ impl SandboxBackend for NativeBackend {
 
     async fn create(&self, opts: &SandboxOpts) -> Result<()> {
         tokio::fs::create_dir_all(&self.install_dir).await?;
-        let status = Command::new("npm")
-            .args(["install", "-g", &format!("openclaw@{}", opts.claw_version)])
+        let registry = crate::claw::ClawRegistry::load();
+        let desc = registry.get(&opts.claw_type);
+        let install_cmd = desc.npm_install_cmd(&opts.claw_version);
+        // npm_install_cmd returns "npm install -g package@version" — split for Command args
+        let status = Command::new("sh")
+            .args(["-c", &install_cmd])
             .status()
             .await?;
         if !status.success() {
-            anyhow::bail!("Failed to install OpenClaw");
+            anyhow::bail!("Failed to install {}", desc.display_name);
         }
         Ok(())
     }

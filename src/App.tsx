@@ -13,7 +13,7 @@ type LaunchState =
   | { type: "not_installed" }
   | { type: "upgrade_available"; instances: Instance[] }
   | { type: "ready"; instances: Instance[] }
-  | { type: "install_window"; instanceName: string };
+  | { type: "install_window"; instanceName: string; clawType: string };
 
 export default function App() {
   const [state, setState] = createSignal<LaunchState>({ type: "loading" });
@@ -22,7 +22,7 @@ export default function App() {
     // Check URL params — install window passes ?mode=install&name=xxx
     const params = new URLSearchParams(window.location.search);
     if (params.get("mode") === "install") {
-      setState({ type: "install_window", instanceName: params.get("name") || "default" });
+      setState({ type: "install_window", instanceName: params.get("name") || "default", clawType: params.get("clawType") || "openclaw" });
       return;
     }
 
@@ -61,6 +61,7 @@ export default function App() {
           return (
             <InstallWizard
               defaultInstanceName={s.instanceName}
+              clawType={s.clawType}
               onComplete={async () => {
                 // Notify main window to refresh
                 await emit("instances-changed");

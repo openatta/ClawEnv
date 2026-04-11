@@ -6,7 +6,7 @@ use tauri::Emitter;
 pub async fn test_proxy(proxy_json: String) -> Result<(), String> {
     let proxy: ProxyConfig =
         serde_json::from_str(&proxy_json).map_err(|e| e.to_string())?;
-    clawenv_core::config::proxy::test_proxy(&proxy)
+    clawenv_core::config::proxy::test_proxy(&proxy, "")
         .await
         .map_err(|e| e.to_string())
 }

@@ -3,17 +3,21 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import IconBar from "../components/IconBar";
 import Home from "../pages/Home";
-import OpenClawPage from "../pages/OpenClawPage";
+import ClawPage from "../pages/ClawPage";
 import SandboxPage from "../pages/SandboxPage";
 import Settings from "../pages/Settings";
-import type { Instance } from "../types";
+import type { Instance, ClawType } from "../types";
 
-type Page = "home" | "openclaw" | "sandbox" | "settings";
+export type Page = "home" | "sandbox" | "settings" | `claw:${string}`;
+
+/** Top 5 claw types that always show in the icon bar (by registry order / score rank). */
+const PINNED_CLAW_IDS = ["openclaw", "autoclaw", "qclaw", "kimi-claw", "easyclaw"];
 
 export default function MainLayout(props: { instances: Instance[] }) {
   const [activePage, setActivePage] = createSignal<Page>("home");
   const [healths, setHealths] = createSignal<Record<string, string>>({});
   const [instances, setInstances] = createSignal<Instance[]>(props.instances);
+  const [clawTypes, setClawTypes] = createSignal<ClawType[]>([]);
 
   async function refreshInstances() {
     try {
@@ -35,9 +39,16 @@ export default function MainLayout(props: { instances: Instance[] }) {
   }
 
   onMount(async () => {
+    // Load claw type registry
+    try {
+      const types = await invoke<ClawType[]>("list_claw_types");
+      setClawTypes(types);
+    } catch (e) {
+      console.error("Failed to load claw types:", e);
+    }
+
     refreshHealths();
 
-    // Listen for health events from monitor
     const unHealth = await listen<{ instance_name: string; health: string }>(
       "instance-health",
       (event) => {
@@ -48,7 +59,6 @@ export default function MainLayout(props: { instances: Instance[] }) {
       }
     );
 
-    // Listen for instance changes (e.g. install window completed)
     const unChanged = await listen("instances-changed", () => {
       refreshInstances();
     });
@@ -59,27 +69,62 @@ export default function MainLayout(props: { instances: Instance[] }) {
   const interval = setInterval(refreshHealths, 10000);
   onCleanup(() => clearInterval(interval));
 
-  async function openInstallWindow() {
+  async function openInstallWindow(clawType?: string) {
     try {
-      await invoke("open_install_window", { instanceName: null });
+      await invoke("open_install_window", { instanceName: null, clawType: clawType || null });
     } catch (e) {
       console.error("Failed to open install window:", e);
     }
   }
 
+  // Derive the active claw type ID from the page
+  const activeClawType = () => {
+    const page = activePage();
+    if (page.startsWith("claw:")) return page.slice(5);
+    return null;
+  };
+
+  // Filter instances for the active claw type
+  const activeClawInstances = () => {
+    const ct = activeClawType();
+    if (!ct) return [];
+    return instances().filter((i) => i.claw_type === ct);
+  };
+
+  // Get the ClawType descriptor for the active page
+  const activeClawDesc = () => {
+    const ct = activeClawType();
+    if (!ct) return null;
+    return clawTypes().find((t) => t.id === ct) || null;
+  };
+
   return (
     <div class="flex h-screen bg-gray-900 text-white">
-      <IconBar activePage={activePage()} onNavigate={setActivePage} />
+      <IconBar
+        activePage={activePage()}
+        onNavigate={setActivePage}
+        clawTypes={clawTypes()}
+        instances={instances()}
+        pinnedClawIds={PINNED_CLAW_IDS}
+        onAddInstance={openInstallWindow}
+      />
       <main class="flex-1 overflow-hidden">
         {activePage() === "home" && (
-          <Home instances={instances()} healths={healths()} onHealthChange={refreshInstances} />
-        )}
-        {activePage() === "openclaw" && (
-          <OpenClawPage
+          <Home
             instances={instances()}
             healths={healths()}
-            onInstancesChanged={refreshInstances}
+            onHealthChange={refreshInstances}
+            clawTypes={clawTypes()}
             onAddInstance={openInstallWindow}
+          />
+        )}
+        {activeClawType() && activeClawDesc() && (
+          <ClawPage
+            clawType={activeClawDesc()!}
+            instances={activeClawInstances()}
+            healths={healths()}
+            onInstancesChanged={refreshInstances}
+            onAddInstance={() => openInstallWindow(activeClawType()!)}
           />
         )}
         {activePage() === "sandbox" && <SandboxPage />}

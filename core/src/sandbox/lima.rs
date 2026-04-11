@@ -230,11 +230,22 @@ impl SandboxBackend for LimaBackend {
                 let gateway_port = opts.gateway_port;
                 let ttyd_port = gateway_port + 4681;
 
-                let rendered = template
+                // {MIRRORS_SCRIPT} is bundled into proxy_script by the installer,
+                // but for standalone template use, replace with empty.
+                let mut rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
                     .replace("{GATEWAY_PORT}", &gateway_port.to_string())
                     .replace("{TTYD_PORT}", &ttyd_port.to_string())
-                    .replace("{PROXY_SCRIPT}", &opts.proxy_script);
+                    .replace("{PROXY_SCRIPT}", &opts.proxy_script)
+                    .replace("{MIRRORS_SCRIPT}", "");
+
+                // Replace Alpine image download URLs if a custom mirror is configured
+                if !opts.alpine_mirror.is_empty() {
+                    rendered = rendered.replace(
+                        "https://dl-cdn.alpinelinux.org/alpine",
+                        &opts.alpine_mirror,
+                    );
+                }
 
                 // Write rendered template
                 let templates_dir = Self::templates_dir()?;
@@ -253,6 +264,7 @@ impl SandboxBackend for LimaBackend {
 
                 tracing::info!("Lima VM '{}' created and provisioned", self.vm_name);
             }
+            _ => anyhow::bail!("Install mode not supported by Lima backend"),
         }
         Ok(())
     }
