@@ -10,8 +10,9 @@ import type { Instance, ClawType } from "../types";
 
 export type Page = "home" | "sandbox" | "settings" | `claw:${string}`;
 
-/** Top 5 claw types that always show in the icon bar (by registry order / score rank). */
-const PINNED_CLAW_IDS = ["openclaw", "autoclaw", "qclaw", "kimi-claw", "easyclaw"];
+/** Pinned claw types: verified npm-installable products shown permanently in icon bar.
+ *  Others (unverified / not yet on npm) go to the "more" overflow dialog. */
+const PINNED_CLAW_IDS = ["openclaw", "nemoclaw", "easyclaw", "duclaw", "maxclaw"];
 
 export default function MainLayout(props: { instances: Instance[] }) {
   const [activePage, setActivePage] = createSignal<Page>("home");
