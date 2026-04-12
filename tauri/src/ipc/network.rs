@@ -200,6 +200,46 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
         }
     }
 
+    // 3. Windows: read proxy from registry (Internet Settings)
+    #[cfg(target_os = "windows")]
+    {
+        if let Ok(output) = tokio::process::Command::new("reg")
+            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
+            .output()
+            .await
+        {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            // ProxyEnable REG_DWORD 0x1 means proxy is on
+            if stdout.contains("0x1") {
+                if let Ok(server_output) = tokio::process::Command::new("reg")
+                    .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"])
+                    .output()
+                    .await
+                {
+                    let server_stdout = String::from_utf8_lossy(&server_output.stdout);
+                    // Extract server value: "    ProxyServer    REG_SZ    127.0.0.1:10808"
+                    if let Some(line) = server_stdout.lines().find(|l| l.contains("ProxyServer")) {
+                        let parts: Vec<&str> = line.split_whitespace().collect();
+                        if let Some(server) = parts.last() {
+                            let proxy_url = if server.starts_with("http") {
+                                server.to_string()
+                            } else {
+                                format!("http://{}", server)
+                            };
+                            return Ok(serde_json::json!({
+                                "detected": true,
+                                "source": "Windows Registry (Internet Settings)",
+                                "http_proxy": proxy_url,
+                                "https_proxy": proxy_url,
+                                "no_proxy": "localhost,127.0.0.1",
+                            }));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(serde_json::json!({
         "detected": false,
         "source": "none",

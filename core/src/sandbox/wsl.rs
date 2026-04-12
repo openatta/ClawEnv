@@ -99,32 +99,60 @@ impl SandboxBackend for WslBackend {
             .args(["--status"])
             .output().await;
 
-        let msg = match wsl_check {
+        match wsl_check {
             Ok(out) if out.status.success() => {
-                "WSL is installed but may not be configured for WSL2.\n\
-                 Please run in PowerShell (Administrator):\n\
-                   wsl --set-default-version 2"
-                    .to_string()
+                // WSL exists but not WSL2 — try to set default version via UAC
+                tracing::info!("WSL installed but not configured for WSL2, requesting elevation...");
+                let status = Command::new("powershell")
+                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--set-default-version 2' -Verb RunAs -Wait"])
+                    .status()
+                    .await;
+                if status.map(|s| s.success()).unwrap_or(false) && self.is_available().await? {
+                    return Ok(());
+                }
+                anyhow::bail!(
+                    "WSL is installed but not configured for WSL2.\n\
+                     The automatic configuration was cancelled or failed.\n\
+                     Please run manually in PowerShell (Administrator):\n\
+                       wsl --set-default-version 2"
+                );
             }
             _ => {
-                // WSL2 not installed — need system restart after install
-                "WSL2 is not installed on your system.\n\
-                 \n\
-                 To install (requires Administrator + system restart):\n\
-                 1. Open PowerShell as Administrator\n\
-                 2. Run: wsl --install\n\
-                 3. Restart your computer\n\
-                 4. Run ClawEnv again\n\
-                 \n\
-                 Note: A system restart is required after WSL2 installation.\n\
-                 ClawEnv cannot proceed until WSL2 is available.\n\
-                 \n\
-                 See https://learn.microsoft.com/en-us/windows/wsl/install"
-                    .to_string()
-            }
-        };
+                // WSL2 not installed — attempt auto-install via UAC elevation
+                tracing::info!("WSL2 not found, attempting install with UAC elevation...");
+                let status = Command::new("powershell")
+                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-launch' -Verb RunAs -Wait"])
+                    .status()
+                    .await;
 
-        anyhow::bail!("{msg}");
+                if status.map(|s| s.success()).unwrap_or(false) {
+                    // WSL install initiated — requires restart
+                    anyhow::bail!(
+                        "WSL2 installation has been initiated successfully!\n\
+                         \n\
+                         ⚠ A system restart is required to complete the installation.\n\
+                         \n\
+                         Please:\n\
+                         1. Restart your computer now\n\
+                         2. After restart, open ClawEnv again\n\
+                         \n\
+                         The installation will continue automatically after restart."
+                    );
+                } else {
+                    anyhow::bail!(
+                        "WSL2 is not installed and automatic installation was cancelled.\n\
+                         \n\
+                         To install manually:\n\
+                         1. Open PowerShell as Administrator\n\
+                         2. Run: wsl --install\n\
+                         3. Restart your computer\n\
+                         4. Open ClawEnv again\n\
+                         \n\
+                         See https://learn.microsoft.com/en-us/windows/wsl/install"
+                    );
+                }
+            }
+        }
     }
 
     async fn create(&self, opts: &SandboxOpts) -> Result<()> {
