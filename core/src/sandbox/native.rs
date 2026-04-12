@@ -29,8 +29,9 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        let node = Command::new("node").args(["--version"]).output().await;
-        let npm = Command::new("npm").args(["--version"]).output().await;
+        use crate::platform::process::silent_cmd;
+        let node = silent_cmd("node").args(["--version"]).output().await;
+        let npm = silent_cmd("npm").args(["--version"]).output().await;
         Ok(node.map(|o| o.status.success()).unwrap_or(false)
             && npm.map(|o| o.status.success()).unwrap_or(false))
     }

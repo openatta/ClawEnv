@@ -173,63 +173,76 @@ impl SandboxBackend for WslBackend {
             return Ok(());
         }
 
-        let wsl_check = Command::new("wsl")
-            .args(["--status"])
+        use crate::platform::process::silent_cmd;
+
+        // Check what's missing: WSL feature, VirtualMachinePlatform, or both
+        let wsl_feature = silent_cmd("powershell")
+            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State"])
             .output().await;
+        let wsl_enabled = wsl_feature.as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
+            .unwrap_or(false);
 
-        match wsl_check {
-            Ok(out) if out.status.success() => {
-                // WSL exists but not WSL2 — try to set default version via UAC
-                tracing::info!("WSL installed but not configured for WSL2, requesting elevation...");
-                let status = Command::new("powershell")
-                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--set-default-version 2' -Verb RunAs -Wait"])
-                    .status()
-                    .await;
-                if status.map(|s| s.success()).unwrap_or(false) && self.is_available().await? {
-                    return Ok(());
-                }
-                anyhow::bail!(
-                    "WSL is installed but not configured for WSL2.\n\
-                     The automatic configuration was cancelled or failed.\n\
-                     Please run manually in PowerShell (Administrator):\n\
-                       wsl --set-default-version 2"
-                );
-            }
-            _ => {
-                // WSL2 not installed — attempt auto-install via UAC elevation
-                tracing::info!("WSL2 not found, attempting install with UAC elevation...");
-                let status = Command::new("powershell")
-                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-distribution' -Verb RunAs -Wait"])
-                    .status()
-                    .await;
+        let vm_feature = silent_cmd("powershell")
+            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform).State"])
+            .output().await;
+        let vm_enabled = vm_feature.as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
+            .unwrap_or(false);
 
-                if status.map(|s| s.success()).unwrap_or(false) {
-                    // WSL install initiated — requires restart
-                    anyhow::bail!(
-                        "WSL2 installation has been initiated successfully!\n\
-                         \n\
-                         ⚠ A system restart is required to complete the installation.\n\
-                         \n\
-                         Please:\n\
-                         1. Restart your computer now\n\
-                         2. After restart, open ClawEnv again\n\
-                         \n\
-                         The installation will continue automatically after restart."
-                    );
-                } else {
-                    anyhow::bail!(
-                        "WSL2 is not installed and automatic installation was cancelled.\n\
-                         \n\
-                         To install manually:\n\
-                         1. Open PowerShell as Administrator\n\
-                         2. Run: wsl --install\n\
-                         3. Restart your computer\n\
-                         4. Open ClawEnv again\n\
-                         \n\
-                         See https://learn.microsoft.com/en-us/windows/wsl/install"
-                    );
-                }
+        tracing::info!("WSL feature: {}, VM platform: {}", wsl_enabled, vm_enabled);
+
+        if wsl_enabled && vm_enabled {
+            // Both features enabled but wsl --import might still not work
+            // Try setting default version to 2
+            let _ = silent_cmd("wsl")
+                .args(["--set-default-version", "2"])
+                .output().await;
+            if self.is_available().await? {
+                return Ok(());
             }
+        }
+
+        // Need to install/enable WSL2 — this requires UAC and shows a terminal (intentional)
+        tracing::info!("Installing WSL2 (UAC elevation required)...");
+
+        // Use wsl --install --no-distribution which enables both features + installs kernel
+        // This is the ONLY command that intentionally shows a terminal window
+        let status = Command::new("powershell")
+            .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-distribution' -Verb RunAs -Wait"])
+            .status()
+            .await;
+
+        if status.map(|s| s.success()).unwrap_or(false) {
+            // Check if it worked without restart
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            if self.is_available().await? {
+                return Ok(());
+            }
+            // Needs restart
+            anyhow::bail!(
+                "WSL2 installation has been initiated successfully!\n\
+                 \n\
+                 A system restart is required to complete the installation.\n\
+                 \n\
+                 Please:\n\
+                 1. Restart your computer now\n\
+                 2. After restart, open ClawEnv again\n\
+                 \n\
+                 The installation will continue automatically after restart."
+            );
+        } else {
+            anyhow::bail!(
+                "WSL2 installation was cancelled or failed.\n\
+                 \n\
+                 To install manually:\n\
+                 1. Open PowerShell as Administrator\n\
+                 2. Run: wsl --install --no-distribution\n\
+                 3. Restart your computer\n\
+                 4. Open ClawEnv again\n\
+                 \n\
+                 See https://learn.microsoft.com/en-us/windows/wsl/install"
+            );
         }
     }
 

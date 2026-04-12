@@ -49,7 +49,7 @@ pub async fn open_url_in_browser(url: String) -> Result<(), String> {
     }
     #[cfg(target_os = "windows")]
     {
-        tokio::process::Command::new("cmd")
+        clawenv_core::platform::process::silent_cmd("cmd")
             .args(["/c", "start", &url])
             .status()
             .await

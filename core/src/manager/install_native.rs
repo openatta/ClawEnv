@@ -48,7 +48,7 @@ pub async fn install_native(
     // Configure npm registry mirror if needed
     let npm_registry = mirrors.npm_registry_url();
     if npm_registry != "https://registry.npmjs.org" {
-        let _ = tokio::process::Command::new("npm")
+        let _ = crate::platform::process::silent_cmd("npm")
             .args(["config", "set", "registry", npm_registry])
             .status().await;
     }
@@ -369,7 +369,7 @@ async fn install_from_bundle(
 // ---- Node.js detection ----
 
 async fn has_node() -> bool {
-    tokio::process::Command::new("node")
+    crate::platform::process::silent_cmd("node")
         .args(["--version"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -380,7 +380,7 @@ async fn has_node() -> bool {
 }
 
 async fn node_version() -> String {
-    tokio::process::Command::new("node")
+    crate::platform::process::silent_cmd("node")
         .args(["--version"])
         .output()
         .await
@@ -457,7 +457,7 @@ async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &s
     let msi_path = format!("{home}\\clawenv-node.msi");
 
     // Download via PowerShell
-    let status = Command::new("powershell")
+    let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &format!(
             "Invoke-WebRequest -Uri '{url}' -OutFile '{msi_path}'"
         )])
@@ -470,7 +470,7 @@ async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &s
     send(tx, "Installing Node.js (may require admin approval)...", 18, InstallStage::EnsurePrerequisites).await;
 
     // Silent install via msiexec (triggers UAC)
-    let status = Command::new("msiexec")
+    let status = crate::platform::process::silent_cmd("msiexec")
         .args(["/i", &msi_path, "/qn", "/norestart"])
         .status()
         .await?;

@@ -91,7 +91,7 @@ pub async fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        tokio::process::Command::new("cmd")
+        silent_cmd("cmd")
             .args(["/c", "start", url])
             .status()
             .await?;
