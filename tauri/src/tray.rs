@@ -65,22 +65,73 @@ pub fn send_notification(app: &AppHandle, title: &str, body: &str) {
 
 /// Set up system tray.
 ///
-/// Design: click tray icon → show main window. No context menu.
-/// Windows ARM64 has rendering issues with Tauri 2.x tray menus,
-/// so all management is done through the main window UI.
+/// Left-click: show main window.
+/// Right-click: show a small popup WebView window near the tray as a menu
+/// (workaround for Windows ARM64 where native tray menus render as 0-width).
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::with_id("clawenv-tray")
         .tooltip("ClawEnv")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            // Any click: show and focus the main window
-            if let TrayIconEvent::Click { .. } = event {
-                let app = tray.app_handle();
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.unminimize();
-                    let _ = win.set_focus();
+            match event {
+                TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left,
+                    position,
+                    ..
+                } => {
+                    let app = tray.app_handle();
+                    // If tray popup exists, close it
+                    if let Some(popup) = app.get_webview_window("tray-popup") {
+                        let _ = popup.close();
+                    }
+                    // Show main window
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
                 }
+                TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Right,
+                    position,
+                    ..
+                } => {
+                    let app = tray.app_handle();
+                    // Toggle tray popup window
+                    if let Some(popup) = app.get_webview_window("tray-popup") {
+                        let _ = popup.close();
+                        return;
+                    }
+
+                    // Create a small popup window near the tray icon
+                    let x = position.x as f64 - 100.0;
+                    let y = position.y as f64 - 200.0;
+
+                    let url = "/index.html?mode=tray-popup";
+                    if let Ok(popup) = tauri::webview::WebviewWindowBuilder::new(
+                        app,
+                        "tray-popup",
+                        tauri::WebviewUrl::App(url.into()),
+                    )
+                    .title("")
+                    .inner_size(200.0, 180.0)
+                    .position(x.max(0.0), y.max(0.0))
+                    .resizable(false)
+                    .decorations(false)
+                    .always_on_top(true)
+                    .skip_taskbar(true)
+                    .build()
+                    {
+                        // Close popup when it loses focus
+                        let popup_handle = popup.clone();
+                        popup.on_window_event(move |event| {
+                            if let tauri::WindowEvent::Focused(false) = event {
+                                let _ = popup_handle.close();
+                            }
+                        });
+                    }
+                }
+                _ => {}
             }
         })
         .build(app)?;

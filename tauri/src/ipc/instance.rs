@@ -263,3 +263,9 @@ pub async fn get_instance_health(name: String) -> Result<String, String> {
     tracing::info!("get_instance_health('{}') = {}", name, result);
     Ok(result.to_string())
 }
+
+/// Quit the entire application
+#[tauri::command]
+pub fn exit_app(app: tauri::AppHandle) {
+    app.exit(0);
+}

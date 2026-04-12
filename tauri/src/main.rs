@@ -215,6 +215,7 @@ fn main() {
             ipc::upgrade_instance,
             ipc::claw::list_claw_types,
             ipc::restart_computer,
+            ipc::exit_app,
         ])
         .on_window_event(|window, event| {
             // Close button hides the window instead of quitting — app stays in tray

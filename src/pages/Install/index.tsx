@@ -258,7 +258,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
   function goToStep(s: number) {
     setStep(s);
     if (s === 2 && !sysCheck()) runSystemCheck();
-    if (s === 3 && !systemProxy()) detectProxy();
+    if (s === 3) detectProxy(); // re-detect every time (proxy may be turned on/off)
     if (s === 6 && !installing()) startInstall();
   }
 
@@ -409,17 +409,21 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
 
               {/* System proxy info */}
               <div class="bg-gray-800 rounded p-3 mb-3 border border-gray-700 text-sm">
-                <Show when={systemProxy()}>
-                  {systemProxy()!.detected ? (
-                    <div>
-                      <span class="text-green-400">✓ System proxy detected</span>
-                      <span class="text-gray-400 ml-2">({systemProxy()!.source})</span>
-                      <div class="text-xs text-gray-400 mt-1 font-mono">{systemProxy()!.http_proxy}</div>
-                    </div>
-                  ) : (
-                    <span class="text-gray-500">No system proxy detected</span>
-                  )}
-                </Show>
+                <div class="flex items-center justify-between">
+                  <Show when={systemProxy()}>
+                    {systemProxy()!.detected ? (
+                      <div>
+                        <span class="text-green-400">✓ System proxy detected</span>
+                        <span class="text-gray-400 ml-2">({systemProxy()!.source})</span>
+                        <div class="text-xs text-gray-400 mt-1 font-mono">{systemProxy()!.http_proxy}</div>
+                      </div>
+                    ) : (
+                      <span class="text-gray-500">No system proxy detected</span>
+                    )}
+                  </Show>
+                  <button class="px-2 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded shrink-0"
+                    onClick={detectProxy}>Re-detect</button>
+                </div>
               </div>
 
               {/* Proxy mode */}
