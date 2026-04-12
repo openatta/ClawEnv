@@ -121,7 +121,7 @@ impl SandboxBackend for WslBackend {
                 // WSL2 not installed — attempt auto-install via UAC elevation
                 tracing::info!("WSL2 not found, attempting install with UAC elevation...");
                 let status = Command::new("powershell")
-                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-launch' -Verb RunAs -Wait"])
+                    .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-distribution' -Verb RunAs -Wait"])
                     .status()
                     .await;
 

@@ -249,16 +249,31 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                if let Some(win) = tray.app_handle().get_webview_window("main") {
-                    let _ = win.show();
-                    let _ = win.set_focus();
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    // Left click: show/focus main window
+                    if let Some(win) = tray.app_handle().get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
                 }
+                TrayIconEvent::Click {
+                    button: MouseButton::Right,
+                    button_state: MouseButtonState::Up,
+                    ..
+                } => {
+                    // Right click: rebuild and show context menu
+                    // Workaround for Windows where auto right-click menu may not work
+                    let app = tray.app_handle();
+                    if let Ok(menu) = build_tray_menu(app) {
+                        let _ = tray.set_menu(Some(menu));
+                    }
+                }
+                _ => {}
             }
         })
         .build(app)?;
