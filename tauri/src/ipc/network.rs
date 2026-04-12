@@ -203,7 +203,7 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
     // 3. Windows: read proxy from registry (Internet Settings)
     #[cfg(target_os = "windows")]
     {
-        if let Ok(output) = tokio::process::Command::new("reg")
+        if let Ok(output) = clawenv_core::platform::process::silent_cmd("reg")
             .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
             .output()
             .await
@@ -211,7 +211,7 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
             let stdout = String::from_utf8_lossy(&output.stdout);
             // ProxyEnable REG_DWORD 0x1 means proxy is on
             if stdout.contains("0x1") {
-                if let Ok(server_output) = tokio::process::Command::new("reg")
+                if let Ok(server_output) = clawenv_core::platform::process::silent_cmd("reg")
                     .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"])
                     .output()
                     .await

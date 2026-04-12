@@ -8,6 +8,18 @@
 
 use anyhow::Result;
 
+/// Create a tokio Command that won't pop a visible console window on Windows.
+/// On non-Windows platforms this is just `tokio::process::Command::new(program)`.
+pub fn silent_cmd(program: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new(program);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    cmd
+}
+
 /// Kill processes matching a name pattern (force kill).
 /// Works in both host context and sandbox context (via SandboxBackend::exec).
 ///
@@ -47,13 +59,10 @@ pub fn check_process_cmd(pattern: &str) -> String {
 pub async fn kill_by_name_host(pattern: &str) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        tokio::process::Command::new("powershell")
+        silent_cmd("powershell")
             .args(["-Command", &format!(
                 "Get-Process | Where-Object {{$_.CommandLine -like '*{pattern}*'}} | Stop-Process -Force"
             )])
-            .creation_flags(CREATE_NO_WINDOW)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status()
@@ -119,11 +128,8 @@ pub async fn system_memory_gb() -> f64 {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let out = tokio::process::Command::new("wmic")
+        let out = silent_cmd("wmic")
             .args(["ComputerSystem", "get", "TotalPhysicalMemory", "/value"])
-            .creation_flags(CREATE_NO_WINDOW)
             .output().await;
         out.ok().and_then(|o| {
             String::from_utf8_lossy(&o.stdout)
@@ -161,11 +167,8 @@ pub async fn disk_free_gb() -> f64 {
     }
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let out = tokio::process::Command::new("wmic")
+        let out = silent_cmd("wmic")
             .args(["LogicalDisk", "where", "DeviceID='C:'", "get", "FreeSpace", "/value"])
-            .creation_flags(CREATE_NO_WINDOW)
             .output().await;
         out.ok().and_then(|o| {
             String::from_utf8_lossy(&o.stdout)

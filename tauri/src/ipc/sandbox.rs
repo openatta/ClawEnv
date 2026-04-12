@@ -1,5 +1,6 @@
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
+use clawenv_core::platform::process::silent_cmd;
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -104,7 +105,7 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
     #[cfg(target_os = "windows")]
     {
         // WSL2 distros
-        let output = tokio::process::Command::new("wsl")
+        let output = silent_cmd("wsl")
             .args(["--list", "--verbose"])
             .output().await.map_err(|e| e.to_string())?;
         let stdout = String::from_utf8_lossy(&output.stdout);
@@ -117,7 +118,7 @@ pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
                 // Measure distro vhdx disk usage
                 let distro_dir = format!("{}\\.clawenv\\wsl\\{}", home.replace('/', "\\"), name);
                 let dir_size = if std::path::Path::new(&distro_dir).exists() {
-                    let du = tokio::process::Command::new("powershell")
+                    let du = silent_cmd("powershell")
                         .args(["-Command", &format!(
                             "(Get-ChildItem -Recurse '{}' -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB | ForEach-Object {{ '{{0:N1}} GB' -f $_ }}",
                             distro_dir
@@ -178,7 +179,7 @@ pub async fn get_sandbox_disk_usage() -> Result<String, String> {
         let path = std::path::Path::new(&wsl_dir);
         if path.exists() {
             // Use PowerShell to get directory size
-            let output = tokio::process::Command::new("powershell")
+            let output = silent_cmd("powershell")
                 .args(["-Command", &format!(
                     "(Get-ChildItem -Recurse '{}' -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB | ForEach-Object {{ '{{0:N1}} GB' -f $_ }}",
                     wsl_dir.replace('/', "\\")
@@ -233,18 +234,18 @@ pub async fn sandbox_vm_action(vm_name: String, action: String) -> Result<(), St
     {
         match action.as_str() {
             "start" => {
-                tokio::process::Command::new("wsl")
+                silent_cmd("wsl")
                     .args(["--distribution", &vm_name])
                     .stdout(std::process::Stdio::null())
                     .status().await.map_err(|e| e.to_string())?;
             }
             "stop" => {
-                tokio::process::Command::new("wsl")
+                silent_cmd("wsl")
                     .args(["--terminate", &vm_name])
                     .status().await.map_err(|e| e.to_string())?;
             }
             "delete" => {
-                tokio::process::Command::new("wsl")
+                silent_cmd("wsl")
                     .args(["--unregister", &vm_name])
                     .status().await.map_err(|e| e.to_string())?;
             }

@@ -1,6 +1,6 @@
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem, Submenu},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
+    tray::{TrayIconBuilder, TrayIconEvent},
     AppHandle, Manager,
 };
 
@@ -150,7 +150,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::with_id("clawenv-tray")
         .tooltip("ClawEnv")
         .menu(&menu)
-        .show_menu_on_left_click(false)
+        .show_menu_on_left_click(true)
         .on_menu_event(|app, event| {
             let id = event.id().as_ref();
             match id {
@@ -250,31 +250,12 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
             }
         })
         .on_tray_icon_event(|tray, event| {
-            match event {
-                TrayIconEvent::Click {
-                    button: MouseButton::Left,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    // Left click: show/focus main window
-                    if let Some(win) = tray.app_handle().get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                    }
+            // Double-click: show/focus main window
+            if let TrayIconEvent::DoubleClick { .. } = event {
+                if let Some(win) = tray.app_handle().get_webview_window("main") {
+                    let _ = win.show();
+                    let _ = win.set_focus();
                 }
-                TrayIconEvent::Click {
-                    button: MouseButton::Right,
-                    button_state: MouseButtonState::Up,
-                    ..
-                } => {
-                    // Right click: rebuild and show context menu
-                    // Workaround for Windows where auto right-click menu may not work
-                    let app = tray.app_handle();
-                    if let Ok(menu) = build_tray_menu(app) {
-                        let _ = tray.set_menu(Some(menu));
-                    }
-                }
-                _ => {}
             }
         })
         .build(app)?;

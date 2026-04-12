@@ -31,14 +31,10 @@ impl WslBackend {
     }
 
     async fn wsl_cmd(&self, args: &[&str]) -> Result<String> {
-        let mut cmd = Command::new("wsl");
-        cmd.args(args);
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        }
-        let out = cmd.output().await?;
+        let out = crate::platform::process::silent_cmd("wsl")
+            .args(args)
+            .output()
+            .await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!("wsl {} failed: {}", args.join(" "), stderr);
@@ -149,14 +145,27 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        #[cfg(target_os = "windows")]
-        use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new("wsl");
-        cmd.args(["--status"]);
-        #[cfg(target_os = "windows")]
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
-        let result = cmd.output().await;
-        Ok(result.map(|o| o.status.success()).unwrap_or(false))
+        use crate::platform::process::silent_cmd;
+
+        // First check: wsl.exe exists and responds
+        let result = silent_cmd("wsl").args(["--status"]).output().await;
+        if result.is_err() || !result.as_ref().unwrap().status.success() {
+            return Ok(false);
+        }
+
+        // Second check: verify the WSL subsystem feature is actually enabled
+        // (wsl --status can return 0 even when the feature is disabled on some builds)
+        let feature_check = silent_cmd("powershell")
+            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State"])
+            .output()
+            .await;
+        match feature_check {
+            Ok(out) => {
+                let state = String::from_utf8_lossy(&out.stdout);
+                Ok(state.trim().contains("Enabled"))
+            }
+            Err(_) => Ok(false),
+        }
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
