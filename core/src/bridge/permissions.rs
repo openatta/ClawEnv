@@ -177,9 +177,10 @@ impl BridgePermissions {
     /// - `**` matches zero or more path components
     /// - exact prefix matching for non-glob patterns
     fn matches_any(path: &Path, patterns: &[String]) -> bool {
-        let path_str = path.to_string_lossy();
+        // Normalize to forward slashes for cross-platform matching
+        let path_str = path.to_string_lossy().replace('\\', "/");
         for pattern in patterns {
-            let expanded = Self::expand_pattern(pattern);
+            let expanded = Self::expand_pattern(pattern).replace('\\', "/");
             if Self::glob_match(&path_str, &expanded) {
                 return true;
             }
