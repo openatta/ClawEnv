@@ -128,44 +128,18 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
 }
 
 /// Get a status icon for an instance (called from sync tray menu build).
+/// Uses a quick TCP connect to the gateway port to check if it's running.
 fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'static str {
-    use clawenv_core::sandbox::SandboxType;
-    match inst.sandbox_type {
-        SandboxType::Native => {
-            // Check if gateway process is running on the port
-            let check = std::process::Command::new("sh")
-                .args(["-c", &format!(
-                    "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
-                    inst.gateway.gateway_port
-                )])
-                .output();
-            match check {
-                Ok(out) => {
-                    let code = String::from_utf8_lossy(&out.stdout);
-                    let code = code.trim().trim_matches('\'');
-                    if code != "000" && !code.is_empty() { "🟢" } else { "🔴" }
-                }
-                Err(_) => "🔴",
-            }
-        }
-        _ => {
-            // VM-based: use HTTP check on the gateway port (same as Native)
-            // This is more reliable than parsing limactl JSON and also works for WSL2/Podman
-            let check = std::process::Command::new("sh")
-                .args(["-c", &format!(
-                    "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 1 http://127.0.0.1:{}/",
-                    inst.gateway.gateway_port
-                )])
-                .output();
-            match check {
-                Ok(out) => {
-                    let code = String::from_utf8_lossy(&out.stdout);
-                    let code = code.trim().trim_matches('\'');
-                    if code != "000" && !code.is_empty() { "🟢" } else { "🔴" }
-                }
-                Err(_) => "🔴",
-            }
-        }
+    use std::net::TcpStream;
+    use std::time::Duration;
+
+    let addr = format!("127.0.0.1:{}", inst.gateway.gateway_port);
+    match TcpStream::connect_timeout(
+        &addr.parse().unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap()),
+        Duration::from_secs(1),
+    ) {
+        Ok(_) => "🟢",
+        Err(_) => "🔴",
     }
 }
 
