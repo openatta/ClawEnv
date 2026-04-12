@@ -31,15 +31,66 @@ impl WslBackend {
     }
 
     async fn wsl_cmd(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("wsl")
-            .args(args)
-            .output()
-            .await?;
+        let mut cmd = Command::new("wsl");
+        cmd.args(args);
+        #[cfg(target_os = "windows")]
+        {
+            use std::os::windows::process::CommandExt;
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        }
+        let out = cmd.output().await?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             anyhow::bail!("wsl {} failed: {}", args.join(" "), stderr);
         }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    /// Detect system architecture for Alpine downloads
+    fn alpine_arch() -> &'static str {
+        match std::env::consts::ARCH {
+            "aarch64" => "aarch64",
+            _ => "x86_64",
+        }
+    }
+
+    /// Query the latest Alpine version from the CDN.
+    /// Parses the directory listing of /alpine/latest-stable/releases/{arch}/
+    async fn resolve_latest_alpine_version() -> Result<String> {
+        let arch = Self::alpine_arch();
+        let url = format!(
+            "https://dl-cdn.alpinelinux.org/alpine/latest-stable/releases/{arch}/"
+        );
+        tracing::info!("Querying latest Alpine version from {url}...");
+
+        let resp = reqwest::get(&url).await?;
+        if !resp.status().is_success() {
+            anyhow::bail!("Failed to query Alpine releases: HTTP {}", resp.status());
+        }
+        let body = resp.text().await?;
+
+        // Parse directory listing for "alpine-minirootfs-X.Y.Z-{arch}.tar.gz"
+        let prefix = format!("alpine-minirootfs-");
+        let suffix = format!("-{arch}.tar.gz");
+        let mut versions: Vec<String> = Vec::new();
+        for segment in body.split('"') {
+            if segment.starts_with(&prefix) && segment.ends_with(&suffix) {
+                let ver = &segment[prefix.len()..segment.len() - suffix.len()];
+                if ver.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(false) {
+                    versions.push(ver.to_string());
+                }
+            }
+        }
+
+        versions.sort_by(|a, b| {
+            let parse = |s: &str| -> Vec<u32> {
+                s.split('.').filter_map(|p| p.parse().ok()).collect()
+            };
+            parse(b).cmp(&parse(a))
+        });
+
+        versions.into_iter().next()
+            .ok_or_else(|| anyhow::anyhow!("Could not find Alpine minirootfs for {arch} at {url}"))
     }
 
     async fn download_alpine_rootfs(alpine_version: &str) -> Result<PathBuf> {
@@ -48,7 +99,16 @@ impl WslBackend {
         let cache_dir = Self::cache_dir()?;
         tokio::fs::create_dir_all(&cache_dir).await?;
 
-        let filename = format!("alpine-minirootfs-{}-x86_64.tar.gz", alpine_version);
+        // Step 1: resolve actual version if "latest-stable"
+        let version = if alpine_version == "latest-stable" || alpine_version.contains("latest") {
+            Self::resolve_latest_alpine_version().await?
+        } else {
+            alpine_version.to_string()
+        };
+
+        // Step 2: detect architecture
+        let arch = Self::alpine_arch();
+        let filename = format!("alpine-minirootfs-{version}-{arch}.tar.gz");
         let dest = cache_dir.join(&filename);
 
         if dest.exists() {
@@ -56,22 +116,28 @@ impl WslBackend {
             return Ok(dest);
         }
 
+        // Extract major.minor for the URL path (e.g., "3.23.2" → "3.23")
+        let parts: Vec<&str> = version.split('.').collect();
+        let major_minor = if parts.len() >= 2 {
+            format!("{}.{}", parts[0], parts[1])
+        } else {
+            version.clone()
+        };
+
         let url = format!(
-            "https://dl-cdn.alpinelinux.org/alpine/v{}/releases/x86_64/{}",
-            &alpine_version[..alpine_version.rfind('.').unwrap_or(alpine_version.len())],
-            filename
+            "https://dl-cdn.alpinelinux.org/alpine/v{major_minor}/releases/{arch}/{filename}"
         );
 
         tracing::info!("Downloading Alpine rootfs from {url}...");
         let resp = reqwest::get(&url).await?;
         if !resp.status().is_success() {
-            anyhow::bail!("Download failed: HTTP {}", resp.status());
+            anyhow::bail!("Download failed: HTTP {} for {url}", resp.status());
         }
         let bytes = resp.bytes().await?;
 
         let mut file = std::fs::File::create(&dest)?;
         file.write_all(&bytes)?;
-        tracing::info!("Alpine rootfs downloaded to {}", dest.display());
+        tracing::info!("Alpine rootfs {} downloaded to {}", filename, dest.display());
         Ok(dest)
     }
 }
@@ -83,10 +149,13 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        let result = Command::new("wsl")
-            .args(["--status"])
-            .output()
-            .await;
+        #[cfg(target_os = "windows")]
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new("wsl");
+        cmd.args(["--status"]);
+        #[cfg(target_os = "windows")]
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        let result = cmd.output().await;
         Ok(result.map(|o| o.status.success()).unwrap_or(false))
     }
 

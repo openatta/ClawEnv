@@ -82,7 +82,8 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
             // Quick health check via backend (sync-safe: spawn + block briefly)
             let status_icon = get_instance_status_icon(inst);
 
-            let label = format!("{status_icon} {} — {}", inst.name, inst.claw_type);
+            let status_text = if status_icon == "ON" { "[ON]" } else { "[OFF]" };
+            let label = format!("{} {} - {}", status_text, inst.name, inst.claw_type);
             let submenu = Submenu::with_id(
                 app,
                 &format!("submenu-{}", inst.name),
@@ -90,15 +91,15 @@ fn build_tray_menu(app: &AppHandle) -> Result<Menu<tauri::Wry>, Box<dyn std::err
                 true,
             )?;
 
-            let is_running = status_icon == "🟢";
+            let is_running = status_icon == "ON";
 
             if is_running {
-                let stop_item = MenuItem::with_id(app, &format!("stop-{}", inst.name), "⏹ Stop", true, None::<&str>)?;
-                let restart_item = MenuItem::with_id(app, &format!("restart-{}", inst.name), "↻ Restart", true, None::<&str>)?;
+                let stop_item = MenuItem::with_id(app, &format!("stop-{}", inst.name), "Stop", true, None::<&str>)?;
+                let restart_item = MenuItem::with_id(app, &format!("restart-{}", inst.name), "Restart", true, None::<&str>)?;
                 submenu.append(&stop_item)?;
                 submenu.append(&restart_item)?;
             } else {
-                let start_item = MenuItem::with_id(app, &format!("start-{}", inst.name), "▶ Start", true, None::<&str>)?;
+                let start_item = MenuItem::with_id(app, &format!("start-{}", inst.name), "Start", true, None::<&str>)?;
                 submenu.append(&start_item)?;
             }
 
@@ -138,8 +139,8 @@ fn get_instance_status_icon(inst: &clawenv_core::config::InstanceConfig) -> &'st
         &addr.parse().unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap()),
         Duration::from_secs(1),
     ) {
-        Ok(_) => "🟢",
-        Err(_) => "🔴",
+        Ok(_) => "ON",
+        Err(_) => "OFF",
     }
 }
 
