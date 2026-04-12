@@ -640,19 +640,30 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                 Install
               </button>
             </Show>
-            {/* Step 6: Retry on error */}
+            {/* Step 6: Error — restart needed or retry */}
             <Show when={step() === 6 && installError()}>
-              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-                onClick={startInstall}>
-                Retry
-              </button>
+              <Show when={installError().toLowerCase().includes("restart")}>
+                <button class="px-4 py-1.5 text-sm bg-orange-600 hover:bg-orange-500 rounded"
+                  onClick={async () => {
+                    try { await invoke("restart_computer"); }
+                    catch (e) { alert("Restart failed: " + e); }
+                  }}>
+                  Restart Now
+                </button>
+              </Show>
+              <Show when={!installError().toLowerCase().includes("restart")}>
+                <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                  onClick={startInstall}>
+                  Retry
+                </button>
+              </Show>
             </Show>
             {/* Other steps */}
             <Show when={step() < 5 && step() < totalSteps}>
               <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed"
-                disabled={step() === 1 && !!nameError()}
+                disabled={(step() === 1 && !!nameError()) || (step() === 2 && (checking() || !sysCheck()))}
                 onClick={() => goToStep(step() + 1)}>
-                Next
+                {step() === 2 && checking() ? "Checking..." : "Next"}
               </button>
             </Show>
             <Show when={step() === 7}>

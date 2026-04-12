@@ -222,3 +222,21 @@ pub async fn test_api_key(api_key: String) -> Result<String, String> {
     // In real implementation, this would call the OpenClaw API to verify
     Ok("API key format valid".into())
 }
+
+/// Restart the computer (for WSL2 installation completion)
+#[tauri::command]
+pub async fn restart_computer() -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        clawenv_core::platform::process::silent_cmd("shutdown")
+            .args(["/r", "/t", "5", "/c", "ClawEnv: Restarting to complete WSL2 installation"])
+            .status()
+            .await
+            .map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        return Err("Restart is only needed on Windows for WSL2 installation".into());
+    }
+    Ok(())
+}
