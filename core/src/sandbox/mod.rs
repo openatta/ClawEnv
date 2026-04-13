@@ -176,13 +176,18 @@ impl SandboxType {
     }
 }
 
-/// 工厂函数：根据当前平台自动选择后端
+/// 工厂函数：根据当前平台自动选择后端（默认实例名 "default"）
 pub fn detect_backend() -> Result<Box<dyn SandboxBackend>> {
+    detect_backend_for("default")
+}
+
+/// 工厂函数：根据当前平台自动选择后端，使用指定实例名
+pub fn detect_backend_for(instance_name: &str) -> Result<Box<dyn SandboxBackend>> {
     let platform = detect_platform()?;
     match platform.os {
-        OsType::Windows => Ok(Box::new(WslBackend::new("default"))),
-        OsType::Macos => Ok(Box::new(LimaBackend::new("default"))),
-        OsType::Linux => Ok(Box::new(PodmanBackend::with_defaults("default"))),
+        OsType::Windows => Ok(Box::new(WslBackend::new(instance_name))),
+        OsType::Macos => Ok(Box::new(LimaBackend::new(instance_name))),
+        OsType::Linux => Ok(Box::new(PodmanBackend::with_defaults(instance_name))),
     }
 }
 

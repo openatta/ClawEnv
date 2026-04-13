@@ -119,6 +119,19 @@ enum Commands {
     /// Configuration management
     #[command(subcommand)]
     Config(ConfigCmd),
+    /// Bridge server management
+    #[command(subcommand)]
+    Bridge(BridgeCmd),
+}
+
+#[derive(Subcommand)]
+enum BridgeCmd {
+    /// Test bridge server connectivity
+    Test {
+        /// Bridge port (default: from config or 3100)
+        #[arg(long)]
+        port: Option<u16>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -439,7 +452,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 anyhow::bail!("File not found: {}", path.display());
             }
             out.emit(CliEvent::Info { message: format!("Importing '{name}' from {file}...") });
-            let backend = clawenv_core::sandbox::detect_backend()?;
+            let backend = clawenv_core::sandbox::detect_backend_for(&name)?;
             backend.import_image(&path).await?;
             out.emit(CliEvent::Complete { message: format!("Imported. Run 'clawenv start {name}' to start.") });
         }
@@ -827,6 +840,37 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 }
             }
         }
+
+        // ====== Bridge ======
+        Commands::Bridge(subcmd) => {
+            match subcmd {
+                BridgeCmd::Test { port } => {
+                    let bridge_port = port.unwrap_or_else(|| {
+                        ConfigManager::load()
+                            .map(|c| c.config().clawenv.bridge.port)
+                            .unwrap_or(3100)
+                    });
+                    out.emit(CliEvent::Info { message: format!("Testing bridge on port {bridge_port}...") });
+                    let url = format!("http://127.0.0.1:{bridge_port}/api/health");
+                    let client = reqwest::Client::builder()
+                        .timeout(std::time::Duration::from_secs(5))
+                        .build()?;
+                    match client.get(&url).send().await {
+                        Ok(resp) if resp.status().is_success() => {
+                            let body = resp.text().await.unwrap_or_default();
+                            out.emit(CliEvent::Data { data: serde_json::from_str(&body).unwrap_or(serde_json::Value::String(body)) });
+                            out.emit(CliEvent::Complete { message: format!("Bridge is running on port {bridge_port}") });
+                        }
+                        Ok(resp) => {
+                            anyhow::bail!("Bridge responded with HTTP {}", resp.status());
+                        }
+                        Err(e) => {
+                            anyhow::bail!("Bridge not reachable on port {bridge_port}: {e}");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     Ok(())
@@ -852,7 +896,7 @@ async fn run_install_step(
     install_browser: bool,
 ) -> Result<()> {
     use clawenv_core::config::{ConfigManager, UserMode, InstanceConfig, GatewayConfig, ResourceConfig};
-    use clawenv_core::sandbox::{detect_backend, SandboxBackend, SandboxOpts, SandboxType, InstallMode};
+    use clawenv_core::sandbox::{detect_backend_for, SandboxBackend, SandboxOpts, SandboxType, InstallMode};
     use clawenv_core::claw::ClawRegistry;
 
     let registry = ClawRegistry::load();
@@ -876,7 +920,7 @@ async fn run_install_step(
                 }
             } else {
                 out.emit(CliEvent::Info { message: "Checking sandbox backend...".into() });
-                let backend = detect_backend()?;
+                let backend = detect_backend_for(name)?;
                 let available = backend.is_available().await.unwrap_or(false);
                 if available {
                     out.emit(CliEvent::Complete { message: format!("{} ready", backend.name()) });
@@ -907,7 +951,7 @@ async fn run_install_step(
                 clawenv_core::manager::install_native::ensure_node_in_path();
                 out.emit(CliEvent::Complete { message: format!("Native environment ready at {}", install_dir.display()) });
             } else {
-                let backend = detect_backend()?;
+                let backend = detect_backend_for(name)?;
                 // Check if VM already exists
                 let vm_ready = backend.exec("node --version 2>/dev/null").await
                     .map(|o| o.trim().starts_with('v')).unwrap_or(false);
@@ -976,7 +1020,7 @@ async fn run_install_step(
                     out.emit(CliEvent::Complete { message: format!("{} {} installed", desc.display_name, ver.trim()) });
                 }
             } else {
-                let backend = detect_backend()?;
+                let backend = detect_backend_for(name)?;
                 let already = backend.exec(&format!("which {} 2>/dev/null", desc.cli_binary)).await
                     .map(|o| !o.trim().is_empty()).unwrap_or(false);
                 if already {
@@ -1029,7 +1073,7 @@ async fn run_install_step(
                         let b = clawenv_core::sandbox::native_backend(name);
                         b.exec(&format!("{cmd} 2>/dev/null || true")).await?;
                     } else {
-                        let b = detect_backend()?;
+                        let b = detect_backend_for(name)?;
                         b.exec(&format!("{cmd} 2>/dev/null || true")).await?;
                     }
                 }
@@ -1040,7 +1084,7 @@ async fn run_install_step(
                 let b = clawenv_core::sandbox::native_backend(name);
                 b.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default()
             } else {
-                let b = detect_backend()?;
+                let b = detect_backend_for(name)?;
                 b.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default()
             };
 
@@ -1089,7 +1133,7 @@ async fn run_install_step(
                     desc.cli_binary, desc.gateway_cmd.replace("{port}", &port.to_string())
                 )).await?;
             } else {
-                let backend = detect_backend()?;
+                let backend = detect_backend_for(name)?;
                 // Start ttyd too
                 let ttyd_port = port + 4681;
                 backend.exec(&format!(
