@@ -71,34 +71,30 @@ elif [[ "$(uname)" == "Darwin" ]] || $USE_LIMA; then
         exit 1
     fi
 
-    # Sync project into VM and build CLI
-    echo "  Building CLI inside Lima VM..."
-    LIMA_PROJECT="/home/$(whoami).linux/Workspace/AttaSpace/ClawEnv"
-    limactl shell "$LIMA_VM" -- sh -c "
-        cd '$LIMA_PROJECT' 2>/dev/null || cd '$ROOT'
-        if command -v cargo >/dev/null 2>&1; then
-            cargo build -p clawenv-cli 2>&1 | tail -1
-        else
-            echo 'Installing Rust...'
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y 2>&1 | tail -3
-            . ~/.cargo/env
-            cargo build -p clawenv-cli 2>&1 | tail -1
-        fi
-    " 2>&1 | tail -5
+    # Cross-compile CLI for Linux aarch64 on macOS, then copy to VM
+    echo "  Cross-compiling CLI for Linux..."
+    export PATH="$HOME/.cargo/bin:$PATH"
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER=aarch64-linux-musl-gcc \
+        cargo build -p clawenv-cli --target aarch64-unknown-linux-musl --release 2>&1 | tail -2
+
+    LINUX_CLI="$ROOT/target/aarch64-unknown-linux-musl/release/clawenv-cli"
+    if [[ ! -f "$LINUX_CLI" ]]; then
+        echo "ERROR: Cross-compilation failed. Install: brew install filosottile/musl-cross/musl-cross"
+        echo "       And: rustup target add aarch64-unknown-linux-musl"
+        exit 1
+    fi
+
+    # Copy binary into VM
+    limactl shell "$LIMA_VM" -- sh -c "cp '$LINUX_CLI' /tmp/clawenv-cli && chmod +x /tmp/clawenv-cli" 2>&1
 
     # Override run() to execute inside Lima VM
     run() {
         TOTAL=$((TOTAL+1))
         RC=0
-        OUT=$(limactl shell "$LIMA_VM" -- sh -c "
-            cd '$LIMA_PROJECT' 2>/dev/null || cd '$ROOT'
-            . ~/.cargo/env 2>/dev/null
-            ./target/debug/clawenv-cli --json $*
-        " 2>&1) || RC=$?
+        OUT=$(limactl shell "$LIMA_VM" -- /tmp/clawenv-cli --json "$@" 2>&1) || RC=$?
     }
 
-    # Find CLI (for reference only, actual runs go through Lima)
-    CLI="$ROOT/target/debug/clawenv-cli"
+    CLI="/tmp/clawenv-cli"
 else
     echo "  Not on Linux and no Lima available. Skipping."
     echo "  RESULTS: 0 passed, 0 failed, ALL SKIPPED"
@@ -158,11 +154,12 @@ section "C. Verification"
 run status "$INSTANCE"
 if has_type data; then pass "status"; else fail "status" "$OUT"; fi
 
+# exec uses the overridden run() which goes through Lima automatically
 TOTAL=$((TOTAL+1)); RC=0
 if [[ "$(uname)" == "Linux" ]]; then
     OUT=$("$CLI" --json exec "echo podman-ok" "$INSTANCE" 2>&1) || RC=$?
 else
-    OUT=$(limactl shell "$LIMA_VM" -- sh -c "cd '$ROOT'; . ~/.cargo/env 2>/dev/null; ./target/debug/clawenv-cli --json exec 'echo podman-ok' $INSTANCE" 2>&1) || RC=$?
+    OUT=$(limactl shell "$LIMA_VM" -- /tmp/clawenv-cli --json exec "echo podman-ok" "$INSTANCE" 2>&1) || RC=$?
 fi
 if echo "$OUT" | grep -q "podman-ok"; then pass "exec"; else fail "exec" "$OUT"; fi
 
