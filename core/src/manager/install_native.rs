@@ -368,7 +368,48 @@ async fn install_from_bundle(
 
 // ---- Node.js detection ----
 
+/// Get the ClawEnv-private Node.js directory (~/.clawenv/node/).
+fn clawenv_node_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".clawenv/node")
+}
+
+/// Get the node binary path inside ClawEnv's private Node.js.
+fn clawenv_node_bin() -> std::path::PathBuf {
+    let dir = clawenv_node_dir();
+    #[cfg(target_os = "windows")]
+    { dir.join("node.exe") }
+    #[cfg(not(target_os = "windows"))]
+    { dir.join("bin/node") }
+}
+
+/// Ensure ClawEnv's private Node.js is in this process's PATH.
+fn ensure_node_in_path() {
+    let dir = clawenv_node_dir();
+    #[cfg(target_os = "windows")]
+    let bin_dir = dir.clone();
+    #[cfg(not(target_os = "windows"))]
+    let bin_dir = dir.join("bin");
+
+    let current = std::env::var("PATH").unwrap_or_default();
+    let bin_str = bin_dir.to_string_lossy();
+    if !current.contains(bin_str.as_ref()) {
+        #[cfg(target_os = "windows")]
+        let sep = ";";
+        #[cfg(not(target_os = "windows"))]
+        let sep = ":";
+        std::env::set_var("PATH", format!("{}{sep}{current}", bin_dir.display()));
+    }
+}
+
 async fn has_node() -> bool {
+    // Check ClawEnv's private Node.js first
+    if clawenv_node_bin().exists() {
+        ensure_node_in_path();
+        return true;
+    }
+    // Fallback: check system PATH
     crate::platform::process::silent_cmd("node")
         .args(["--version"])
         .stdout(std::process::Stdio::null())
@@ -380,6 +421,7 @@ async fn has_node() -> bool {
 }
 
 async fn node_version() -> String {
+    ensure_node_in_path();
     crate::platform::process::silent_cmd("node")
         .args(["--version"])
         .output()
@@ -440,8 +482,6 @@ async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &s
 
 #[cfg(target_os = "windows")]
 async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
-    use tokio::process::Command;
-
     send(tx, "Downloading Node.js for Windows...", 14, InstallStage::EnsurePrerequisites).await;
 
     let arch = match std::env::consts::ARCH {
@@ -450,37 +490,52 @@ async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &s
     };
     let version = "v22.16.0";
     let url = format!(
-        "{nodejs_dist_base}/{version}/node-{version}-{arch}.msi"
+        "{nodejs_dist_base}/{version}/node-{version}-win-{arch}.zip"
     );
 
-    let home = std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\Users\\Public".into());
-    let msi_path = format!("{home}\\clawenv-node.msi");
+    // Install to ~/.clawenv/node/ (no admin needed, self-contained)
+    let node_dir = clawenv_node_dir();
+    tokio::fs::create_dir_all(&node_dir).await?;
 
-    // Download via PowerShell
+    let zip_path = node_dir.parent().unwrap_or(&node_dir).join("node.zip");
+
+    // Download using curl (built into Windows 11)
+    let status = crate::platform::process::silent_cmd("curl.exe")
+        .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("Failed to download Node.js from {url}");
+    }
+
+    send(tx, "Extracting Node.js...", 18, InstallStage::EnsurePrerequisites).await;
+
+    // Extract zip using PowerShell (no admin needed)
+    let extract_cmd = format!(
+        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; \
+         $d = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
+         if ($d) {{ Get-ChildItem $d.FullName | Move-Item -Destination '{}' -Force }}",
+        zip_path.to_string_lossy(),
+        node_dir.to_string_lossy(),
+        node_dir.to_string_lossy(),
+        node_dir.to_string_lossy(),
+    );
     let status = crate::platform::process::silent_cmd("powershell")
-        .args(["-Command", &format!(
-            "Invoke-WebRequest -Uri '{url}' -OutFile '{msi_path}'"
-        )])
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("Failed to download Node.js");
-    }
-
-    send(tx, "Installing Node.js (may require admin approval)...", 18, InstallStage::EnsurePrerequisites).await;
-
-    // Silent install via msiexec (triggers UAC)
-    let status = crate::platform::process::silent_cmd("msiexec")
-        .args(["/i", &msi_path, "/qn", "/norestart"])
+        .args(["-WindowStyle", "Hidden", "-Command", &extract_cmd])
         .status()
         .await?;
 
-    // Cleanup
-    tokio::fs::remove_file(&msi_path).await.ok();
+    // Cleanup zip
+    tokio::fs::remove_file(&zip_path).await.ok();
 
     if !status.success() {
-        anyhow::bail!("Node.js installation failed. Please install from https://nodejs.org");
+        anyhow::bail!("Failed to extract Node.js");
     }
+
+    send(tx, "Node.js installed to ~/.clawenv/node", 22, InstallStage::EnsurePrerequisites).await;
+
+    // Add to PATH for this process
+    ensure_node_in_path();
 
     Ok(())
 }
