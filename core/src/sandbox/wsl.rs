@@ -178,11 +178,63 @@ impl SandboxBackend for WslBackend {
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
+        use crate::platform::process::silent_cmd;
+
+        // First check: is hardware virtualization available?
+        // WSL2 requires Hyper-V which needs hardware virtualization support.
+        // Fails inside VMs without nested virtualization (e.g., UTM on Apple Silicon).
+        let hyperv_check = silent_cmd("dism")
+            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Hyper-V", "/English"])
+            .output().await;
+        let hyperv_available = hyperv_check.as_ref()
+            .map(|o| {
+                let s = String::from_utf8_lossy(&o.stdout);
+                // If the feature exists (even if Disabled), hardware can support it
+                s.contains("State :") && !s.contains("not recognized")
+            })
+            .unwrap_or(false);
+
+        // Also check if we're in a VM that doesn't support nested virtualization
+        let vm_check = silent_cmd("powershell")
+            .args(["-WindowStyle", "Hidden", "-Command",
+                "(Get-WmiObject Win32_ComputerSystem).Model"])
+            .output().await;
+        let is_virtual = vm_check.as_ref()
+            .map(|o| {
+                let model = String::from_utf8_lossy(&o.stdout).to_lowercase();
+                model.contains("virtual") || model.contains("vmware") || model.contains("qemu")
+                    || model.contains("utm") || model.contains("parallels")
+            })
+            .unwrap_or(false);
+
+        if is_virtual {
+            // Check if nested virtualization actually works
+            let nested_check = silent_cmd("powershell")
+                .args(["-WindowStyle", "Hidden", "-Command",
+                    "(Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled"])
+                .output().await;
+            let nested_ok = nested_check.as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().contains("True"))
+                .unwrap_or(false);
+
+            if !nested_ok {
+                anyhow::bail!(
+                    "WSL2 requires hardware virtualization, which is not available in this virtual machine.\n\
+                     \n\
+                     This computer appears to be a virtual machine without nested virtualization support.\n\
+                     WSL2 cannot run inside VMs that don't support nested virtualization.\n\
+                     \n\
+                     Options:\n\
+                     - Use a physical Windows PC for sandbox installation\n\
+                     - Use 'Native' install mode instead (no sandbox, runs directly on host)\n\
+                     - Use a cloud VM with nested virtualization (e.g., Azure Dv5 series)"
+                );
+            }
+        }
+
         if self.is_available().await? {
             return Ok(());
         }
-
-        use crate::platform::process::silent_cmd;
 
         // Check what's missing using dism (no window flash, works reliably)
         let wsl_check = silent_cmd("dism")
