@@ -91,14 +91,17 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if instance.sandbox_type == SandboxType::Native {
-            // Windows native: launch gateway as a PowerShell background job.
-            // npm installs openclaw as a .ps1 wrapper, so we must invoke through
-            // PowerShell rather than Start-Process -FilePath.
+            // Windows native: launch gateway as a detached process.
+            // npm installs openclaw as .ps1/.cmd wrapper, so we must invoke
+            // via cmd.exe or powershell to resolve the wrapper correctly.
+            // Start-Process -NoNewWindow launches a persistent detached process.
             let log_path = dirs::home_dir().unwrap_or_default()
                 .join(format!(".clawenv/native/{}/gateway.log", instance.name));
+            let args = desc.gateway_cmd.replace("{port}", &port.to_string());
             backend.exec(&format!(
-                "Start-Job -ScriptBlock {{ {gateway_cmd} *> '{}' }}",
-                log_path.display(),
+                "Start-Process -NoNewWindow -FilePath 'cmd.exe' \
+                 -ArgumentList '/c {} {} > \"{}\" 2>&1' ",
+                desc.cli_binary, args, log_path.display(),
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux
