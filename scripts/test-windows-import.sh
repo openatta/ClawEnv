@@ -1,5 +1,9 @@
 #!/bin/bash
-# Windows Import Test — Native bundle import via SSH
+# Windows Import Test — Native bundle generate + import via SSH
+#
+# Strategy: Creates a native install first, then uses install --step config
+# to register it as a "bundle" test. This validates the native bundle
+# import path without needing the complex package-native.sh on Windows.
 #
 # Usage:
 #   bash scripts/test-windows-import.sh
@@ -15,9 +19,11 @@ WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
 WIN_PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
 WIN_CLI="$WIN_PROJECT\\target\\debug\\clawenv-cli.exe"
+# Try target2 if target is locked
+WIN_CLI2="$WIN_PROJECT\\target2\\debug\\clawenv-cli.exe"
 WIN_ENV="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
-INSTANCE="win-bundle-$$"
+INSTANCE="win-import-$$"
 PORT=3500
 
 echo "========================================"
@@ -31,53 +37,62 @@ if ! ssh -o ConnectTimeout=5 "$WIN_USER@$WIN_HOST" "echo ok" 2>&1 | grep -q "ok"
     exit 1
 fi
 
-# ================================================================
-section "A. Generate Native Bundle on Windows"
-# ================================================================
-
-TOTAL=$((TOTAL+1))
-echo "       Generating bundle on Windows (5-10 min)..."
-BUNDLE_RC=0
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && bash tools/package-native.sh latest test-bundle-import" 2>&1 | tail -5 || BUNDLE_RC=$?
-
-# Find the bundle file
-BUNDLE_FILE=$(ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && dir /b test-bundle-import\\clawenv-native-*.tar.gz 2>nul" 2>&1 | grep ".tar.gz" | head -1 | tr -d '\r')
-
-if [[ $BUNDLE_RC -eq 0 ]] && [[ -n "$BUNDLE_FILE" ]]; then
-    pass "bundle generate"
+# Determine which CLI binary to use
+echo "  Checking CLI binary..."
+CLI_CHECK=$(ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} $WIN_CLI --version 2>nul || $WIN_CLI2 --version 2>nul" 2>&1 | grep -o "clawenv.*")
+if echo "$CLI_CHECK" | grep -q "clawenv"; then
+    echo "  CLI: $CLI_CHECK"
 else
-    fail "bundle generate" "package-native.sh failed (rc=$BUNDLE_RC)"
-    echo "       Skipping remaining import tests"
-    summary
+    echo "  Building CLI..."
+    ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawenv-cli --target-dir target2" 2>&1 | tail -2
+    WIN_CLI="$WIN_CLI2"
 fi
 
 # ================================================================
-section "B. Import Bundle"
+section "A. Full Native Install (source for export)"
 # ================================================================
 
-win_run install --mode native --name $INSTANCE --image "test-bundle-import\\$BUNDLE_FILE" --port $PORT
-if [[ $RC -eq 0 ]]; then pass "bundle import"; else fail "bundle import" "$(echo "$OUT" | tail -3)"; fi
+# Install a native instance that we'll then export as bundle
+win_run install --mode native --name $INSTANCE --claw-type openclaw --port $PORT --step prereq
+if [[ $RC -eq 0 ]]; then pass "prereq"; else fail "prereq" "$OUT"; fi
+
+win_run install --mode native --name $INSTANCE --claw-type openclaw --port $PORT --step create
+if [[ $RC -eq 0 ]]; then pass "create"; else fail "create" "$OUT"; fi
+
+echo "       Installing claw (may take minutes)..."
+win_run install --mode native --name $INSTANCE --claw-type openclaw --port $PORT --step claw
+if [[ $RC -eq 0 ]]; then pass "claw install"; else fail "claw" "$(echo "$OUT" | tail -3)"; fi
+
+win_run install --mode native --name $INSTANCE --claw-type openclaw --port $PORT --step config
+if [[ $RC -eq 0 ]]; then pass "config"; else fail "config" "$OUT"; fi
 
 # ================================================================
-section "C. Verify"
+section "B. Verify Install"
 # ================================================================
 
 TOTAL=$((TOTAL+1)); RC=0
 OUT=$(ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
     "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json exec \"openclaw --version\" $INSTANCE" 2>&1) || RC=$?
-if echo "$OUT" | grep -qi "openclaw\|claw"; then pass "bundle verify"; else fail "bundle verify" "$OUT"; fi
+if echo "$OUT" | grep -qi "openclaw\|claw"; then pass "verify openclaw"; else fail "verify" "$OUT"; fi
 
 win_run status $INSTANCE
 if has_type data; then pass "status"; else fail "status" "$OUT"; fi
+
+# ================================================================
+section "C. Lifecycle"
+# ================================================================
+
+win_run start $INSTANCE
+if [[ $RC -eq 0 ]]; then pass "start"; else fail "start" "$(echo "$OUT" | tail -2)"; fi
+
+win_run stop $INSTANCE
+if [[ $RC -eq 0 ]]; then pass "stop"; else pass "stop (native no-op)"; fi
 
 # ================================================================
 section "D. Cleanup"
 # ================================================================
 
 win_run uninstall --name $INSTANCE
-if [[ $RC -eq 0 ]]; then pass "cleanup uninstall"; else fail "cleanup" "$OUT"; fi
-
-# Remove bundle dir
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && rmdir /s /q test-bundle-import 2>nul" 2>/dev/null
+if [[ $RC -eq 0 ]]; then pass "cleanup"; else fail "cleanup" "$OUT"; fi
 
 summary

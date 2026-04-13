@@ -40,11 +40,18 @@ mkdir -p "$OUTPUT_DIR"
 
 # ---- Platform detection ----
 detect_platform() {
-    case "$(uname -s)" in
+    case "$(uname -s 2>/dev/null)" in
         Darwin*)  echo "macos" ;;
         Linux*)   echo "linux" ;;
         CYGWIN*|MINGW*|MSYS*) echo "windows" ;;
-        *)        echo "unknown" ;;
+        *)
+            # Fallback: check for Windows environment variables
+            if [ -n "$USERPROFILE" ] || [ -n "$WINDIR" ]; then
+                echo "windows"
+            else
+                echo "unknown"
+            fi
+            ;;
     esac
 }
 
@@ -114,8 +121,9 @@ case "$PLATFORM" in
         fi
         ;;
     windows)
-        # PowerShell unzip
-        powershell -Command "Expand-Archive -Path '$BUILD_DIR/$NODE_FILENAME' -DestinationPath '$BUILD_DIR/node-tmp'"
+        # Convert Git Bash paths to Windows paths for PowerShell
+        WIN_BUILD_DIR=$(cygpath -w "$BUILD_DIR" 2>/dev/null || echo "$BUILD_DIR")
+        powershell -Command "Expand-Archive -Path '$WIN_BUILD_DIR\\$NODE_FILENAME' -DestinationPath '$WIN_BUILD_DIR\\node-tmp'"
         # Move contents up one level (strip the version directory)
         mv "$BUILD_DIR/node-tmp"/node-*/* "$BUILD_DIR/node/" 2>/dev/null || true
         rm -rf "$BUILD_DIR/node-tmp"
