@@ -522,13 +522,29 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 CheckItem { name: "Sandbox".into(), ok: backend_available, detail: backend_name.clone(), info_only: !backend_available },
             ];
 
-            #[cfg(target_os = "windows")]
+            // Cross-platform proxy detection: check config + env vars
             {
-                let proxy = clawenv_core::platform::process::silent_cmd("reg")
-                    .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
-                    .output().await;
-                let has_proxy = proxy.map(|o| String::from_utf8_lossy(&o.stdout).contains("0x1")).unwrap_or(false);
-                checks.push(CheckItem { name: "Proxy".into(), ok: true, detail: (if has_proxy { "Detected" } else { "None" }).into(), info_only: false });
+                let proxy_detail = if let Ok(cfg) = ConfigManager::load() {
+                    let p = &cfg.config().clawenv.proxy;
+                    if p.enabled && !p.http_proxy.is_empty() {
+                        format!("Config: {}", p.http_proxy)
+                    } else if let Ok(env_proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
+                        format!("Env: {env_proxy}")
+                    } else {
+                        "None".into()
+                    }
+                } else if let Ok(env_proxy) = std::env::var("http_proxy").or_else(|_| std::env::var("HTTP_PROXY")) {
+                    format!("Env: {env_proxy}")
+                } else {
+                    "None".into()
+                };
+                let has_proxy = proxy_detail != "None";
+                checks.push(CheckItem {
+                    name: "Proxy".into(),
+                    ok: true,
+                    detail: proxy_detail,
+                    info_only: !has_proxy,
+                });
             }
 
             let resp = SystemCheckResponse {
@@ -550,7 +566,9 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let backend = clawenv_core::manager::instance::backend_for_instance(&inst)?;
 
             out.emit(CliEvent::Info { message: format!("Renaming '{old_name}' → '{new_name}'...") });
-            clawenv_core::manager::instance::stop_instance(&inst).await.ok();
+            if let Err(e) = clawenv_core::manager::instance::stop_instance(&inst).await {
+                out.emit(CliEvent::Info { message: format!("Warning: could not stop instance: {e}") });
+            }
 
             let new_sandbox_id = if backend.supports_rename() {
                 backend.rename(&new_name).await?
@@ -586,7 +604,9 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     anyhow::bail!("Backend {:?} does not support resource editing", inst.sandbox_type);
                 }
                 out.emit(CliEvent::Info { message: format!("Stopping '{name}' for resource edit...") });
-                clawenv_core::manager::instance::stop_instance(inst).await.ok();
+                if let Err(e) = clawenv_core::manager::instance::stop_instance(inst).await {
+                    out.emit(CliEvent::Info { message: format!("Warning: could not stop instance: {e}") });
+                }
                 backend.edit_resources(cpus, memory, disk).await?;
                 out.emit(CliEvent::Info { message: "Resources updated".into() });
             }
@@ -596,9 +616,16 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 let gp = gateway_port.unwrap_or(inst.gateway.gateway_port);
                 let tp = ttyd_port.unwrap_or(inst.gateway.ttyd_port);
 
+                // Validate port uniqueness
+                if let Some(new_port) = gateway_port {
+                    clawenv_core::manager::install::validate_port_available(&config, &name, new_port)?;
+                }
+
                 let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
                 if backend.supports_port_edit() {
-                    clawenv_core::manager::instance::stop_instance(inst).await.ok();
+                    if let Err(e) = clawenv_core::manager::instance::stop_instance(inst).await {
+                        out.emit(CliEvent::Info { message: format!("Warning: could not stop instance: {e}") });
+                    }
                     backend.edit_port_forwards(&[(gp, gp), (tp, tp)]).await?;
                 }
 
@@ -752,9 +779,12 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         user_mode: format!("{:?}", c.clawenv.user_mode),
                         proxy_enabled: c.clawenv.proxy.enabled,
                         proxy_http: c.clawenv.proxy.http_proxy.clone(),
-                        mirror_preset: c.clawenv.mirrors.preset.clone(),
+                        proxy_https: c.clawenv.proxy.https_proxy.clone(),
+                        proxy_no_proxy: c.clawenv.proxy.no_proxy.clone(),
+                        mirrors_preset: c.clawenv.mirrors.preset.clone(),
                         bridge_enabled: c.clawenv.bridge.enabled,
                         bridge_port: c.clawenv.bridge.port,
+                        updates_auto_check: c.clawenv.updates.auto_check,
                         instances_count: c.instances.len(),
                     };
                     out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });
@@ -985,6 +1015,9 @@ async fn run_install_step(
         "config" => {
             let mut config = ConfigManager::load()
                 .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+
+            // Validate port uniqueness
+            clawenv_core::manager::install::validate_port_available(&config, name, port)?;
 
             // Store API key
             if let Some(key) = api_key {

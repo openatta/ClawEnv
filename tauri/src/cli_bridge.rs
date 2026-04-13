@@ -27,11 +27,13 @@ const IDLE_TIMEOUT_SECS: u64 = 600;
 /// A parsed CLI event (mirrors cli/src/output.rs CliEvent).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[allow(dead_code)] // `code` field participates in JSON protocol, read by frontend
 pub enum CliEvent {
     Progress { stage: String, percent: u8, message: String },
     Info { message: String },
     Complete { message: String },
-    Error { message: String, #[serde(default)] #[allow(dead_code)] code: Option<String> },
+    /// Error code is deserialized for protocol completeness; frontend reads it via JSON.
+    Error { message: String, #[serde(default)] code: Option<String> },
     Data { data: Value },
 }
 

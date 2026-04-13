@@ -14,6 +14,19 @@ pub fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
 
+/// Check that the gateway port is not already in use by another instance.
+pub fn validate_port_available(config: &ConfigManager, instance_name: &str, port: u16) -> Result<()> {
+    for inst in config.instances() {
+        if inst.name != instance_name && inst.gateway.gateway_port == port {
+            anyhow::bail!(
+                "Port {port} is already used by instance '{}'. Choose a different port with --port.",
+                inst.name
+            );
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_instance_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 63 {
         anyhow::bail!("Instance name must be 1-63 characters");
@@ -90,6 +103,7 @@ pub async fn install(
     tx: mpsc::Sender<InstallProgress>,
 ) -> Result<()> {
     validate_instance_name(&opts.instance_name)?;
+    validate_port_available(config, &opts.instance_name, opts.gateway_port)?;
 
     // Dispatch: Native vs Sandbox
     // NativeBundle always goes through native path regardless of use_native flag

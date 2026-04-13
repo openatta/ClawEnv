@@ -303,10 +303,11 @@ else
 
     # T15: bad step name
     TOTAL=$((TOTAL + 1))
-    if ! "$CLI" $JSON_FLAG install --step badstep 2>&1 | grep -q "Unknown install step"; then
-        fail "bad step name" "should report error"
-    else
+    BAD_STEP_OUT=$("$CLI" $JSON_FLAG install --step badstep 2>&1) || true
+    if echo "$BAD_STEP_OUT" | grep -q "Unknown install step"; then
         pass "bad step name (error)"
+    else
+        fail "bad step name" "should report error"
     fi
 fi
 
@@ -391,6 +392,69 @@ if echo "$UPDATE_OUT" | grep -qi "current\|latest\|error\|failed"; then
     pass "update-check (ran)"
 else
     fail "update-check" "$UPDATE_OUT"
+fi
+
+# ================================================================
+# Phase 4b: Edit / Rename / Config Set
+# ================================================================
+echo ""
+echo "=== Phase 4b: Edit / Rename / Config Set ==="
+
+if ! $SKIP_INSTALL; then
+    # Edit gateway port
+    TOTAL=$((TOTAL + 1))
+    EDIT_OUT=$("$CLI" $JSON_FLAG edit "$INSTANCE" --gateway-port 3101 2>&1) || true
+    if echo "$EDIT_OUT" | grep -qi "updated"; then
+        pass "edit --gateway-port"
+    else
+        fail "edit --gateway-port" "$EDIT_OUT"
+    fi
+    # Restore
+    "$CLI" $JSON_FLAG edit "$INSTANCE" --gateway-port 3100 2>/dev/null || true
+
+    # Config set + verify
+    TOTAL=$((TOTAL + 1))
+    "$CLI" $JSON_FLAG config set language en-US 2>/dev/null
+    VERIFY=$("$CLI" $JSON_FLAG config show 2>&1)
+    if echo "$VERIFY" | grep -q "en-US"; then
+        pass "config set + show round-trip"
+    else
+        fail "config set round-trip" "$VERIFY"
+    fi
+    "$CLI" $JSON_FLAG config set language zh-CN 2>/dev/null || true
+
+    # Port conflict detection
+    TOTAL=$((TOTAL + 1))
+    # Try to install another instance on the same port (should fail)
+    CONFLICT=$("$CLI" $JSON_FLAG install --mode "$MODE" --name conflict-test --port 3100 --step config 2>&1) || true
+    if echo "$CONFLICT" | grep -qi "already used\|error"; then
+        pass "port conflict detection"
+    else
+        fail "port conflict detection" "should reject duplicate port"
+        "$CLI" $JSON_FLAG uninstall --name conflict-test 2>/dev/null || true
+    fi
+
+    # Error: edit nonexistent
+    TOTAL=$((TOTAL + 1))
+    if ! "$CLI" $JSON_FLAG edit nonexistent-xyz --cpus 4 2>/dev/null; then
+        pass "edit nonexistent (error)"
+    else
+        fail "edit nonexistent" "should fail"
+    fi
+
+    # Error: rename nonexistent
+    TOTAL=$((TOTAL + 1))
+    if ! "$CLI" $JSON_FLAG rename nonexistent-xyz newname 2>/dev/null; then
+        pass "rename nonexistent (error)"
+    else
+        fail "rename nonexistent" "should fail"
+    fi
+else
+    skip "edit (--skip-install)"
+    skip "config set round-trip (--skip-install)"
+    skip "port conflict (--skip-install)"
+    skip "edit nonexistent (--skip-install)"
+    skip "rename nonexistent (--skip-install)"
 fi
 
 echo ""

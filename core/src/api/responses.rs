@@ -131,15 +131,27 @@ pub struct SandboxListResponse {
 
 // ---- Config ----
 
+/// Config show response — field names match `config set` key names (dot notation).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConfigShowResponse {
     pub language: String,
     pub theme: String,
     pub user_mode: String,
+    #[serde(rename = "proxy.enabled")]
     pub proxy_enabled: bool,
+    #[serde(rename = "proxy.http")]
     pub proxy_http: String,
-    pub mirror_preset: String,
+    #[serde(rename = "proxy.https")]
+    pub proxy_https: String,
+    #[serde(rename = "proxy.no_proxy")]
+    pub proxy_no_proxy: String,
+    #[serde(rename = "mirrors.preset")]
+    pub mirrors_preset: String,
+    #[serde(rename = "bridge.enabled")]
     pub bridge_enabled: bool,
+    #[serde(rename = "bridge.port")]
     pub bridge_port: u16,
+    #[serde(rename = "updates.auto_check")]
+    pub updates_auto_check: bool,
     pub instances_count: usize,
 }
