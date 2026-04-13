@@ -20,6 +20,25 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 
 /// Start an OpenClaw instance
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
+    // For native mode, ensure Node.js and claw binaries are in PATH
+    if instance.sandbox_type == SandboxType::Native {
+        crate::manager::install_native::ensure_node_in_path();
+        // Also add the instance's node_modules/.bin to PATH for claw CLI binaries
+        let install_dir = dirs::home_dir()
+            .unwrap_or_default()
+            .join(".clawenv/native")
+            .join(&instance.name)
+            .join("node_modules/.bin");
+        let current = std::env::var("PATH").unwrap_or_default();
+        let bin_str = install_dir.to_string_lossy();
+        if !current.contains(bin_str.as_ref()) {
+            #[cfg(target_os = "windows")]
+            std::env::set_var("PATH", format!("{};{current}", install_dir.display()));
+            #[cfg(not(target_os = "windows"))]
+            std::env::set_var("PATH", format!("{}:{current}", install_dir.display()));
+        }
+    }
+
     let backend = backend_for_instance(instance)?;
 
     // Only call backend.start() if VM/container is not already running
