@@ -167,6 +167,16 @@ pub enum SandboxType {
 }
 
 impl SandboxType {
+    /// User-friendly display name (platform-neutral).
+    pub fn display_name(&self) -> &'static str {
+        match self {
+            Self::Wsl2Alpine => "Sandbox (WSL2)",
+            Self::LimaAlpine => "Sandbox (Lima)",
+            Self::PodmanAlpine => "Sandbox (Podman)",
+            Self::Native => "Native",
+        }
+    }
+
     pub fn from_os() -> Self {
         match detect_platform().map(|p| p.os) {
             Ok(OsType::Windows) => Self::Wsl2Alpine,

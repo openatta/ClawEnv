@@ -56,7 +56,7 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
             sandbox_type: s.sandbox_type,
             version: s.version,
             gateway_port: s.gateway_port,
-            ttyd_port: 0,
+            ttyd_port: s.ttyd_port,
         }
     }).collect();
 

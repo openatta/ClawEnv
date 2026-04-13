@@ -25,16 +25,8 @@ pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_versio
         let app_fwd = app_handle.clone();
         let fwd_task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
-                match &event {
-                    CliEvent::Progress { stage, percent, message } => {
-                        let _ = app_fwd.emit("upgrade-progress", serde_json::json!({
-                            "stage": stage,
-                            "percent": percent,
-                            "message": message,
-                        }));
-                    }
-                    _ => {}
-                }
+                // Forward all event types to frontend
+                let _ = app_fwd.emit("upgrade-progress", &event);
             }
         });
 

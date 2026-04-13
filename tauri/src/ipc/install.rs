@@ -1,4 +1,4 @@
-use clawenv_core::api::SystemCheckResponse;
+use clawenv_core::api::{SystemCheckResponse, CheckItem as ApiCheckItem};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -53,21 +53,19 @@ pub async fn install_openclaw(
         let fwd_task = tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 match &event {
-                    CliEvent::Progress { stage, percent, message } => {
-                        let _ = app_fwd.emit("install-progress", serde_json::json!({
-                            "stage": stage,
-                            "percent": percent,
-                            "message": message,
-                        }));
+                    CliEvent::Progress { .. } | CliEvent::Info { .. } => {
+                        // Forward as structured event (Serialize derives available)
+                        let _ = app_fwd.emit("install-progress", &event);
                     }
-                    CliEvent::Info { message } => {
-                        let _ = app_fwd.emit("install-progress", serde_json::json!({
-                            "stage": "Info",
-                            "percent": 0,
-                            "message": message,
-                        }));
+                    CliEvent::Complete { .. } => {
+                        let _ = app_fwd.emit("install-progress", &event);
                     }
-                    _ => {}
+                    CliEvent::Error { .. } => {
+                        let _ = app_fwd.emit("install-progress", &event);
+                    }
+                    CliEvent::Data { .. } => {
+                        let _ = app_fwd.emit("install-progress", &event);
+                    }
                 }
             }
         });
@@ -125,22 +123,12 @@ pub async fn install_prerequisites(app: tauri::AppHandle) -> Result<(), String> 
 #[derive(Serialize)]
 pub struct SystemCheckInfo {
     pub os: String,
-    pub os_version: String,
     pub arch: String,
     pub memory_gb: f64,
     pub disk_free_gb: f64,
     pub sandbox_backend: String,
     pub sandbox_available: bool,
-    pub checks: Vec<CheckItem>,
-}
-
-#[derive(Serialize)]
-pub struct CheckItem {
-    pub name: String,
-    pub ok: bool,
-    pub detail: String,
-    #[serde(default)]
-    pub info_only: bool,
+    pub checks: Vec<ApiCheckItem>,
 }
 
 #[tauri::command]
@@ -150,18 +138,12 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
 
     Ok(SystemCheckInfo {
         os: resp.os,
-        os_version: String::new(),
         arch: resp.arch,
         memory_gb: resp.memory_gb,
         disk_free_gb: resp.disk_free_gb,
         sandbox_backend: resp.sandbox_backend.clone(),
         sandbox_available: resp.sandbox_available,
-        checks: resp.checks.into_iter().map(|c| CheckItem {
-            name: c.name,
-            ok: c.ok,
-            detail: c.detail,
-            info_only: c.info_only,
-        }).collect(),
+        checks: resp.checks,
     })
 }
 

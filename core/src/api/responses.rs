@@ -16,6 +16,8 @@ pub struct InstanceSummary {
     pub sandbox_type: String,
     pub health: String,
     pub gateway_port: u16,
+    #[serde(default)]
+    pub ttyd_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

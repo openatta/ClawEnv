@@ -7,7 +7,6 @@ mod ipc;
 
 use clawenv_core::config::ConfigManager;
 use clawenv_core::launcher;
-use clawenv_core::monitor::InstanceMonitor;
 use tauri::{Emitter, Manager};
 
 fn main() {
@@ -52,71 +51,63 @@ fn main() {
                 }
             });
 
-            // Spawn background instance health monitor
+            // Spawn background instance health monitor — polls CLI `status` command
             let monitor_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Wait a moment for config to be ready
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                use std::collections::HashMap;
+                use clawenv_core::api::StatusResponse;
 
-                let config = match ConfigManager::load() {
-                    Ok(c) => c,
-                    Err(_) => return, // No config yet, nothing to monitor
-                };
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                let instances = config.instances().to_vec();
-                if instances.is_empty() {
-                    return;
-                }
+                let interval = ConfigManager::load()
+                    .map(|c| c.config().clawenv.tray.monitor_interval_sec)
+                    .unwrap_or(5);
 
-                let interval = config.config().clawenv.tray.monitor_interval_sec;
-                let monitor = InstanceMonitor::with_interval(interval);
-                let (tx, mut rx) = tokio::sync::mpsc::channel::<clawenv_core::monitor::HealthEvent>(32);
+                let mut prev_health: HashMap<String, String> = HashMap::new();
 
-                // Forward health events to frontend, refresh tray, and send notifications on changes
-                let emit_handle = monitor_handle.clone();
-                tokio::spawn(async move {
-                    use std::collections::HashMap;
-                    use clawenv_core::monitor::InstanceHealth;
+                loop {
+                    // Reload config each cycle to pick up new/removed instances
+                    if let Ok(config) = ConfigManager::load() {
+                        for inst in config.instances() {
+                            let health = match cli_bridge::run_cli(&["status", &inst.name]).await {
+                                Ok(data) => {
+                                    serde_json::from_value::<StatusResponse>(data)
+                                        .map(|r| r.health)
+                                        .unwrap_or_else(|_| "Unreachable".into())
+                                }
+                                Err(_) => "Unreachable".into(),
+                            };
 
-                    let mut prev_health: HashMap<String, InstanceHealth> = HashMap::new();
+                            // Emit health event to frontend
+                            let _ = monitor_handle.emit("instance-health", serde_json::json!({
+                                "instance_name": inst.name,
+                                "health": health,
+                            }));
 
-                    while let Some(event) = rx.recv().await {
-                        let _ = emit_handle.emit("instance-health", &event);
-                        // Refresh tray menu to reflect new status
-                        let _ = tray::refresh_tray(&emit_handle);
-
-                        // Send notification when health changes
-                        if let Some(prev) = prev_health.get(&event.instance_name) {
-                            if *prev != event.health {
-                                let (title, body) = match event.health {
-                                    InstanceHealth::Running => (
-                                        "Instance Recovered",
-                                        format!("'{}' is now running", event.instance_name),
-                                    ),
-                                    InstanceHealth::Stopped => (
-                                        "Instance Stopped",
-                                        format!("'{}' has stopped", event.instance_name),
-                                    ),
-                                    InstanceHealth::Unreachable => (
-                                        "Instance Unreachable",
-                                        format!("'{}' is unreachable", event.instance_name),
-                                    ),
-                                };
-                                tray::send_notification(&emit_handle, title, &body);
-                                // Update tray icon based on health
-                                let tray_status = match event.health {
-                                    InstanceHealth::Running => tray::TrayStatus::Running,
-                                    InstanceHealth::Stopped => tray::TrayStatus::Stopped,
-                                    InstanceHealth::Unreachable => tray::TrayStatus::Error,
-                                };
-                                tray::set_tray_status(&emit_handle, tray_status);
+                            // Notify on health changes
+                            if let Some(prev) = prev_health.get(&inst.name) {
+                                if *prev != health {
+                                    let _ = tray::refresh_tray(&monitor_handle);
+                                    let (title, body) = match health.as_str() {
+                                        "Running" => ("Instance Recovered", format!("'{}' is now running", inst.name)),
+                                        "Stopped" => ("Instance Stopped", format!("'{}' has stopped", inst.name)),
+                                        _ => ("Instance Unreachable", format!("'{}' is unreachable", inst.name)),
+                                    };
+                                    tray::send_notification(&monitor_handle, title, &body);
+                                    let tray_status = match health.as_str() {
+                                        "Running" => tray::TrayStatus::Running,
+                                        "Stopped" => tray::TrayStatus::Stopped,
+                                        _ => tray::TrayStatus::Error,
+                                    };
+                                    tray::set_tray_status(&monitor_handle, tray_status);
+                                }
                             }
+                            prev_health.insert(inst.name.clone(), health);
                         }
-                        prev_health.insert(event.instance_name.clone(), event.health);
                     }
-                });
 
-                monitor.run(instances, tx).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(interval as u64)).await;
+                }
             });
 
             // Background update check — first emit cached results immediately,
