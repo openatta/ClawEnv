@@ -187,7 +187,21 @@ pub async fn install(
             }
         });
 
-        backend.create(&sandbox_opts).await?;
+        // 30-minute absolute timeout for VM creation (download + provision).
+        // The heartbeat above provides activity feedback; this is a hard safety net.
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(30 * 60),
+            backend.create(&sandbox_opts),
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                heartbeat.abort();
+                anyhow::bail!(
+                    "VM creation timed out after 30 minutes. \
+                     Check network connectivity and try again."
+                );
+            }
+        }
         heartbeat.abort();
         send(&tx, "VM created with system packages", 38, InstallStage::CreateVm).await;
     } else {
@@ -432,7 +446,10 @@ chmod +x /tmp/clawenv-npm.sh"#
     }
 }
 
-/// Run any command as background script in VM with polling.
+/// Run any command as background script in VM with polling and idle detection.
+///
+/// Polls log file for new lines every 5s. If no new output appears for 10 minutes,
+/// the operation is considered stalled and returns an error.
 async fn vm_background_run(
     backend: &dyn SandboxBackend,
     tx: &mpsc::Sender<InstallProgress>,
@@ -450,12 +467,14 @@ async fn vm_background_run(
     )).await?;
 
     let mut elapsed = 0u64;
+    let mut idle = 0u64;
+    let mut last_lines = 0usize;
+
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         elapsed += 5;
-        let pct = std::cmp::min(pct_start + (elapsed / 10) as u8, pct_end);
-        send(tx, &format!("{label}... ({elapsed}s)"), pct, stage.clone()).await;
 
+        // Check done marker
         let d = backend.exec(&format!("cat {done} 2>/dev/null || echo ''")).await.unwrap_or_default();
         if !d.trim().is_empty() {
             let rc: i32 = d.trim().parse().unwrap_or(-1);
@@ -465,6 +484,32 @@ async fn vm_background_run(
                 anyhow::bail!("{label} failed (exit {rc}):\n{tail}");
             }
             return Ok(());
+        }
+
+        // Read new log lines for activity detection
+        let new_output = backend.exec(&format!(
+            "tail -n +{} {log} 2>/dev/null | head -20 || echo ''",
+            last_lines + 1
+        )).await.unwrap_or_default();
+        let new_count = new_output.lines().filter(|l| !l.trim().is_empty()).count();
+
+        if new_count > 0 {
+            idle = 0;
+            last_lines += new_count;
+            let pct = std::cmp::min(pct_start + (elapsed / 10) as u8, pct_end);
+            let last_line = new_output.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("");
+            let short = if last_line.len() > 80 { &last_line[..80] } else { last_line };
+            send(tx, &format!("[{elapsed}s] {short}"), pct, stage.clone()).await;
+        } else {
+            idle += 5;
+            let pct = std::cmp::min(pct_start + (elapsed / 10) as u8, pct_end);
+            send(tx, &format!("{label}... ({elapsed}s)"), pct, stage.clone()).await;
+        }
+
+        // Idle timeout: 10 minutes without new output
+        if idle >= 600 {
+            let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
+            anyhow::bail!("{label} stalled — no output for 10 minutes:\n{tail}");
         }
     }
 }

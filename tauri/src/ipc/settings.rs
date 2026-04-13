@@ -1,3 +1,5 @@
+// Settings use direct core calls — GUI settings page submits multiple fields
+// at once, which is more efficient as a single config load/save cycle.
 use clawenv_core::config::{ConfigManager, ProxyConfig, UserMode};
 
 #[tauri::command]

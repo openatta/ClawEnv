@@ -1,149 +1,17 @@
+use clawenv_core::api::SandboxListResponse;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
+#[cfg(target_os = "windows")]
 use clawenv_core::platform::process::silent_cmd;
-use serde::Serialize;
 use tauri::Emitter;
 
-/// List all sandbox VMs/containers on the current platform
-#[derive(Serialize)]
-pub struct SandboxVmInfo {
-    pub name: String,
-    pub status: String,
-    pub cpus: String,
-    pub memory: String,
-    pub disk: String,
-    pub dir_size: String,
-    pub managed: bool,
-}
+use crate::cli_bridge;
 
 #[tauri::command]
-pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
-    let mut vms = Vec::new();
-
-    #[cfg(target_os = "macos")]
-    {
-        let home = std::env::var("HOME").unwrap_or_default();
-        let output = tokio::process::Command::new("limactl")
-            .args(["list", "--format", "{{.Name}}\t{{.Status}}\t{{.CPUs}}\t{{.Memory}}\t{{.Disk}}\t{{.Dir}}"])
-            .output().await.map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if parts.len() >= 5 {
-                // Get actual disk usage of the VM directory
-                let dir = parts.get(5).unwrap_or(&"");
-                let dir_size = if !dir.is_empty() {
-                    let expanded = dir.replace("~", &home);
-                    let du = tokio::process::Command::new("du")
-                        .args(["-sh", &expanded])
-                        .output().await.ok();
-                    du.map(|o| String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("-").to_string())
-                        .unwrap_or("-".to_string())
-                } else { "-".to_string() };
-
-                vms.push(SandboxVmInfo {
-                    name: parts[0].to_string(),
-                    status: parts[1].to_string(),
-                    cpus: parts[2].to_string(),
-                    memory: parts[3].to_string(),
-                    disk: parts[4].to_string(),
-                    dir_size,
-                    managed: parts[0].starts_with("clawenv-"),
-                });
-            }
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    {
-        // Podman containers — query with --size for actual disk usage
-        let output = tokio::process::Command::new("podman")
-            .args(["ps", "-a", "--size", "--format", "{{.Names}}\t{{.Status}}\t{{.Size}}"])
-            .output().await.map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split('\t').collect();
-            if !parts.is_empty() {
-                let name = parts.first().unwrap_or(&"").to_string();
-                let size_str = parts.get(2).unwrap_or(&"-").to_string();
-
-                // Query resource limits via podman inspect
-                let (cpus, memory) = if !name.is_empty() {
-                    let inspect = tokio::process::Command::new("podman")
-                        .args(["inspect", "--format", "{{.HostConfig.NanoCpus}}\t{{.HostConfig.Memory}}", &name])
-                        .output().await.ok();
-                    if let Some(out) = inspect {
-                        let s = String::from_utf8_lossy(&out.stdout);
-                        let iparts: Vec<&str> = s.trim().split('\t').collect();
-                        let cpu = iparts.first().and_then(|v| v.parse::<u64>().ok())
-                            .map(|n| if n > 0 { format!("{}", n / 1_000_000_000) } else { "-".into() })
-                            .unwrap_or("-".into());
-                        let mem = iparts.get(1).and_then(|v| v.parse::<u64>().ok())
-                            .map(|n| if n > 0 { format!("{} MB", n / (1024 * 1024)) } else { "-".into() })
-                            .unwrap_or("-".into());
-                        (cpu, mem)
-                    } else {
-                        ("-".into(), "-".into())
-                    }
-                } else {
-                    ("-".into(), "-".into())
-                };
-
-                vms.push(SandboxVmInfo {
-                    managed: name.starts_with("clawenv-"),
-                    name,
-                    status: parts.get(1).unwrap_or(&"").to_string(),
-                    cpus,
-                    memory,
-                    disk: size_str.clone(),
-                    dir_size: size_str,
-                });
-            }
-        }
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        // WSL2 distros
-        let output = silent_cmd("wsl")
-            .args(["--list", "--verbose"])
-            .output().await.map_err(|e| e.to_string())?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let home = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")).unwrap_or_default();
-        for line in stdout.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                let name = parts[0].trim_start_matches('*').trim();
-
-                // Measure distro vhdx disk usage
-                let distro_dir = format!("{}\\.clawenv\\wsl\\{}", home.replace('/', "\\"), name);
-                let dir_size = if std::path::Path::new(&distro_dir).exists() {
-                    let du = silent_cmd("powershell")
-                        .args(["-Command", &format!(
-                            "(Get-ChildItem -Recurse '{}' -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum).Sum / 1GB | ForEach-Object {{ '{{0:N1}} GB' -f $_ }}",
-                            distro_dir
-                        )])
-                        .output().await.ok();
-                    du.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                        .unwrap_or("-".into())
-                } else {
-                    "-".to_string()
-                };
-
-                vms.push(SandboxVmInfo {
-                    name: name.to_string(),
-                    status: parts[1].to_string(),
-                    cpus: "-".to_string(),
-                    memory: "-".to_string(),
-                    disk: dir_size.clone(),
-                    dir_size,
-                    managed: name.starts_with("ClawEnv"),
-                });
-            }
-        }
-    }
-
-    Ok(vms)
+pub async fn list_sandbox_vms() -> Result<Vec<clawenv_core::api::SandboxVmInfo>, String> {
+    let data = cli_bridge::run_cli(&["sandbox", "list"]).await.map_err(|e| e.to_string())?;
+    let resp: SandboxListResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
+    Ok(resp.vms)
 }
 
 #[tauri::command]

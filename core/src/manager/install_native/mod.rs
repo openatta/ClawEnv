@@ -94,6 +94,11 @@ async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &s
     { linux::install_nodejs(tx, nodejs_dist_base).await }
 }
 
+/// Public API for CLI step-by-step install: install Node.js only.
+pub async fn install_nodejs_public(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
+    install_nodejs(tx, nodejs_dist_base).await
+}
+
 // ---- Main install flow (shared across platforms) ----
 
 /// Native install flow — no VM, no MCP Bridge, no ttyd.

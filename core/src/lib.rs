@@ -1,3 +1,4 @@
+pub mod api;
 pub mod platform;
 pub mod sandbox;
 pub mod config;

@@ -1,4 +1,3 @@
-use clawenv_core::claw::ClawRegistry;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 
@@ -7,10 +6,9 @@ use clawenv_core::manager::instance;
 pub async fn get_gateway_token(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
     let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let registry = ClawRegistry::load();
+    let registry = clawenv_core::claw::ClawRegistry::load();
     let desc = registry.get(&inst.claw_type);
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    // Try claw-specific config path, then fallback to generic patterns
     let result = backend.exec(&format!(
         "cat ~/.{id}/{id}.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'",
         id = desc.id
@@ -18,7 +16,7 @@ pub async fn get_gateway_token(name: String) -> Result<String, String> {
     Ok(result.trim().to_string())
 }
 
-/// Get bridge server configuration
+/// Get bridge server configuration — direct core (lightweight config read)
 #[tauri::command]
 pub fn get_bridge_config() -> Result<serde_json::Value, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
@@ -36,32 +34,8 @@ pub async fn save_bridge_config(bridge_json: String) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())
 }
 
+/// Open URL in platform default browser — GUI-only
 #[tauri::command]
 pub async fn open_url_in_browser(url: String) -> Result<(), String> {
-    // Fallback: use Rust std to open URL
-    #[cfg(target_os = "macos")]
-    {
-        tokio::process::Command::new("open")
-            .arg(&url)
-            .status()
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "windows")]
-    {
-        clawenv_core::platform::process::silent_cmd("cmd")
-            .args(["/c", "start", &url])
-            .status()
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    #[cfg(target_os = "linux")]
-    {
-        tokio::process::Command::new("xdg-open")
-            .arg(&url)
-            .status()
-            .await
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(())
+    clawenv_core::platform::process::open_url(&url).await.map_err(|e| e.to_string())
 }

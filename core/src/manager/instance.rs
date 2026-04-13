@@ -82,8 +82,22 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         }
     }
 
-    tracing::warn!("Instance '{}' gateway started but not yet responding on port {port}", instance.name);
-    Ok(())
+    // Gateway did not respond after 6 probes (~13s). Check if process even started.
+    let proc_check = backend.exec(&process::check_process_cmd(&desc.process_name())).await.unwrap_or_default();
+    if proc_check.contains("running") {
+        // Process is alive but not responding to HTTP yet — warn but don't fail.
+        // It may be doing first-time initialization.
+        tracing::warn!("Instance '{}' gateway process is running but not yet responding on port {port}", instance.name);
+        Ok(())
+    } else {
+        // Process is not running — real failure
+        let log = backend.exec("tail -20 /tmp/clawenv-gateway.log 2>/dev/null || echo 'no log'").await.unwrap_or_default();
+        anyhow::bail!(
+            "Gateway failed to start for '{}' on port {port}. \
+             Process exited unexpectedly.\n\nGateway log:\n{log}",
+            instance.name
+        )
+    }
 }
 
 /// Stop a claw instance — force kill all processes

@@ -3,8 +3,8 @@
 //! Two modes:
 //! - `exec()`: For short commands (echo, which, cat, etc.). Has pipe-read timeout.
 //! - `exec_with_progress()`: For long commands (apk add, npm install, etc.).
-//!   Streams output line-by-line with NO timeout — the process runs until it
-//!   finishes naturally. Caller shows progress via heartbeat.
+//!   Streams output line-by-line with idle timeout — if no output arrives for
+//!   IDLE_TIMEOUT_SECS, the process is killed and an error is returned.
 
 use anyhow::Result;
 use std::time::Duration;
@@ -14,6 +14,12 @@ use tokio::sync::mpsc;
 
 /// Pipe-read timeout for `exec()` (short commands only).
 const READ_TIMEOUT_SECS: u64 = 120;
+
+/// Idle timeout for `exec_with_progress()` — if no stdout/stderr line arrives
+/// for this long, the process is considered stalled and is killed.
+/// 10 minutes is generous enough for slow networks (npm download, apk fetch)
+/// while catching truly hung processes.
+const IDLE_TIMEOUT_SECS: u64 = 600;
 
 /// Read from an async reader with a timeout.
 async fn read_with_timeout(mut reader: impl AsyncReadExt + Unpin, secs: u64) -> String {
@@ -60,11 +66,12 @@ pub async fn exec(program: &str, args: &[&str]) -> Result<(String, String, i32)>
     Ok((stdout, stderr, code))
 }
 
-/// Execute a long-running command with streaming progress.
+/// Execute a long-running command with streaming progress and idle timeout.
 ///
 /// Pipes stdout+stderr lines to a channel as they arrive.
-/// **No timeout** — the process runs until it finishes naturally.
-/// Caller is responsible for showing heartbeat/progress to the user.
+/// **Idle timeout**: if no output line arrives for 10 minutes, the process is
+/// killed and an error is returned. Any output resets the timer — so slow but
+/// active downloads (producing progress output) will never be timed out.
 pub async fn exec_with_progress(
     program: &str,
     args: &[&str],
@@ -82,39 +89,75 @@ pub async fn exec_with_progress(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
 
-    // Stream stderr lines to channel
-    let tx2 = tx.clone();
+    // Merge stdout+stderr into a single channel for unified idle detection.
+    // The merged channel feeds both the caller's tx and output collection.
+    let (line_tx, mut line_rx) = mpsc::channel::<(String, bool)>(128); // (line, is_stdout)
+
+    // Stderr reader
+    let line_tx2 = line_tx.clone();
     let stderr_task = tokio::spawn(async move {
         if let Some(se) = stderr {
             let mut reader = BufReader::new(se).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                let _ = tx2.send(line).await;
+                if line_tx2.send((line, false)).await.is_err() { break; }
             }
         }
     });
 
-    // Stream stdout lines to channel + collect full output
-    let tx3 = tx.clone();
+    // Stdout reader
+    let line_tx3 = line_tx.clone();
     let stdout_task = tokio::spawn(async move {
-        let mut output = String::new();
         if let Some(so) = stdout {
             let mut reader = BufReader::new(so).lines();
             while let Ok(Some(line)) = reader.next_line().await {
-                let _ = tx3.send(line.clone()).await;
-                output.push_str(&line);
-                output.push('\n');
+                if line_tx3.send((line, true)).await.is_err() { break; }
             }
         }
-        output
     });
 
-    // Wait for process to finish — NO timeout
+    // Drop our copy so channel closes when both readers finish
+    drop(line_tx);
+
+    // Consume lines with idle timeout
+    let mut output = String::new();
+    let idle_timeout = Duration::from_secs(IDLE_TIMEOUT_SECS);
+
+    loop {
+        match tokio::time::timeout(idle_timeout, line_rx.recv()).await {
+            Ok(Some((line, is_stdout))) => {
+                // Activity received — forward to caller and collect stdout
+                let _ = tx.send(line.clone()).await;
+                if is_stdout {
+                    output.push_str(&line);
+                    output.push('\n');
+                }
+            }
+            Ok(None) => {
+                // Channel closed — both readers finished (process exited or pipes closed)
+                break;
+            }
+            Err(_) => {
+                // Idle timeout — no output for IDLE_TIMEOUT_SECS
+                tracing::error!(
+                    "exec_with_progress idle timeout: no output for {}s, killing process",
+                    IDLE_TIMEOUT_SECS
+                );
+                child.kill().await.ok();
+                anyhow::bail!(
+                    "Process stalled — no output for {} minutes. The operation may be stuck. \
+                     Check network connectivity and try again.",
+                    IDLE_TIMEOUT_SECS / 60
+                );
+            }
+        }
+    }
+
+    // Wait for process exit
     let status = child.wait().await;
 
-    // Give pipes a moment to flush remaining data
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    // Clean up reader tasks
     stderr_task.abort();
-    let output = stdout_task.await.unwrap_or_default();
+    stdout_task.abort();
 
     let code = match status {
         Ok(s) => s.code().unwrap_or(-1),

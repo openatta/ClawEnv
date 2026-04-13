@@ -70,6 +70,37 @@ export NO_PROXY="{no_proxy}"
     Ok(())
 }
 
+/// Inject proxy configuration into the current process environment.
+/// Sets HTTP_PROXY, HTTPS_PROXY, NO_PROXY (and lowercase variants) so that
+/// all child processes (npm, curl, etc.) inherit the proxy settings.
+/// Called by CLI at startup to ensure proxy is active for all operations.
+pub fn inject_proxy_env(proxy: &ProxyConfig) {
+    if !proxy.enabled || proxy.http_proxy.is_empty() {
+        return;
+    }
+
+    let http_proxy = proxy_url_with_auth(proxy).unwrap_or_else(|_| proxy.http_proxy.clone());
+    let https_proxy = if proxy.https_proxy.is_empty() {
+        http_proxy.clone()
+    } else {
+        proxy.https_proxy.clone()
+    };
+    let no_proxy = if proxy.no_proxy.is_empty() {
+        "localhost,127.0.0.1"
+    } else {
+        &proxy.no_proxy
+    };
+
+    std::env::set_var("http_proxy", &http_proxy);
+    std::env::set_var("HTTP_PROXY", &http_proxy);
+    std::env::set_var("https_proxy", &https_proxy);
+    std::env::set_var("HTTPS_PROXY", &https_proxy);
+    std::env::set_var("no_proxy", no_proxy);
+    std::env::set_var("NO_PROXY", no_proxy);
+
+    tracing::debug!("Proxy env injected: http={}, no_proxy={}", http_proxy, no_proxy);
+}
+
 /// Test proxy connectivity by attempting to reach Alpine CDN.
 /// `alpine_url` allows testing against a mirror instead of the default CDN.
 pub async fn test_proxy(proxy: &ProxyConfig, alpine_url: &str) -> Result<()> {

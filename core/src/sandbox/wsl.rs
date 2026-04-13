@@ -186,7 +186,7 @@ impl SandboxBackend for WslBackend {
         let hyperv_check = silent_cmd("dism")
             .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Hyper-V", "/English"])
             .output().await;
-        let hyperv_available = hyperv_check.as_ref()
+        let _hyperv_available = hyperv_check.as_ref()
             .map(|o| {
                 let s = String::from_utf8_lossy(&o.stdout);
                 // If the feature exists (even if Disabled), hardware can support it

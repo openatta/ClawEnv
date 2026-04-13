@@ -13,6 +13,7 @@ use anyhow::Result;
 /// For PowerShell: automatically adds `-ExecutionPolicy Bypass` to avoid
 /// Restricted policy blocking npm/node scripts.
 pub fn silent_cmd(program: &str) -> tokio::process::Command {
+    #[allow(unused_mut)]
     let mut cmd = tokio::process::Command::new(program);
     #[cfg(target_os = "windows")]
     {
