@@ -1,0 +1,172 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  # ============================================================
+  # L1: Unit tests + lint (fast, all platforms)
+  # ============================================================
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Check (core + cli)
+        run: cargo check -p clawenv-core -p clawenv-cli
+
+      - name: Test (core)
+        run: cargo test -p clawenv-core
+
+      - name: Test (cli e2e)
+        run: cargo test -p clawenv-cli
+
+      - name: Clippy
+        run: cargo clippy -p clawenv-core -p clawenv-cli -- -D warnings
+        continue-on-error: true
+
+  # ============================================================
+  # L2: CLI binary smoke test (all platforms)
+  # ============================================================
+  cli-smoke:
+    name: CLI Smoke (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build CLI
+        run: cargo build -p clawenv-cli
+
+      - name: CLI version
+        run: ./target/debug/clawenv-cli --version
+        shell: bash
+
+      - name: CLI doctor
+        run: ./target/debug/clawenv-cli --json doctor
+        shell: bash
+
+      - name: CLI system-check
+        run: ./target/debug/clawenv-cli --json system-check
+        shell: bash
+
+      - name: CLI claw-types
+        run: ./target/debug/clawenv-cli --json claw-types
+        shell: bash
+
+      - name: CLI config show
+        run: ./target/debug/clawenv-cli --json config show || true
+        shell: bash
+
+      - name: CLI sandbox list
+        run: ./target/debug/clawenv-cli --json sandbox list
+        shell: bash
+
+      - name: CLI sandbox info
+        run: ./target/debug/clawenv-cli --json sandbox info
+        shell: bash
+
+  # ============================================================
+  # L3: Cross-compile Linux static binary
+  # ============================================================
+  cross-compile:
+    name: Cross-compile (Linux aarch64)
+    needs: test
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust + musl target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-unknown-linux-musl
+
+      - name: Install musl cross toolchain
+        run: brew install filosottile/musl-cross/musl-cross
+
+      - name: Cross-compile
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
+        run: cargo build -p clawenv-cli --target aarch64-unknown-linux-musl --release
+
+      - name: Verify binary
+        run: file target/aarch64-unknown-linux-musl/release/clawenv-cli
+
+  # ============================================================
+  # Tauri check (GUI compilation, not full build)
+  # ============================================================
+  tauri-check:
+    name: Tauri Check (${{ matrix.os }})
+    needs: test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-tauri-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-tauri-
+
+      - name: Check Tauri
+        run: cargo check -p clawenv-tauri

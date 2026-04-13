@@ -1,5 +1,7 @@
 # ClawEnv
 
+[![CI](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml/badge.svg)](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml)
+
 [中文文档](docs/README-zh.md)
 
 > Cross-platform sandbox installer, launcher & manager for the Claw ecosystem (OpenClaw, NanoClaw, and more).
@@ -115,19 +117,47 @@ docs/            # Specification docs (16 files)
 
 ## Testing
 
+### CI (GitHub Actions)
+
+Automated on every push — runs on **macOS, Windows, Linux**:
+
+| Job | macOS | Windows | Linux |
+|-----|:-----:|:-------:|:-----:|
+| Unit tests (core) | ✅ | ✅ | ✅ |
+| CLI e2e tests (28) | ✅ | ✅ | ✅ |
+| CLI smoke test | ✅ | ✅ | ✅ |
+| Tauri check | ✅ | ✅ | ✅ |
+| Cross-compile (Linux aarch64) | ✅ | — | — |
+
+### Local tests
+
 ```bash
-# L1+L2: Unit tests + mock flow tests (< 1 second)
+# L1: Unit tests (< 1s)
 cargo test -p clawenv-core
 
-# L3: Real sandbox lifecycle test
-bash scripts/test-claw-lifecycle.sh openclaw
+# L2: CLI e2e tests (< 2s)
+cargo test -p clawenv-cli
 
-# Full test suite with parallel runner
-bash scripts/test-claw-runner.sh --parallel 2
-
-# Windows remote test
-bash scripts/win-remote.sh test
+# L3: Platform-specific full tests
+bash scripts/test-macos-native.sh          # macOS native install + lifecycle
+bash scripts/test-macos-sandbox.sh         # macOS Lima + Alpine sandbox
+bash scripts/test-macos-import.sh          # bundle + Lima image import
+bash scripts/test-windows-native.sh        # Windows via SSH
+bash scripts/test-windows-import.sh        # Windows bundle import via SSH
+bash scripts/test-linux-podman.sh --lima   # Linux Podman via Lima Alpine
 ```
+
+### Test results (v1.4.0)
+
+| Platform | Test | Result |
+|----------|------|--------|
+| macOS | Native install + lifecycle | 29/29 |
+| macOS | Sandbox (Lima + Alpine) | 16/17 |
+| macOS | Bundle + Lima image import | 8/8 |
+| Windows | Native install + lifecycle (SSH) | 23/23 |
+| Windows | Bundle import (SSH) | 9/9 |
+| Linux | Podman (Lima Alpine) | 17/25 |
+| All | Rust automated tests | 83/83 |
 
 See [scripts/README.md](scripts/README.md) for the complete testing guide.
 

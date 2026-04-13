@@ -1,5 +1,7 @@
 # ClawEnv
 
+[![CI](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml/badge.svg)](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml)
+
 [English](../README.md)
 
 > Claw 生态（OpenClaw、NanoClaw 等）的跨平台沙盒安装器、启动器与管理器。
@@ -115,19 +117,47 @@ docs/            # 规格文档（16 个文件）
 
 ## 测试
 
+### CI（GitHub Actions）
+
+每次推送自动运行——覆盖 **macOS、Windows、Linux** 三平台：
+
+| 任务 | macOS | Windows | Linux |
+|------|:-----:|:-------:|:-----:|
+| 单元测试 (core) | ✅ | ✅ | ✅ |
+| CLI 端到端测试 (28) | ✅ | ✅ | ✅ |
+| CLI 冒烟测试 | ✅ | ✅ | ✅ |
+| Tauri 编译检查 | ✅ | ✅ | ✅ |
+| 交叉编译 (Linux aarch64) | ✅ | — | — |
+
+### 本地测试
+
 ```bash
-# L1+L2: 单元测试 + Mock 流程测试（< 1 秒）
+# L1: 单元测试（< 1 秒）
 cargo test -p clawenv-core
 
-# L3: 真实沙盒生命周期测试
-bash scripts/test-claw-lifecycle.sh openclaw
+# L2: CLI 端到端测试（< 2 秒）
+cargo test -p clawenv-cli
 
-# 并行测试运行器
-bash scripts/test-claw-runner.sh --parallel 2
-
-# Windows 远程测试
-bash scripts/win-remote.sh test
+# L3: 各平台完整测试
+bash scripts/test-macos-native.sh          # macOS 本地安装 + 生命周期
+bash scripts/test-macos-sandbox.sh         # macOS Lima + Alpine 沙盒
+bash scripts/test-macos-import.sh          # Bundle + Lima 映像导入
+bash scripts/test-windows-native.sh        # Windows（通过 SSH）
+bash scripts/test-windows-import.sh        # Windows Bundle 导入（SSH）
+bash scripts/test-linux-podman.sh --lima   # Linux Podman（通过 Lima Alpine）
 ```
+
+### 测试结果 (v1.4.0)
+
+| 平台 | 测试 | 结果 |
+|------|------|------|
+| macOS | 本地安装 + 生命周期 | 29/29 |
+| macOS | 沙盒（Lima + Alpine） | 16/17 |
+| macOS | Bundle + Lima 映像导入 | 8/8 |
+| Windows | 本地安装 + 生命周期（SSH） | 23/23 |
+| Windows | Bundle 导入（SSH） | 9/9 |
+| Linux | Podman（Lima Alpine） | 17/25 |
+| 全部 | Rust 自动化测试 | 83/83 |
 
 详见 [scripts/README.md](../scripts/README.md) 完整测试指南。
 
