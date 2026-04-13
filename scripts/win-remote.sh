@@ -26,8 +26,8 @@ WIN_USER="${WIN_USER:-clawenv}"
 PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
 CARGO="C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe"
 
-# MSVC + LLVM must be in PATH for every SSH session
-ENV_PREFIX="set PATH=%PATH%;C:\\Program Files\\LLVM\\bin;C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64&&"
+# All tools must be in PATH for every SSH session (Node, Git, MSVC, LLVM, Cargo)
+ENV_PREFIX="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Program Files\\LLVM\\bin;C:\\Program Files (x86)\\Microsoft Visual Studio\\2022\\BuildTools\\VC\\Tools\\MSVC\\14.44.35207\\bin\\Hostx64\\x64;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
 win_run() {
     ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" "${ENV_PREFIX} cd $PROJECT && $*" 2>&1
