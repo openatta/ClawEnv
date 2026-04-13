@@ -29,3 +29,5 @@ Thumbs.db
 .env.*
 docs/UTM.dmg
 test-results/
+test-export-*/
+test-bundle-*/

@@ -38,7 +38,7 @@ section "A. Generate Native Bundle on Windows"
 TOTAL=$((TOTAL+1))
 echo "       Generating bundle on Windows (5-10 min)..."
 BUNDLE_RC=0
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && bash tools/package-native.sh openclaw latest test-bundle-import" 2>&1 | tail -5 || BUNDLE_RC=$?
+ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && bash tools/package-native.sh latest test-bundle-import" 2>&1 | tail -5 || BUNDLE_RC=$?
 
 # Find the bundle file
 BUNDLE_FILE=$(ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && dir /b test-bundle-import\\clawenv-native-*.tar.gz 2>nul" 2>&1 | grep ".tar.gz" | head -1 | tr -d '\r')
