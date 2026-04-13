@@ -65,16 +65,47 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let gateway_cmd = desc.gateway_start_cmd(port);
+    #[cfg(not(target_os = "windows"))]
     backend.exec(&format!(
         "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
     )).await?;
+    #[cfg(target_os = "windows")]
+    {
+        if instance.sandbox_type == SandboxType::Native {
+            // Windows native: use Start-Process (no nohup available)
+            backend.exec(&format!(
+                "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
+                desc.cli_binary, desc.gateway_cmd.replace("{port}", &port.to_string())
+            )).await?;
+        } else {
+            // Windows sandbox (WSL2): nohup works inside Linux
+            backend.exec(&format!(
+                "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+            )).await?;
+        }
+    }
 
     // Wait for gateway to become responsive (up to 15s)
     for i in 0..6 {
         tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 3 } else { 2 }).into()).await;
-        let check = backend.exec(&format!(
+
+        // Platform-appropriate HTTP probe
+        #[cfg(not(target_os = "windows"))]
+        let check_cmd = format!(
             "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-        )).await.unwrap_or_default();
+        );
+        #[cfg(target_os = "windows")]
+        let check_cmd = if instance.sandbox_type == SandboxType::Native {
+            format!(
+                "powershell -Command \"try {{ (Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing).StatusCode }} catch {{ '000' }}\""
+            )
+        } else {
+            format!(
+                "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+            )
+        };
+
+        let check = backend.exec(&check_cmd).await.unwrap_or_default();
         let code = check.trim().trim_matches('\'');
         if code != "000" && !code.is_empty() {
             tracing::info!("Instance '{}' gateway ready on port {port} (HTTP {code})", instance.name);

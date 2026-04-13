@@ -176,7 +176,15 @@ run_platform_tests() {
     run_test "$P" "restart" restart "$INSTANCE"
     if [[ $RC -eq 0 ]]; then pass "$P" "restart"; else fail "$P" "restart" "$(echo "$OUT" | tail -2)"; fi
 
-    run_test "$P" "exec" exec "echo hello-test" "$INSTANCE"
+    # exec needs special quoting: cmd is first positional arg, instance name is second
+    TOTAL=$((TOTAL+1))
+    RC=0
+    if [[ "$P" == "mac" ]]; then
+        OUT=$("$ROOT/target/debug/clawenv-cli" --json exec "echo hello-test" "$INSTANCE" 2>&1) || RC=$?
+    else
+        OUT=$(ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
+            "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json exec \"echo hello-test\" $INSTANCE" 2>&1) || RC=$?
+    fi
     if echo "$OUT" | grep -q "hello-test"; then pass "$P" "exec"; else fail "$P" "exec" "$OUT"; fi
 
     run_test "$P" "logs" logs "$INSTANCE"
