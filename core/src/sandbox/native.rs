@@ -21,12 +21,13 @@ impl NativeBackend {
     }
 
     /// Create a shell command appropriate for the current OS.
-    /// Windows: cmd /c "..."  |  Unix: sh -c "..."
+    /// Windows: powershell -WindowStyle Hidden -Command "..."
+    /// macOS/Linux: sh -c "..."
     fn shell_cmd(cmd: &str) -> Command {
         #[cfg(target_os = "windows")]
         {
-            let mut c = Command::new("cmd");
-            c.args(["/c", cmd]);
+            let mut c = crate::platform::process::silent_cmd("powershell");
+            c.args(["-WindowStyle", "Hidden", "-Command", cmd]);
             c
         }
         #[cfg(not(target_os = "windows"))]
