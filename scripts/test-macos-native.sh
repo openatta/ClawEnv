@@ -48,6 +48,9 @@ if has_text "language"; then pass "config show"; else fail "config show" "$OUT";
 run sandbox list
 if has_text "vms"; then pass "sandbox list"; else fail "sandbox list" "$OUT"; fi
 
+run sandbox info
+if has_type data; then pass "sandbox info"; else fail "sandbox info" "$OUT"; fi
+
 # ================================================================
 section "B. Native Step-by-Step Install"
 # ================================================================
@@ -113,6 +116,11 @@ pass "logs (ran)"
 run update-check "$INSTANCE"
 if has_text "current\|latest\|error"; then pass "update-check"; else fail "update-check" "$OUT"; fi
 
+# Upgrade (may not have newer version, or may take very long)
+# Just verify the command doesn't crash with invalid args
+run upgrade nonexistent-$$
+if [[ $RC -ne 0 ]]; then pass "upgrade (error path)"; else fail "upgrade" "should fail for nonexistent"; fi
+
 # ================================================================
 section "E. Config & Edit"
 # ================================================================
@@ -138,6 +146,10 @@ if [[ $RC -ne 0 ]]; then pass "status nonexistent (error)"; else fail "status er
 
 run rename nonexistent-$$ newname
 if [[ $RC -ne 0 ]]; then pass "rename nonexistent (error)"; else fail "rename error" "should fail"; fi
+
+# config proxy-test (no proxy = info, not error)
+run config proxy-test
+pass "config proxy-test (ran)"
 
 # ================================================================
 section "F. Cleanup"

@@ -64,6 +64,9 @@ if has_text language; then pass "config show"; else fail "config show" "$OUT"; f
 win_run sandbox list
 if has_text vms; then pass "sandbox list"; else fail "sandbox list" "$OUT"; fi
 
+win_run sandbox info
+if has_type data; then pass "sandbox info"; else fail "sandbox info" "$OUT"; fi
+
 # ================================================================
 section "B. Native Step-by-Step Install"
 # ================================================================
@@ -116,8 +119,14 @@ OUT=$(ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
     "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json exec \"echo hello-win\" $INSTANCE" 2>&1) || RC=$?
 if echo "$OUT" | grep -q "hello-win"; then pass "exec"; else fail "exec" "$OUT"; fi
 
+win_run logs $INSTANCE
+pass "logs (ran)"
+
 win_run update-check $INSTANCE
 if has_text "current\|latest\|error"; then pass "update-check"; else fail "update-check" "$OUT"; fi
+
+win_run upgrade nonexistent-$$
+if [[ $RC -ne 0 ]]; then pass "upgrade (error path)"; else fail "upgrade" "should fail for nonexistent"; fi
 
 # ================================================================
 section "E. Config & Edit"
@@ -131,6 +140,14 @@ ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json config 
 win_run edit $INSTANCE --gateway-port $((PORT+1))
 if [[ $RC -eq 0 ]]; then pass "edit gateway-port"; else fail "edit gateway-port" "$OUT"; fi
 ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json edit $INSTANCE --gateway-port $PORT" 2>/dev/null
+
+# Rename (error path — nonexistent)
+win_run rename nonexistent-$$ newname
+if [[ $RC -ne 0 ]]; then pass "rename nonexistent (error)"; else fail "rename error" "should fail"; fi
+
+# config proxy-test
+win_run config proxy-test
+pass "config proxy-test (ran)"
 
 # Error paths
 win_run status nonexistent-$$

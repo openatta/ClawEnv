@@ -88,6 +88,10 @@ TOTAL=$((TOTAL+1)); RC=0
 OUT=$("$CLI" --json exec "echo sandbox-shell-ok" "$INSTANCE" 2>&1) || RC=$?
 if echo "$OUT" | grep -q "sandbox-shell-ok"; then pass "exec echo"; else fail "exec echo" "$OUT"; fi
 
+# Sandbox info
+run sandbox info
+if has_type data; then pass "sandbox info"; else fail "sandbox info" "$OUT"; fi
+
 # Verify sandbox in list
 run sandbox list
 if has_text "clawenv-$INSTANCE\|$INSTANCE"; then pass "in sandbox list"; else pass "sandbox list (format may vary)"; fi
