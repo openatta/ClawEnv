@@ -63,60 +63,64 @@ pub fn send_notification(app: &AppHandle, title: &str, body: &str) {
         .show();
 }
 
+/// Build a simple tray right-click menu (pure ASCII, no emoji).
+fn build_tray_menu(app: &AppHandle) -> Result<tauri::menu::Menu<tauri::Wry>, Box<dyn std::error::Error>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let menu = Menu::new(app)?;
+
+    let open_item = MenuItem::with_id(app, "open", "Open ClawEnv", true, None::<&str>)?;
+    let sep = PredefinedMenuItem::separator(app)?;
+    let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+
+    menu.append(&open_item)?;
+    menu.append(&sep)?;
+    menu.append(&quit_item)?;
+
+    Ok(menu)
+}
+
 /// Set up system tray.
 ///
-/// Left-click: show main window.
-/// Right-click: show a small popup WebView window near the tray as a menu
-/// (workaround for Windows ARM64 where native tray menus render as 0-width).
+/// Left-click / double-click: show main window.
+/// Right-click: native context menu (Open / Quit).
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
+    let menu = build_tray_menu(app)?;
+
     let _tray = TrayIconBuilder::with_id("clawenv-tray")
-        .tooltip("ClawEnv — Double-click to open")
-        .show_menu_on_left_click(false)
+        .tooltip("ClawEnv")
+        .menu(&menu)
+        .show_menu_on_left_click(false) // right-click shows menu, left-click handled below
+        .on_menu_event(|app, event| {
+            match event.id().as_ref() {
+                "open" => {
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
+                }
+                "quit" => {
+                    app.exit(0);
+                }
+                _ => {}
+            }
+        })
         .on_tray_icon_event(|tray, event| {
-            // Extract position from any event type that has it
-            let position = match &event {
-                TrayIconEvent::Click { position, .. } => Some(*position),
-                TrayIconEvent::DoubleClick { position, .. } => Some(*position),
-                _ => None,
-            };
-            let Some(position) = position else { return };
-            // Handle click or double-click
-            if matches!(event, TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }) {
-                let app = tray.app_handle();
-
-                // If popup exists, close it (toggle)
-                if let Some(popup) = app.get_webview_window("tray-popup") {
-                    let _ = popup.close();
-                    return;
+            // Left-click or double-click: show main window
+            match event {
+                TrayIconEvent::Click {
+                    button: tauri::tray::MouseButton::Left, ..
                 }
-
-                // Create popup window near the tray icon
-                let x = (position.x as f64 - 110.0).max(0.0);
-                let y = (position.y as f64 - 220.0).max(0.0);
-
-                let url = "/index.html?mode=tray-popup";
-                if let Ok(popup) = tauri::webview::WebviewWindowBuilder::new(
-                    app,
-                    "tray-popup",
-                    tauri::WebviewUrl::App(url.into()),
-                )
-                .title("")
-                .inner_size(220.0, 200.0)
-                .position(x, y)
-                .resizable(false)
-                .decorations(false)
-                .always_on_top(true)
-                .skip_taskbar(true)
-                .build()
-                {
-                    // Close popup when it loses focus
-                    let popup_handle = popup.clone();
-                    popup.on_window_event(move |event| {
-                        if let tauri::WindowEvent::Focused(false) = event {
-                            let _ = popup_handle.close();
-                        }
-                    });
+                | TrayIconEvent::DoubleClick { .. } => {
+                    let app = tray.app_handle();
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
                 }
+                _ => {}
             }
         })
         .build(app)?;

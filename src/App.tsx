@@ -107,11 +107,6 @@ export default function App() {
         </div>
       }
     >
-      {/* Tray popup menu */}
-      <Match when={state().type === "tray_popup"}>
-        <TrayPopup />
-      </Match>
-
       {/* Independent install window */}
       <Match when={state().type === "install_window"}>
         {(() => {
