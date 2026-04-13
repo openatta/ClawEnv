@@ -1,3 +1,9 @@
+//! Native 模式——直接在宿主机运行，无沙盒隔离（开发者专用）
+//!
+//! Platform-specific shell execution:
+//!   macOS/Linux: sh -c "..."
+//!   Windows:     powershell -WindowStyle Hidden -Command "..."
+
 use anyhow::Result;
 use async_trait::async_trait;
 use std::path::{Path, PathBuf};
@@ -6,7 +12,6 @@ use tokio::sync::mpsc;
 
 use super::{SandboxBackend, SandboxOpts, ResourceStats};
 
-/// Native 模式——直接在宿主机运行，无沙盒隔离（开发者专用）
 pub struct NativeBackend {
     install_dir: PathBuf,
 }
@@ -20,10 +25,8 @@ impl NativeBackend {
         Self { install_dir }
     }
 
-    /// Create a shell command appropriate for the current OS.
-    /// Windows: powershell -WindowStyle Hidden -Command "..."
-    /// macOS/Linux: sh -c "..."
-    fn shell_cmd(cmd: &str) -> Command {
+    /// Create a platform-appropriate shell command.
+    pub fn shell_cmd(cmd: &str) -> Command {
         #[cfg(target_os = "windows")]
         {
             let mut c = crate::platform::process::silent_cmd("powershell");
@@ -74,7 +77,6 @@ impl SandboxBackend for NativeBackend {
         Ok(())
     }
 
-    // start/stop are no-ops for native mode (no VM/container lifecycle)
     async fn start(&self) -> Result<()> { Ok(()) }
     async fn stop(&self) -> Result<()> { Ok(()) }
 
