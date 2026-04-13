@@ -20,6 +20,22 @@ impl NativeBackend {
         Self { install_dir }
     }
 
+    /// Create a shell command appropriate for the current OS.
+    /// Windows: cmd /c "..."  |  Unix: sh -c "..."
+    fn shell_cmd(cmd: &str) -> Command {
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = Command::new("cmd");
+            c.args(["/c", cmd]);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = Command::new("sh");
+            c.args(["-c", cmd]);
+            c
+        }
+    }
 }
 
 #[async_trait]
@@ -48,9 +64,7 @@ impl SandboxBackend for NativeBackend {
         let registry = crate::claw::ClawRegistry::load();
         let desc = registry.get(&opts.claw_type);
         let install_cmd = desc.npm_install_cmd(&opts.claw_version);
-        // npm_install_cmd returns "npm install -g package@version" — split for Command args
-        let status = Command::new("sh")
-            .args(["-c", &install_cmd])
+        let status = Self::shell_cmd(&install_cmd)
             .status()
             .await?;
         if !status.success() {
@@ -71,8 +85,7 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let out = Command::new("sh")
-            .args(["-c", cmd])
+        let out = Self::shell_cmd(cmd)
             .current_dir(&self.install_dir)
             .output()
             .await?;
@@ -82,8 +95,7 @@ impl SandboxBackend for NativeBackend {
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut child = Command::new("sh")
-            .args(["-c", cmd])
+        let mut child = Self::shell_cmd(cmd)
             .current_dir(&self.install_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
