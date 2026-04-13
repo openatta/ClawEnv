@@ -10,12 +10,17 @@ use anyhow::Result;
 
 /// Create a tokio Command that won't pop a visible console window on Windows.
 /// On non-Windows platforms this is just `tokio::process::Command::new(program)`.
+/// For PowerShell: automatically adds `-ExecutionPolicy Bypass` to avoid
+/// Restricted policy blocking npm/node scripts.
 pub fn silent_cmd(program: &str) -> tokio::process::Command {
     let mut cmd = tokio::process::Command::new(program);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+        if program.to_lowercase().contains("powershell") {
+            cmd.args(["-ExecutionPolicy", "Bypass"]);
+        }
     }
     cmd
 }
