@@ -147,25 +147,34 @@ impl SandboxBackend for WslBackend {
     async fn is_available(&self) -> Result<bool> {
         use crate::platform::process::silent_cmd;
 
-        // First check: wsl.exe exists and responds
-        let result = silent_cmd("wsl").args(["--status"]).output().await;
-        if result.is_err() || !result.as_ref().unwrap().status.success() {
+        // Check both required features using dism (no window flash)
+        let wsl_check = silent_cmd("dism")
+            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux"])
+            .output().await;
+        let wsl_ok = wsl_check.as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
+            .unwrap_or(false);
+
+        if !wsl_ok {
             return Ok(false);
         }
 
-        // Second check: verify the WSL subsystem feature is actually enabled
-        // (wsl --status can return 0 even when the feature is disabled on some builds)
-        let feature_check = silent_cmd("powershell")
-            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State"])
-            .output()
-            .await;
-        match feature_check {
-            Ok(out) => {
-                let state = String::from_utf8_lossy(&out.stdout);
-                Ok(state.trim().contains("Enabled"))
-            }
-            Err(_) => Ok(false),
+        let vm_check = silent_cmd("dism")
+            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform"])
+            .output().await;
+        let vm_ok = vm_check.as_ref()
+            .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
+            .unwrap_or(false);
+
+        if !vm_ok {
+            return Ok(false);
         }
+
+        // Both features enabled — verify wsl.exe responds
+        let wsl_status = silent_cmd("wsl")
+            .args(["--status"])
+            .output().await;
+        Ok(wsl_status.map(|o| o.status.success()).unwrap_or(false))
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
@@ -175,41 +184,60 @@ impl SandboxBackend for WslBackend {
 
         use crate::platform::process::silent_cmd;
 
-        // Check what's missing: WSL feature, VirtualMachinePlatform, or both
-        let wsl_feature = silent_cmd("powershell")
-            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux).State"])
+        // Check what's missing using dism (no window flash, works reliably)
+        let wsl_check = silent_cmd("dism")
+            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux"])
             .output().await;
-        let wsl_enabled = wsl_feature.as_ref()
+        let wsl_enabled = wsl_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
             .unwrap_or(false);
 
-        let vm_feature = silent_cmd("powershell")
-            .args(["-Command", "(Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform).State"])
+        let vm_check = silent_cmd("dism")
+            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform"])
             .output().await;
-        let vm_enabled = vm_feature.as_ref()
+        let vm_enabled = vm_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
             .unwrap_or(false);
 
         tracing::info!("WSL feature: {}, VM platform: {}", wsl_enabled, vm_enabled);
 
         if wsl_enabled && vm_enabled {
-            // Both features enabled but wsl --import might still not work
-            // Try setting default version to 2
+            // Both features enabled — try setting WSL2 as default
             let _ = silent_cmd("wsl")
                 .args(["--set-default-version", "2"])
                 .output().await;
+            // Also try updating the WSL kernel
+            let _ = silent_cmd("wsl")
+                .args(["--update"])
+                .output().await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             if self.is_available().await? {
                 return Ok(());
             }
         }
 
-        // Need to install/enable WSL2 — this requires UAC and shows a terminal (intentional)
+        // Need to enable features — use dism via UAC elevation (shows terminal, intentional)
         tracing::info!("Installing WSL2 (UAC elevation required)...");
 
-        // Use wsl --install --no-distribution which enables both features + installs kernel
+        // Build a PowerShell script that enables both features explicitly
+        let install_script = r#"
+            $ErrorActionPreference = 'Stop'
+            Write-Host 'Enabling Windows Subsystem for Linux...'
+            dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart
+            Write-Host 'Enabling Virtual Machine Platform...'
+            dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart
+            Write-Host 'Installing WSL kernel update...'
+            wsl --update 2>$null
+            Write-Host 'Done. A restart may be required.'
+            Start-Sleep -Seconds 3
+        "#;
+
         // This is the ONLY command that intentionally shows a terminal window
         let status = Command::new("powershell")
-            .args(["-Command", "Start-Process -FilePath 'wsl' -ArgumentList '--install --no-distribution' -Verb RunAs -Wait"])
+            .args(["-Command", &format!(
+                "Start-Process -FilePath 'powershell' -ArgumentList '-ExecutionPolicy Bypass -Command {}' -Verb RunAs -Wait",
+                install_script.replace('\n', "; ").replace('\'', "''")
+            )])
             .status()
             .await;
 
@@ -221,15 +249,10 @@ impl SandboxBackend for WslBackend {
             }
             // Needs restart
             anyhow::bail!(
-                "WSL2 installation has been initiated successfully!\n\
+                "WSL2 installation completed. A system restart is required.\n\
                  \n\
-                 A system restart is required to complete the installation.\n\
-                 \n\
-                 Please:\n\
-                 1. Restart your computer now\n\
-                 2. After restart, open ClawEnv again\n\
-                 \n\
-                 The installation will continue automatically after restart."
+                 Click 'Restart Now' to restart your computer,\n\
+                 then open ClawEnv again after restart."
             );
         } else {
             anyhow::bail!(
@@ -237,11 +260,10 @@ impl SandboxBackend for WslBackend {
                  \n\
                  To install manually:\n\
                  1. Open PowerShell as Administrator\n\
-                 2. Run: wsl --install --no-distribution\n\
-                 3. Restart your computer\n\
-                 4. Open ClawEnv again\n\
-                 \n\
-                 See https://learn.microsoft.com/en-us/windows/wsl/install"
+                 2. Run: dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart\n\
+                 3. Run: dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart\n\
+                 4. Restart your computer\n\
+                 5. Open ClawEnv again"
             );
         }
     }
