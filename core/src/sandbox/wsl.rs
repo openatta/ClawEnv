@@ -149,7 +149,7 @@ impl SandboxBackend for WslBackend {
 
         // Check both required features using dism (no window flash)
         let wsl_check = silent_cmd("dism")
-            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux"])
+            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux", "/English"])
             .output().await;
         let wsl_ok = wsl_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
@@ -160,7 +160,7 @@ impl SandboxBackend for WslBackend {
         }
 
         let vm_check = silent_cmd("dism")
-            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform"])
+            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform", "/English"])
             .output().await;
         let vm_ok = vm_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
@@ -186,14 +186,14 @@ impl SandboxBackend for WslBackend {
 
         // Check what's missing using dism (no window flash, works reliably)
         let wsl_check = silent_cmd("dism")
-            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux"])
+            .args(["/online", "/get-featureinfo", "/featurename:Microsoft-Windows-Subsystem-Linux", "/English"])
             .output().await;
         let wsl_enabled = wsl_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))
             .unwrap_or(false);
 
         let vm_check = silent_cmd("dism")
-            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform"])
+            .args(["/online", "/get-featureinfo", "/featurename:VirtualMachinePlatform", "/English"])
             .output().await;
         let vm_enabled = vm_check.as_ref()
             .map(|o| String::from_utf8_lossy(&o.stdout).contains("Enabled"))

@@ -70,11 +70,18 @@ pub fn send_notification(app: &AppHandle, title: &str, body: &str) {
 /// (workaround for Windows ARM64 where native tray menus render as 0-width).
 pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
     let _tray = TrayIconBuilder::with_id("clawenv-tray")
-        .tooltip("ClawEnv — Click to open menu")
+        .tooltip("ClawEnv — Double-click to open")
         .show_menu_on_left_click(false)
         .on_tray_icon_event(|tray, event| {
-            // Any click (left or right) → toggle popup window
-            if let TrayIconEvent::Click { position, .. } = event {
+            // Extract position from any event type that has it
+            let position = match &event {
+                TrayIconEvent::Click { position, .. } => Some(*position),
+                TrayIconEvent::DoubleClick { position, .. } => Some(*position),
+                _ => None,
+            };
+            let Some(position) = position else { return };
+            // Handle click or double-click
+            if matches!(event, TrayIconEvent::Click { .. } | TrayIconEvent::DoubleClick { .. }) {
                 let app = tray.app_handle();
 
                 // If popup exists, close it (toggle)
