@@ -91,10 +91,22 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if instance.sandbox_type == SandboxType::Native {
-            // Windows native: use Start-Process (no nohup available)
+            // Windows native: launch gateway as background job in PowerShell.
+            // Uses Start-Process with full path resolved via Get-Command.
+            let log_path = dirs::home_dir().unwrap_or_default()
+                .join(format!(".clawenv/native/{}/gateway.log", instance.name));
             backend.exec(&format!(
-                "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
-                desc.cli_binary, desc.gateway_cmd.replace("{port}", &port.to_string())
+                "$bin = (Get-Command {} -ErrorAction SilentlyContinue).Source; \
+                 if (-not $bin) {{ $bin = '{}' }}; \
+                 Start-Process -WindowStyle Hidden -FilePath $bin \
+                 -ArgumentList '{}' \
+                 -RedirectStandardOutput '{}' \
+                 -RedirectStandardError '{}'",
+                desc.cli_binary,
+                desc.cli_binary,
+                desc.gateway_cmd.replace("{port}", &port.to_string()),
+                log_path.display(),
+                log_path.with_extension("err.log").display(),
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux
