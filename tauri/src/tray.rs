@@ -89,7 +89,7 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     let _tray = TrayIconBuilder::with_id("clawenv-tray")
         .tooltip("ClawEnv")
-        .icon(tauri::image::Image::from_bytes(include_bytes!("../icons/32x32.png")).unwrap_or_else(|_| make_circle_icon(34, 197, 94)))
+        .icon(tauri::include_image!("../icons/32x32.png"))
         .menu(&menu)
         .show_menu_on_left_click(false) // right-click shows menu, left-click handled below
         .on_menu_event(|app, event| {
