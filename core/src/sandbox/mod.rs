@@ -50,13 +50,23 @@ pub trait SandboxBackend: Send + Sync {
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String>;
 
     /// 安装系统包（平台抽象：Lima=sudo apk add, WSL2=apk add, Podman=podman exec apk add）
+    /// `packages` comes from trusted TOML descriptors. Validated to prevent injection.
     async fn install_package(&self, packages: &str) -> Result<()> {
+        // Validate: package names must be alphanumeric, hyphens, dots, spaces only
+        if !packages.chars().all(|c| c.is_ascii_alphanumeric() || "-_. ".contains(c)) {
+            anyhow::bail!("Invalid package names: {packages}");
+        }
         self.exec(&format!("sudo apk add --no-cache {packages} 2>&1 || apk add --no-cache {packages} 2>&1")).await?;
         Ok(())
     }
 
     /// 安装 npm 全局包
+    /// `package` comes from trusted TOML descriptors. Validated to prevent injection.
     async fn npm_install_global(&self, package: &str, tx: &mpsc::Sender<String>) -> Result<()> {
+        // Validate: npm package@version must be alphanumeric, hyphens, dots, @, / only
+        if !package.chars().all(|c| c.is_ascii_alphanumeric() || "-_.@/".contains(c)) {
+            anyhow::bail!("Invalid npm package name: {package}");
+        }
         self.exec_with_progress(
             &format!("sudo npm install -g {package} 2>&1 || npm install -g {package} 2>&1"),
             tx,

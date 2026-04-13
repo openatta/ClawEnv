@@ -31,7 +31,7 @@ pub enum CliEvent {
     Progress { stage: String, percent: u8, message: String },
     Info { message: String },
     Complete { message: String },
-    Error { message: String },
+    Error { message: String, #[serde(default)] #[allow(dead_code)] code: Option<String> },
     Data { data: Value },
 }
 
@@ -110,7 +110,7 @@ pub async fn run_cli(args: &[&str]) -> Result<Value> {
                     match event {
                         CliEvent::Data { data } => last_data = Some(data),
                         CliEvent::Complete { message } => last_complete = Some(message),
-                        CliEvent::Error { message } => anyhow::bail!("{}", message),
+                        CliEvent::Error { message, .. } => anyhow::bail!("{}", message),
                         _ => {}
                     }
                 }
@@ -177,7 +177,7 @@ pub async fn run_cli_streaming(
                     match &event {
                         CliEvent::Data { data } => last_data = Some(data.clone()),
                         CliEvent::Complete { message } => last_complete = Some(message.clone()),
-                        CliEvent::Error { message } => last_error = Some(message.clone()),
+                        CliEvent::Error { message, .. } => last_error = Some(message.clone()),
                         _ => {}
                     }
                     let _ = tx.send(event).await;
@@ -193,7 +193,7 @@ pub async fn run_cli_streaming(
                      The operation may be stuck. Check network and try again.",
                     IDLE_TIMEOUT_SECS / 60
                 );
-                let _ = tx.send(CliEvent::Error { message: err_msg.clone() }).await;
+                let _ = tx.send(CliEvent::Error { message: err_msg.clone(), code: Some("operation_stalled".into()) }).await;
                 anyhow::bail!("{}", err_msg);
             }
         }

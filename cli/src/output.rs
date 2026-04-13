@@ -23,6 +23,8 @@ pub enum CliEvent {
     },
     Error {
         message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
     },
     Data {
         data: serde_json::Value,
@@ -62,7 +64,7 @@ impl Output {
             CliEvent::Complete { message } => {
                 eprintln!("✓ {message}");
             }
-            CliEvent::Error { message } => {
+            CliEvent::Error { message, .. } => {
                 eprintln!("✗ {message}");
             }
             CliEvent::Data { data } => {

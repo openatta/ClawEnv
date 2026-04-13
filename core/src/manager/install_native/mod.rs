@@ -195,17 +195,20 @@ pub async fn install_native(
     let port = opts.gateway_port;
     let gateway_cmd = desc.gateway_start_cmd(port);
 
+    // Instance name is validated (alphanumeric + dash + underscore), safe for paths.
+    let name_esc = opts.instance_name.replace('\'', "'\\''");
     #[cfg(not(target_os = "windows"))]
     backend.exec(&format!(
-        "nohup {gateway_cmd} > /tmp/clawenv-gateway-{}.log 2>&1 &",
-        opts.instance_name
+        "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
     )).await?;
     #[cfg(target_os = "windows")]
-    backend.exec(&format!(
-        "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
-        desc.cli_binary,
-        desc.gateway_cmd.replace("{port}", &port.to_string())
-    )).await?;
+    {
+        let args = desc.gateway_cmd.replace("{port}", &port.to_string()).replace('\'', "''");
+        let bin = desc.cli_binary.replace('\'', "''");
+        backend.exec(&format!(
+            "Start-Process -NoNewWindow -FilePath 'cmd.exe' -ArgumentList '/c {bin} {args}'"
+        )).await?;
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     send(tx, &format!("{} gateway started", desc.display_name), 85, InstallStage::StartOpenClaw).await;

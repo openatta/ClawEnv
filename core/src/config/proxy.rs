@@ -45,15 +45,20 @@ pub async fn apply_proxy(backend: &dyn SandboxBackend, proxy: &ProxyConfig) -> R
         &proxy.no_proxy
     };
 
-    // Write /etc/profile.d/proxy.sh — applies to all processes in sandbox
+    // Write /etc/profile.d/proxy.sh — applies to all processes in sandbox.
+    // Escape double quotes in proxy URLs to prevent shell injection.
+    let esc_dq = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let script = format!(
-        r#"export http_proxy="{http_proxy}"
-export https_proxy="{https_proxy}"
-export HTTP_PROXY="{http_proxy}"
-export HTTPS_PROXY="{https_proxy}"
-export no_proxy="{no_proxy}"
-export NO_PROXY="{no_proxy}"
-"#
+        r#"export http_proxy="{}"
+export https_proxy="{}"
+export HTTP_PROXY="{}"
+export HTTPS_PROXY="{}"
+export no_proxy="{}"
+export NO_PROXY="{}"
+"#,
+        esc_dq(&http_proxy), esc_dq(&https_proxy),
+        esc_dq(&http_proxy), esc_dq(&https_proxy),
+        esc_dq(no_proxy), esc_dq(no_proxy),
     );
 
     backend.exec(&format!(

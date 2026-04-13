@@ -97,11 +97,13 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
             // Start-Process -NoNewWindow launches a persistent detached process.
             let log_path = dirs::home_dir().unwrap_or_default()
                 .join(format!(".clawenv/native/{}/gateway.log", instance.name));
-            let args = desc.gateway_cmd.replace("{port}", &port.to_string());
+            // Escape for PowerShell single-quote context
+            let args = desc.gateway_cmd.replace("{port}", &port.to_string()).replace('\'', "''");
+            let bin = desc.cli_binary.replace('\'', "''");
+            let log = log_path.display().to_string().replace('\'', "''");
             backend.exec(&format!(
                 "Start-Process -NoNewWindow -FilePath 'cmd.exe' \
-                 -ArgumentList '/c {} {} > \"{}\" 2>&1' ",
-                desc.cli_binary, args, log_path.display(),
+                 -ArgumentList '/c {bin} {args} > \"{log}\" 2>&1'"
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux

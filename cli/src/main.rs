@@ -135,7 +135,7 @@ enum SandboxCmd {
 enum ConfigCmd {
     /// Show current configuration
     Show,
-    /// Set a configuration value
+    /// Set a configuration value (bridge.permissions requires editing ~/.clawenv/config.toml directly)
     Set {
         key: String,
         value: String,
@@ -176,7 +176,9 @@ async fn main() -> Result<()> {
             std::process::exit(0);
         }
         Err(e) => {
-            out.emit(CliEvent::Error { message: e.to_string() });
+            // Classify error for structured frontend handling
+            let code = classify_error(&e);
+            out.emit(CliEvent::Error { message: e.to_string(), code: Some(code) });
             std::process::exit(1);
         }
     }
@@ -1078,4 +1080,30 @@ async fn run_install_step(
     }
 
     Ok(())
+}
+
+/// Classify an error into a structured error code for frontend consumption.
+fn classify_error(e: &anyhow::Error) -> String {
+    let msg = e.to_string().to_lowercase();
+    if msg.contains("not found") && msg.contains("config") {
+        "config_not_found".into()
+    } else if msg.contains("not found") && msg.contains("instance") {
+        "instance_not_found".into()
+    } else if msg.contains("not found") && msg.contains("file") {
+        "file_not_found".into()
+    } else if msg.contains("stalled") || msg.contains("timed out") || msg.contains("timeout") {
+        "operation_stalled".into()
+    } else if msg.contains("network") || msg.contains("connect") || msg.contains("dns") {
+        "network_error".into()
+    } else if msg.contains("gateway") && msg.contains("failed") {
+        "gateway_failed".into()
+    } else if msg.contains("npm install failed") || msg.contains("install failed") {
+        "install_failed".into()
+    } else if msg.contains("not supported") || msg.contains("not available") {
+        "not_supported".into()
+    } else if msg.contains("unknown") && (msg.contains("key") || msg.contains("step") || msg.contains("claw")) {
+        "invalid_argument".into()
+    } else {
+        "internal".into()
+    }
 }

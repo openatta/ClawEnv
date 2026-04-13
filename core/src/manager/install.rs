@@ -8,6 +8,8 @@ use crate::sandbox::{
     detect_backend, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
 };
 
+/// Escape a string for use inside single-quoted shell arguments.
+/// Use `crate::platform::shell_quote()` for the full-wrapped version.
 pub fn shell_escape(s: &str) -> String {
     s.replace('\'', "'\\''")
 }
@@ -428,7 +430,9 @@ chmod +x /tmp/clawenv-npm.sh"#
         // Check completion
         if !done_val.is_empty() {
             let exit_code: i32 = done_val.parse().unwrap_or(-1);
-            backend.exec("rm -f /tmp/clawenv-npm.sh").await.ok();
+            if let Err(e) = backend.exec("rm -f /tmp/clawenv-npm.sh").await {
+                tracing::debug!("Cleanup rm npm script: {e}");
+            }
             if exit_code != 0 {
                 let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
                 anyhow::bail!("npm install failed (exit {exit_code}):\n{tail}");

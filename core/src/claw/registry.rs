@@ -40,11 +40,12 @@ impl ClawRegistry {
     }
 
     /// Look up a descriptor by claw_type ID.
-    /// Falls back to OpenClaw if the ID is not found.
+    /// Falls back to OpenClaw if the ID is not found, or panics if registry is empty.
     pub fn get(&self, claw_type: &str) -> &ClawDescriptor {
         self.descriptors
             .get(claw_type)
-            .unwrap_or_else(|| self.descriptors.get("openclaw").unwrap())
+            .or_else(|| self.descriptors.get("openclaw"))
+            .expect("ClawRegistry is empty — claw-registry.toml is missing or invalid")
     }
 
     /// Look up a descriptor, returning an error if not found.

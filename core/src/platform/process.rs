@@ -32,32 +32,36 @@ pub fn silent_cmd(program: &str) -> tokio::process::Command {
 /// For sandbox: use `backend.exec(&kill_by_name("openclaw gateway"))`
 /// For host: use `kill_by_name_host("openclaw gateway").await`
 pub fn kill_by_name_cmd(pattern: &str) -> String {
+    // Pattern comes from desc.process_name() (TOML descriptor, trusted).
+    // Still escape to prevent accidental injection if pattern changes.
+    let esc = pattern.replace('\'', "'\\''");
     #[cfg(target_os = "windows")]
     {
-        // taskkill on Windows — /F = force, /IM = image name, /T = tree kill
-        // For pattern matching, use wmic or powershell
+        let ps_esc = pattern.replace('\'', "''");
         format!(
-            "powershell -Command \"Get-Process | Where-Object {{$_.CommandLine -like '*{pattern}*'}} | Stop-Process -Force\" 2>$null; exit 0"
+            "powershell -Command \"Get-Process | Where-Object {{$_.CommandLine -like '*{ps_esc}*'}} | Stop-Process -Force\" 2>$null; exit 0"
         )
     }
     #[cfg(not(target_os = "windows"))]
     {
-        format!("pkill -9 -f '{pattern}' 2>/dev/null || true")
+        format!("pkill -9 -f '{esc}' 2>/dev/null || true")
     }
 }
 
 /// Check if a process matching a pattern is running.
 /// Returns a shell command that echoes "running" or "stopped".
 pub fn check_process_cmd(pattern: &str) -> String {
+    let esc = pattern.replace('\'', "'\\''");
     #[cfg(target_os = "windows")]
     {
+        let ps_esc = pattern.replace('\'', "''");
         format!(
-            "powershell -Command \"if (Get-Process | Where-Object {{$_.CommandLine -like '*{pattern}*'}}) {{ echo 'running' }} else {{ echo 'stopped' }}\""
+            "powershell -Command \"if (Get-Process | Where-Object {{$_.CommandLine -like '*{ps_esc}*'}}) {{ echo 'running' }} else {{ echo 'stopped' }}\""
         )
     }
     #[cfg(not(target_os = "windows"))]
     {
-        format!("pgrep -f '{pattern}' > /dev/null 2>&1 && echo running || echo stopped")
+        format!("pgrep -f '{esc}' > /dev/null 2>&1 && echo running || echo stopped")
     }
 }
 
