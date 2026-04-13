@@ -67,7 +67,7 @@ curl -s http://127.0.0.1:3200/ | head -1    # gateway HTTP 响应
 
 ```bash
 # 前置：生成 bundle
-bash scripts/package-native.sh openclaw latest ./test-bundle
+bash tools/package-native.sh openclaw latest ./test-bundle
 
 # 导入测试
 clawenv install --mode native --name test-bundle \

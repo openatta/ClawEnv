@@ -2,17 +2,17 @@
 # ClawEnv — Package a native (no-sandbox) bundle for offline installation
 #
 # Usage:
-#   bash scripts/package-native.sh [openclaw_version] [output_dir]
+#   bash tools/package-native.sh [openclaw_version] [output_dir]
 #
 # Examples:
-#   bash scripts/package-native.sh latest ./dist-packages
-#   bash scripts/package-native.sh 0.5.2
-#   bash scripts/package-native.sh              # defaults: version=latest, output=./packages
+#   bash tools/package-native.sh latest ./dist-packages
+#   bash tools/package-native.sh 0.5.2
+#   bash tools/package-native.sh              # defaults: version=latest, output=./packages
 #
 # For China / behind a firewall, set mirror env vars:
 #   NODEJS_DIST_MIRROR=https://npmmirror.com/mirrors/node \
 #   NPM_REGISTRY_MIRROR=https://registry.npmmirror.com \
-#   bash scripts/package-native.sh
+#   bash tools/package-native.sh
 #
 # Creates a self-contained bundle containing:
 #   node/          — Node.js runtime

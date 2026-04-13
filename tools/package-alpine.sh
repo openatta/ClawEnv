@@ -2,11 +2,11 @@
 # ClawEnv — Package an Alpine sandbox instance as a distributable image
 #
 # Usage:
-#   bash scripts/package-alpine.sh [instance_name] [output_dir]
+#   bash tools/package-alpine.sh [instance_name] [output_dir]
 #
 # Examples:
-#   bash scripts/package-alpine.sh default ./dist-packages
-#   bash scripts/package-alpine.sh              # defaults: instance=default, output=./packages
+#   bash tools/package-alpine.sh default ./dist-packages
+#   bash tools/package-alpine.sh              # defaults: instance=default, output=./packages
 #
 # This script detects the current platform and exports the sandbox
 # in the appropriate format:
@@ -85,21 +85,31 @@ case "$PLATFORM" in
         OUTFILE="$OUTPUT_DIR/clawenv-${INSTANCE}-${TIMESTAMP}-macos-$(uname -m).tar.gz"
 
         echo "Packaging Lima instance..."
-        # Export essential files: disk image + config
-        tar -czf "$OUTFILE" \
+        # Export essential files: disk + config + EFI (excludes logs, sockets, pids)
+        # Supports both QEMU (diffdisk/basedisk) and VZ (disk, vz-efi) drivers.
+        # GNU tar supports --sparse for efficient packing of VZ sparse disk files.
+        TAR_CMD="tar"
+        TAR_SPARSE=""
+        if command -v gtar &>/dev/null; then
+            TAR_CMD="gtar"
+            TAR_SPARSE="--sparse"
+        fi
+
+        $TAR_CMD $TAR_SPARSE -czf "$OUTFILE" \
             -C "$HOME/.lima" \
-            "$VM_NAME/diffdisk" \
-            "$VM_NAME/basedisk" \
-            "$VM_NAME/lima.yaml" \
-            2>/dev/null || \
-        # Fallback: just the diffdisk
-        tar -czf "$OUTFILE" \
-            -C "$HOME/.lima" \
-            "$VM_NAME/" \
-            --exclude="$VM_NAME/serial*.log" \
             --exclude="$VM_NAME/*.sock" \
             --exclude="$VM_NAME/*.pid" \
-            2>/dev/null
+            --exclude="$VM_NAME/*.log" \
+            --exclude="$VM_NAME/cidata.iso" \
+            --exclude="$VM_NAME/ssh.config" \
+            --exclude="$VM_NAME/cloud-config.yaml" \
+            "$VM_NAME/"
+
+        if [ $? -ne 0 ]; then
+            echo "ERROR: Failed to package Lima instance"
+            echo "TIP: Install GNU tar for better sparse file handling: brew install gnu-tar"
+            exit 1
+        fi
 
         # Restart VM
         echo "Restarting VM..."

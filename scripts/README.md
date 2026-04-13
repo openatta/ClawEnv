@@ -58,10 +58,15 @@ clawenv install --mode sandbox --step config   # Save instance config
 clawenv install --mode sandbox --step gateway  # Start gateway + ttyd
 ```
 
-## Package Scripts
+## Other Scripts
 
 | Script | Purpose |
 |--------|---------|
-| `package-alpine.sh` | Export sandbox VM as distributable tar.gz |
-| `package-native.sh` | Create native offline install bundle |
 | `win-remote.sh` | SSH remote build helper for Windows ARM64 |
+
+## Generation Tools (in `tools/`)
+
+| Tool | Purpose |
+|------|---------|
+| `tools/package-native.sh` | Generate native offline install bundle (Node.js + claw) |
+| `tools/package-alpine.sh` | Export sandbox VM as distributable image |

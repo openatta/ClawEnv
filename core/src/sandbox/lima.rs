@@ -373,12 +373,52 @@ impl SandboxBackend for LimaBackend {
         if !path.exists() {
             anyhow::bail!("Image file not found: {}", path.display());
         }
-        // For Lima, import as a disk image
-        self.limactl(&[
-            "create",
-            "--name", &self.vm_name,
-            &path.to_string_lossy(),
-        ]).await?;
+
+        let lima_base = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
+            .join(".lima");
+        let vm_dir = lima_base.join(&self.vm_name);
+
+        if vm_dir.exists() {
+            anyhow::bail!("Lima instance '{}' already exists at {}", self.vm_name, vm_dir.display());
+        }
+
+        // Extract to a temp directory first to avoid conflicts with existing VMs
+        let tmp_dir = lima_base.join(format!("_import_tmp_{}", std::process::id()));
+        tokio::fs::create_dir_all(&tmp_dir).await?;
+
+        let status = tokio::process::Command::new("tar")
+            .args(["xzf", &path.to_string_lossy(), "-C", &tmp_dir.to_string_lossy()])
+            .status()
+            .await?;
+        if !status.success() {
+            tokio::fs::remove_dir_all(&tmp_dir).await.ok();
+            anyhow::bail!("Failed to extract Lima image from {}", path.display());
+        }
+
+        // Find the extracted directory (should contain lima.yaml)
+        let mut extracted_path = None;
+        let mut entries = tokio::fs::read_dir(&tmp_dir).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path().join("lima.yaml").exists() {
+                extracted_path = Some(entry.path());
+                break;
+            }
+        }
+
+        let src = match extracted_path {
+            Some(p) => p,
+            None => {
+                tokio::fs::remove_dir_all(&tmp_dir).await.ok();
+                anyhow::bail!("Extracted archive does not contain a Lima VM (no lima.yaml found)");
+            }
+        };
+
+        // Move to final location with target vm_name
+        tokio::fs::rename(&src, &vm_dir).await?;
+        tokio::fs::remove_dir_all(&tmp_dir).await.ok();
+
+        // Start the imported VM
         self.limactl(&["start", &self.vm_name]).await?;
         Ok(())
     }

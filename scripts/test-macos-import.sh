@@ -3,7 +3,7 @@
 #
 # Prerequisites:
 #   - An existing sandbox instance (for Lima export test) OR --skip-lima
-#   - scripts/package-native.sh must be available (for bundle test)
+#   - tools/package-native.sh must be available (for bundle test)
 #
 # Usage:
 #   bash scripts/test-macos-import.sh
@@ -46,7 +46,7 @@ else
     BUNDLE_PORT=3500
 
     # Check if package-native.sh exists
-    if [[ ! -f scripts/package-native.sh ]]; then
+    if [[ ! -f tools/package-native.sh ]]; then
         skip "bundle generate (package-native.sh not found)"
         skip "bundle import"
         skip "bundle verify"
@@ -56,7 +56,7 @@ else
         TOTAL=$((TOTAL+1))
         echo "       Generating native bundle (5-10 min)..."
         BUNDLE_RC=0
-        bash scripts/package-native.sh latest "$BUNDLE_DIR" 2>&1 | tail -5 || BUNDLE_RC=$?
+        bash tools/package-native.sh latest "$BUNDLE_DIR" 2>&1 | tail -5 || BUNDLE_RC=$?
         BUNDLE_FILE=$(ls "$BUNDLE_DIR"/clawenv-native-*.tar.gz 2>/dev/null | head -1)
 
         if [[ $BUNDLE_RC -eq 0 ]] && [[ -n "$BUNDLE_FILE" ]]; then

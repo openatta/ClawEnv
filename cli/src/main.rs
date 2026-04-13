@@ -433,7 +433,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             let status = tokio::process::Command::new("bash")
-                .args(["scripts/package-alpine.sh", &name, &output])
+                .args(["tools/package-alpine.sh", &name, &output])
                 .status().await?;
 
             backend.start().await.ok();
@@ -447,6 +447,9 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
         // ====== Import ======
         Commands::Import { file, name } => {
+            use clawenv_core::config::{InstanceConfig, GatewayConfig, ResourceConfig};
+            use clawenv_core::sandbox::SandboxType;
+
             let path = std::path::PathBuf::from(&file);
             if !path.exists() {
                 anyhow::bail!("File not found: {}", path.display());
@@ -454,7 +457,43 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             out.emit(CliEvent::Info { message: format!("Importing '{name}' from {file}...") });
             let backend = clawenv_core::sandbox::detect_backend_for(&name)?;
             backend.import_image(&path).await?;
-            out.emit(CliEvent::Complete { message: format!("Imported. Run 'clawenv start {name}' to start.") });
+
+            // Detect claw version inside the imported VM
+            let claw_reg = clawenv_core::claw::ClawRegistry::load();
+            let mut claw_type = "openclaw".to_string();
+            let mut claw_version = String::new();
+            for desc in claw_reg.list_all() {
+                if let Ok(ver) = backend.exec(&desc.version_check_cmd()).await {
+                    if !ver.trim().is_empty() && ver.trim() != "unknown" {
+                        claw_type = desc.id.clone();
+                        claw_version = ver.trim().to_string();
+                        break;
+                    }
+                }
+            }
+
+            // Save instance config
+            let mut config = ConfigManager::load()
+                .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+            let sandbox_type = SandboxType::from_os();
+            config.config_mut().instances.retain(|i| i.name != name);
+            config.config_mut().instances.push(InstanceConfig {
+                name: name.clone(),
+                claw_type,
+                version: claw_version,
+                sandbox_type,
+                sandbox_id: format!("clawenv-{name}"),
+                created_at: chrono::Utc::now().to_rfc3339(),
+                last_upgraded_at: String::new(),
+                gateway: GatewayConfig { gateway_port: 3000, ttyd_port: 7681, webchat_enabled: true, channels: Default::default() },
+                resources: ResourceConfig::default(),
+                browser: Default::default(),
+                cached_latest_version: String::new(),
+                cached_version_check_at: String::new(),
+            });
+            config.save()?;
+
+            out.emit(CliEvent::Complete { message: format!("Imported '{name}'. Use 'clawenv start {name}' to start.") });
         }
 
         // ====== Doctor ======
