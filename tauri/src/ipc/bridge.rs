@@ -1,7 +1,10 @@
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 
-/// Read the gateway auth token from inside the sandbox
+/// Read the gateway auth token from inside the sandbox.
+///
+/// Tries multiple paths (home dir may vary between users) and uses
+/// Node.js JSON parsing instead of fragile grep/sed.
 #[tauri::command]
 pub async fn get_gateway_token(name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
@@ -9,11 +12,28 @@ pub async fn get_gateway_token(name: String) -> Result<String, String> {
     let registry = clawenv_core::claw::ClawRegistry::load();
     let desc = registry.get(&inst.claw_type);
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let result = backend.exec(&format!(
-        "cat ~/.{id}/{id}.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'",
+
+    // Use node to reliably parse JSON; try ~ first, then /home/*/
+    let script = format!(
+        r#"node -e "
+const fs = require('fs'), path = require('path'), id = '{id}';
+const candidates = [
+  path.join(process.env.HOME || '~', '.'+id, id+'.json'),
+  ...require('fs').readdirSync('/home').map(u => '/home/'+u+'/.'+id+'/'+id+'.json').filter(fs.existsSync)
+];
+for (const f of candidates) {{
+  try {{ const j = JSON.parse(fs.readFileSync(f,'utf8')); if (j.token) {{ process.stdout.write(j.token); process.exit(0); }} }} catch {{}}
+}}
+""#,
         id = desc.id
-    )).await.map_err(|e| e.to_string())?;
-    Ok(result.trim().to_string())
+    );
+
+    let result = backend.exec(&script).await.unwrap_or_default();
+    let token = result.trim().to_string();
+    if token.is_empty() {
+        return Err(format!("No gateway token found for '{name}'. Is the instance running?"));
+    }
+    Ok(token)
 }
 
 /// Get bridge server configuration — direct core (lightweight config read)

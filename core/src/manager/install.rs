@@ -294,7 +294,7 @@ pub async fn install(
 
         let bridge_url = format!("http://{host_ip}:3100");
         let token = backend.exec(
-            &format!("cat ~/.{id}/{id}.json 2>/dev/null | grep -o '\"token\":[ ]*\"[^\"]*\"' | head -1 | sed 's/.*\"\\([^\"]*\\)\"/\\1/'",
+            &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write(j.token||'') }} catch {{}}"#,
                 id = desc.id)
         ).await.unwrap_or_default();
         let token = token.trim();

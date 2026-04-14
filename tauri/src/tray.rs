@@ -11,38 +11,8 @@ pub enum TrayStatus {
     Error,
 }
 
-/// Generate a simple 16x16 RGBA solid-color circle icon
-fn make_circle_icon(r: u8, g: u8, b: u8) -> tauri::image::Image<'static> {
-    let (w, h) = (16u32, 16u32);
-    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
-    let (cx, cy) = (w as f32 / 2.0, h as f32 / 2.0);
-    let radius = cx - 1.5;
-    for y in 0..h {
-        for x in 0..w {
-            let dx = x as f32 - cx;
-            let dy = y as f32 - cy;
-            if dx * dx + dy * dy <= radius * radius {
-                rgba.extend_from_slice(&[r, g, b, 255]);
-            } else {
-                rgba.extend_from_slice(&[0, 0, 0, 0]);
-            }
-        }
-    }
-    tauri::image::Image::new_owned(rgba, w, h)
-}
-
-/// Update the tray icon based on status
+/// Update the tray tooltip based on status (icon always stays as the Logo)
 pub fn set_tray_status(app: &AppHandle, status: TrayStatus) {
-    let icon = match status {
-        TrayStatus::Running => make_circle_icon(34, 197, 94),   // green
-        TrayStatus::Stopped => make_circle_icon(156, 163, 175), // gray
-        TrayStatus::Error => make_circle_icon(239, 68, 68),     // red
-    };
-
-    if let Some(tray) = app.tray_by_id("clawenv-tray") {
-        let _ = tray.set_icon(Some(icon));
-    }
-
     let tooltip = match status {
         TrayStatus::Running => "ClawEnv — Running",
         TrayStatus::Stopped => "ClawEnv — Stopped",
