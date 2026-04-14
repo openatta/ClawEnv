@@ -18,13 +18,12 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
     let version = "v22.16.0";
     let url = format!("{nodejs_dist_base}/{version}/node-{version}-win-{arch}.zip");
 
-    // Install to ~/.clawenv/node/ (no admin needed, self-contained)
     let node_dir = clawenv_node_dir();
-    tokio::fs::create_dir_all(&node_dir).await?;
+    let parent = node_dir.parent().unwrap_or(&node_dir).to_path_buf();
+    let zip_path = parent.join("node.zip");
+    let tmp_dir = parent.join("node-tmp");
 
-    let zip_path = node_dir.parent().unwrap_or(&node_dir).join("node.zip");
-
-    // Download using curl.exe (built into Windows 11)
+    // Download using curl.exe (built into Windows 10+)
     let status = crate::platform::process::silent_cmd("curl.exe")
         .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
         .status()
@@ -35,44 +34,64 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
 
     send(tx, "Extracting Node.js (this may take a moment)...", 18, InstallStage::EnsurePrerequisites).await;
 
-    // Extract zip using PowerShell:
-    // 1. Clean node dir first to avoid merge conflicts
-    // 2. Expand-Archive to a temp dir
-    // 3. Move contents from nested node-vX.Y.Z-win-arch/ up to node dir
-    let temp_dir = node_dir.parent().unwrap_or(&node_dir).join("node-extract-tmp");
-    let extract_cmd = format!(
+    // Clean previous installs
+    let cleanup_cmd = format!(
         "Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
-         Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
-         Expand-Archive -Path '{}' -DestinationPath '{}' -Force; \
-         $d = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
-         if ($d) {{ Move-Item -Path $d.FullName -Destination '{}' -Force }} \
-         else {{ Move-Item -Path '{}' -Destination '{}' -Force }}; \
          Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue",
-        node_dir.to_string_lossy(),         // clean old node dir
-        temp_dir.to_string_lossy(),         // clean temp dir
-        zip_path.to_string_lossy(),         // source zip
-        temp_dir.to_string_lossy(),         // extract to temp
-        temp_dir.to_string_lossy(),         // find nested dir
-        node_dir.to_string_lossy(),         // move nested → node dir
-        temp_dir.to_string_lossy(),         // fallback: move temp → node dir
         node_dir.to_string_lossy(),
-        temp_dir.to_string_lossy(),         // cleanup temp
+        tmp_dir.to_string_lossy(),
+    );
+    crate::platform::process::silent_cmd("powershell")
+        .args(["-Command", &cleanup_cmd])
+        .status().await.ok();
+
+    // Extract to temp dir
+    let extract_cmd = format!(
+        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+        zip_path.to_string_lossy(),
+        tmp_dir.to_string_lossy(),
     );
     let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &extract_cmd])
         .status()
         .await?;
-
-    // Cleanup zip
-    tokio::fs::remove_file(&zip_path).await.ok();
-
     if !status.success() {
-        anyhow::bail!("Failed to extract Node.js");
+        anyhow::bail!("Failed to extract Node.js zip");
+    }
+
+    // Move the nested directory (e.g. node-v22.16.0-win-arm64/) to final location
+    // The zip contains exactly one top-level directory
+    let move_cmd = format!(
+        "$src = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
+         if ($src) {{ \
+           Move-Item -Path $src.FullName -Destination '{}' -Force \
+         }} else {{ \
+           Move-Item -Path '{}' -Destination '{}' -Force \
+         }}",
+        tmp_dir.to_string_lossy(),
+        node_dir.to_string_lossy(),
+        tmp_dir.to_string_lossy(),
+        node_dir.to_string_lossy(),
+    );
+    let status = crate::platform::process::silent_cmd("powershell")
+        .args(["-Command", &move_cmd])
+        .status()
+        .await?;
+    if !status.success() {
+        anyhow::bail!("Failed to move Node.js files");
+    }
+
+    // Cleanup
+    tokio::fs::remove_file(&zip_path).await.ok();
+    tokio::fs::remove_dir_all(&tmp_dir).await.ok();
+
+    // Verify npm.cmd exists
+    let npm_cmd = node_dir.join("npm.cmd");
+    if !npm_cmd.exists() {
+        anyhow::bail!("Node.js extraction incomplete: npm.cmd not found in {}", node_dir.display());
     }
 
     send(tx, "Node.js installed to ~/.clawenv/node", 22, InstallStage::EnsurePrerequisites).await;
-
-    // Add to PATH for this process
     ensure_node_in_path();
 
     Ok(())

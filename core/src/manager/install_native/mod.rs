@@ -101,12 +101,11 @@ pub async fn install_native(
     config: &mut ConfigManager,
     tx: &mpsc::Sender<InstallProgress>,
 ) -> Result<()> {
-    let dir_id = super::install::generate_dir_id(&opts.instance_name);
+    // Native: single instance, fixed directory
     let install_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
         .join(".clawenv")
-        .join("native")
-        .join(&dir_id);
+        .join("native");
     tokio::fs::create_dir_all(&install_dir).await?;
 
     // Dispatch: Bundle vs Online
@@ -216,7 +215,7 @@ pub async fn install_native(
         claw_type: opts.claw_type.clone(),
         version: claw_version.trim().to_string(),
         sandbox_type: SandboxType::Native,
-        sandbox_id: format!("native-{}", dir_id),
+        sandbox_id: "native".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
         gateway: GatewayConfig {
@@ -350,7 +349,7 @@ async fn install_from_bundle(
         claw_type: opts.claw_type.clone(),
         version: oc_version,
         sandbox_type: SandboxType::Native,
-        sandbox_id: format!("native-{}", super::install::generate_dir_id(&opts.instance_name)),
+        sandbox_id: "native".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
         gateway: GatewayConfig { gateway_port: opts.gateway_port, ttyd_port: 0, bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2), webchat_enabled: true, channels: Default::default() },

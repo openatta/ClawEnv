@@ -17,20 +17,59 @@ pub struct NativeBackend {
 }
 
 impl NativeBackend {
-    pub fn new(instance_name: &str) -> Self {
+    /// Create backend. `_dir_hint` is ignored — native always uses ~/.clawenv/native/.
+    pub fn new(_dir_hint: &str) -> Self {
         let install_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".clawenv").join("native")
-            .join(instance_name);
+            .join(".clawenv").join("native");
         Self { install_dir }
     }
 
-    /// Create a platform-appropriate shell command.
+    /// Build PATH with ClawEnv's own Node.js + instance bin dir prepended.
+    fn clawenv_path(&self) -> String {
+        let home = dirs::home_dir().unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        let node_bin = home.join(".clawenv").join("node");
+        #[cfg(not(target_os = "windows"))]
+        let node_bin = home.join(".clawenv").join("node").join("bin");
+
+        #[cfg(target_os = "windows")]
+        let inst_bin = self.install_dir.clone();
+        #[cfg(not(target_os = "windows"))]
+        let inst_bin = self.install_dir.join("bin");
+
+        let current = std::env::var("PATH").unwrap_or_default();
+        #[cfg(target_os = "windows")]
+        { format!("{};{};{}", node_bin.display(), inst_bin.display(), current) }
+        #[cfg(not(target_os = "windows"))]
+        { format!("{}:{}:{}", node_bin.display(), inst_bin.display(), current) }
+    }
+
+    /// Create a platform-appropriate shell command with ClawEnv node in PATH.
+    pub fn shell_cmd_with_path(&self, cmd: &str) -> Command {
+        let path = self.clawenv_path();
+        #[cfg(target_os = "windows")]
+        {
+            let mut c = crate::platform::process::silent_cmd("powershell");
+            // Inject PATH before running the command
+            let full = format!("$env:PATH = '{}'; {}", path.replace('\'', "''"), cmd);
+            c.args(["-Command", &full]);
+            c
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            let mut c = Command::new("sh");
+            c.args(["-c", &format!("export PATH='{}'; {}", path, cmd)]);
+            c
+        }
+    }
+
+    /// Legacy static method for compatibility (does NOT inject PATH).
     pub fn shell_cmd(cmd: &str) -> Command {
         #[cfg(target_os = "windows")]
         {
             let mut c = crate::platform::process::silent_cmd("powershell");
-            c.args(["-WindowStyle", "Hidden", "-Command", cmd]);
+            c.args(["-Command", cmd]);
             c
         }
         #[cfg(not(target_os = "windows"))]
@@ -88,7 +127,7 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let out = Self::shell_cmd(cmd)
+        let out = self.shell_cmd_with_path(cmd)
             .current_dir(&self.install_dir)
             .output()
             .await?;
@@ -98,7 +137,7 @@ impl SandboxBackend for NativeBackend {
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut child = Self::shell_cmd(cmd)
+        let mut child = self.shell_cmd_with_path(cmd)
             .current_dir(&self.install_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())

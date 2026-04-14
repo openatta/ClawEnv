@@ -17,9 +17,8 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
         SandboxType::Wsl2Alpine => Ok(Box::new(WslBackend::new_with_distro_name(id))),
         SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(id, instance.gateway.gateway_port))),
         SandboxType::Native => {
-            // For native, sandbox_id is "native-{dir_id}", extract dir_id
-            let dir_name = id.strip_prefix("native-").unwrap_or(id);
-            Ok(Box::new(native_backend(dir_name)))
+            // Native: single instance, fixed directory ~/.clawenv/native/
+            Ok(Box::new(native_backend("native")))
         }
     }
 }
@@ -28,27 +27,8 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     // For native mode, ensure Node.js and claw binaries are in PATH
     if instance.sandbox_type == SandboxType::Native {
+        // Ensure ClawEnv's own Node.js is in PATH (also done inside NativeBackend::exec)
         crate::manager::install_native::ensure_node_in_path();
-        // Add instance's bin/ to PATH for claw CLI binaries (npm --prefix layout)
-        // Use sandbox_id for directory (ASCII-safe)
-        let dir_name = instance.sandbox_id.strip_prefix("native-").unwrap_or(&instance.sandbox_id);
-        let base = dirs::home_dir()
-            .unwrap_or_default()
-            .join(".clawenv").join("native")
-            .join(dir_name);
-        let current = std::env::var("PATH").unwrap_or_default();
-        // npm --prefix puts bins in {prefix}/bin (Unix) or {prefix} (Windows)
-        #[cfg(target_os = "windows")]
-        let bin_dir = base.clone();
-        #[cfg(not(target_os = "windows"))]
-        let bin_dir = base.join("bin");
-        let bin_str = bin_dir.to_string_lossy();
-        if !current.contains(bin_str.as_ref()) {
-            #[cfg(target_os = "windows")]
-            std::env::set_var("PATH", format!("{};{current}", bin_dir.display()));
-            #[cfg(not(target_os = "windows"))]
-            std::env::set_var("PATH", format!("{}:{current}", bin_dir.display()));
-        }
     }
 
     let backend = backend_for_instance(instance)?;
@@ -142,16 +122,14 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     {
         if instance.sandbox_type == SandboxType::Native {
             // Windows native: launch gateway as a hidden detached process via cmd.exe.
-            let native_dir = instance.sandbox_id.strip_prefix("native-").unwrap_or(&instance.sandbox_id);
+            // NativeBackend::exec already injects ClawEnv node PATH.
             let log_path = dirs::home_dir().unwrap_or_default()
-                .join(".clawenv").join("native").join(native_dir).join("gateway.log");
+                .join(".clawenv").join("native").join("gateway.log");
             let log = log_path.display().to_string().replace('\'', "''");
-            let current_path = std::env::var("PATH").unwrap_or_default().replace('\'', "''");
             let full_cmd = format!("{} > \"{}\" 2>&1",
                 gateway_cmd.replace('\'', "''"), log);
             backend.exec(&format!(
-                "$env:PATH = '{current_path}'; \
-                 Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
+                "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
                  -ArgumentList '/c {full_cmd}'"
             )).await?;
         } else {
