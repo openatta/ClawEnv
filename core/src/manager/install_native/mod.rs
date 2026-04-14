@@ -227,6 +227,7 @@ pub async fn install_native(
         gateway: GatewayConfig {
             gateway_port: opts.gateway_port,
             ttyd_port: 0,
+            bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2),
             webchat_enabled: true,
             channels: Default::default(),
         },
@@ -353,7 +354,7 @@ async fn install_from_bundle(
         sandbox_id: format!("native-{}", opts.instance_name),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
-        gateway: GatewayConfig { gateway_port: opts.gateway_port, ttyd_port: 0, webchat_enabled: true, channels: Default::default() },
+        gateway: GatewayConfig { gateway_port: opts.gateway_port, ttyd_port: 0, bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2), webchat_enabled: true, channels: Default::default() },
         resources: ResourceConfig::default(),
         browser: Default::default(),
         cached_latest_version: String::new(),

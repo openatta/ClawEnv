@@ -28,10 +28,12 @@ containerd:
 # Port forwarding: expose guest services to host localhost via Lima SSH tunnel.
 # This is the reliable way for host (xterm.js, browser) to reach guest services.
 portForwards:
-- guestPort: {TTYD_PORT}
-  hostPort: {TTYD_PORT}
 - guestPort: {GATEWAY_PORT}
   hostPort: {GATEWAY_PORT}
+- guestPort: {TTYD_PORT}
+  hostPort: {TTYD_PORT}
+- guestPort: {BRIDGE_PORT}
+  hostPort: {BRIDGE_PORT}
 
 provision:
 - mode: system

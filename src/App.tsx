@@ -1,7 +1,7 @@
-import { createSignal, onMount, For, Switch, Match } from "solid-js";
+import { createSignal, onMount, onCleanup, Show, For, Switch, Match } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import MainLayout from "./layouts/MainLayout";
 import InstallWizard from "./pages/Install";
 import UpgradePrompt from "./components/UpgradePrompt";
@@ -67,6 +67,24 @@ type LaunchState =
 
 export default function App() {
   const [state, setState] = createSignal<LaunchState>({ type: "loading" });
+  const [showQuitDialog, setShowQuitDialog] = createSignal(false);
+  const [runningCount, setRunningCount] = createSignal(0);
+
+  // Listen for quit-requested from tray
+  onMount(async () => {
+    const unlisten = await listen("quit-requested", async () => {
+      try {
+        const instances = await invoke<Instance[]>("list_instances");
+        setRunningCount(instances.length);
+      } catch { setRunningCount(0); }
+      if (runningCount() > 0) {
+        setShowQuitDialog(true);
+      } else {
+        invoke("exit_app");
+      }
+    });
+    onCleanup(() => unlisten());
+  });
 
   onMount(async () => {
     // Check URL params — install window passes ?mode=install&name=xxx
@@ -96,7 +114,7 @@ export default function App() {
     }
   });
 
-  return (
+  return (<>
     <Switch
       fallback={
         <div class="flex h-screen items-center justify-center bg-gray-900 text-white">
@@ -164,5 +182,24 @@ export default function App() {
         })()}
       </Match>
     </Switch>
+
+    {/* Quit confirmation dialog */}
+    <Show when={showQuitDialog()}>
+      <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-80 shadow-2xl text-white">
+          <h3 class="text-base font-bold mb-2">Quit ClawEnv</h3>
+          <p class="text-sm text-gray-300 mb-4">
+            {runningCount()} instance(s) still running. They will continue running in the background.
+          </p>
+          <div class="flex gap-2 justify-end">
+            <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
+              onClick={() => setShowQuitDialog(false)}>Cancel</button>
+            <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+              onClick={() => invoke("exit_app")}>Quit</button>
+          </div>
+        </div>
+      </div>
+    </Show>
+    </>
   );
 }

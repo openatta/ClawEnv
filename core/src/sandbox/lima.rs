@@ -228,7 +228,8 @@ impl SandboxBackend for LimaBackend {
                 let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                 let workspace_dir = format!("{}/.clawenv/workspaces/{}", home, opts.instance_name);
                 let gateway_port = opts.gateway_port;
-                let ttyd_port = gateway_port + 4681;
+                let ttyd_port = crate::manager::install::allocate_port(gateway_port, 1);
+                let bridge_port = crate::manager::install::allocate_port(gateway_port, 2);
 
                 // {MIRRORS_SCRIPT} is bundled into proxy_script by the installer,
                 // but for standalone template use, replace with empty.
@@ -236,6 +237,7 @@ impl SandboxBackend for LimaBackend {
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
                     .replace("{GATEWAY_PORT}", &gateway_port.to_string())
                     .replace("{TTYD_PORT}", &ttyd_port.to_string())
+                    .replace("{BRIDGE_PORT}", &bridge_port.to_string())
                     .replace("{PROXY_SCRIPT}", &opts.proxy_script)
                     .replace("{MIRRORS_SCRIPT}", "");
 

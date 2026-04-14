@@ -112,6 +112,9 @@ pub struct GatewayConfig {
     pub gateway_port: u16,
     #[serde(default = "default_ttyd_port")]
     pub ttyd_port: u16,
+    /// Per-instance MCP bridge port (gateway_port + 2)
+    #[serde(default)]
+    pub bridge_port: u16,
     #[serde(default)]
     pub webchat_enabled: bool,
     #[serde(default)]
@@ -179,7 +182,7 @@ fn default_keychain_backend() -> String { "system".into() }
 fn default_no_proxy() -> String { "localhost,127.0.0.1".into() }
 fn default_claw_type() -> String { "openclaw".into() }
 fn default_gateway_port() -> u16 { 3000 }
-fn default_ttyd_port() -> u16 { 7681 }
+fn default_ttyd_port() -> u16 { 3001 }
 
 impl Default for UpdateConfig {
     fn default() -> Self {
@@ -311,6 +314,7 @@ impl Default for GatewayConfig {
         Self {
             gateway_port: 3000,
             ttyd_port: default_ttyd_port(),
+            bridge_port: 3002,
             webchat_enabled: false,
             channels: ChannelsConfig::default(),
         }

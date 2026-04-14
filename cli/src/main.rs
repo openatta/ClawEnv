@@ -363,7 +363,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let cmd = if follow {
                 format!("{} logs -f", desc.cli_binary)
             } else {
-                format!("{} logs --lines 100", desc.cli_binary)
+                format!("cat /tmp/clawenv-gateway.log 2>/dev/null | tail -200")
             };
             let output = backend.exec(&cmd).await?;
             // Logs are raw text, not JSON events
@@ -492,7 +492,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 sandbox_id: format!("clawenv-{name}"),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_upgraded_at: String::new(),
-                gateway: GatewayConfig { gateway_port: 3000, ttyd_port: 7681, webchat_enabled: true, channels: Default::default() },
+                gateway: GatewayConfig { gateway_port: 3000, ttyd_port: 3001, bridge_port: 3002, webchat_enabled: true, channels: Default::default() },
                 resources: ResourceConfig::default(),
                 browser: Default::default(),
                 cached_latest_version: String::new(),
@@ -1164,6 +1164,7 @@ async fn run_install_step(
                 gateway: GatewayConfig {
                     gateway_port: port,
                     ttyd_port,
+                    bridge_port: clawenv_core::manager::install::allocate_port(port, 2),
                     webchat_enabled: true,
                     channels: Default::default(),
                 },

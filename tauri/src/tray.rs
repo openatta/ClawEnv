@@ -1,6 +1,6 @@
 use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 /// Tray icon status
@@ -72,7 +72,13 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
                     }
                 }
                 "quit" => {
-                    app.exit(0);
+                    // Show main window and emit quit-request for frontend confirmation
+                    if let Some(win) = app.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.unminimize();
+                        let _ = win.set_focus();
+                    }
+                    let _ = app.emit("quit-requested", ());
                 }
                 _ => {}
             }

@@ -27,7 +27,13 @@ pub fn validate_port_available(config: &ConfigManager, instance_name: &str, port
     Ok(())
 }
 
+/// Check if a port is available (not bound by any process on localhost).
+fn is_port_free(port: u16) -> bool {
+    std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+}
+
 /// Find the next available gateway port starting from `base_port`, step 20.
+/// Each instance reserves a 20-port block: base+0 gateway, +1 ttyd, +2 bridge, +3 cdp, +4 vnc.
 pub fn next_available_port(config: &ConfigManager, base_port: u16) -> u16 {
     let used: std::collections::HashSet<u16> = config.instances().iter()
         .map(|i| i.gateway.gateway_port)
@@ -38,6 +44,20 @@ pub fn next_available_port(config: &ConfigManager, base_port: u16) -> u16 {
         if port > 60000 { break; }
     }
     port
+}
+
+/// Allocate a specific sub-port within an instance's block.
+/// Tries `base + offset` first; if occupied by another process, increments until free.
+/// Stays within the 20-port block (base..base+19).
+pub fn allocate_port(base: u16, offset: u16) -> u16 {
+    let mut port = base + offset;
+    let limit = base + 19;
+    while port <= limit {
+        if is_port_free(port) { return port; }
+        port += 1;
+    }
+    // Fallback: return the original offset port even if occupied
+    base + offset
 }
 
 pub fn validate_instance_name(name: &str) -> Result<()> {
@@ -339,7 +359,7 @@ pub async fn install(
 
     // Start services
     send(&tx, "Starting services...", 88, InstallStage::StartOpenClaw).await;
-    let ttyd_port = opts.gateway_port + 4681;
+    let ttyd_port = allocate_port(opts.gateway_port, 1);
     backend.exec(&format!(
         "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
     )).await?;
@@ -375,6 +395,7 @@ pub async fn install(
         gateway: GatewayConfig {
             gateway_port: opts.gateway_port,
             ttyd_port,
+            bridge_port: allocate_port(opts.gateway_port, 2),
             webchat_enabled: true,
             channels: Default::default(),
         },
