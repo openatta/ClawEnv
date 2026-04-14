@@ -1,7 +1,8 @@
-import { createSignal, onMount, For, Show } from "solid-js";
+import { createSignal, onMount, onCleanup, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import SandboxTerminal from "../components/Terminal";
+import NoVncPanel from "../components/NoVncPanel";
 
 type SandboxVm = {
   name: string;
@@ -27,6 +28,43 @@ export default function SandboxPage() {
   const [chromiumLogs, setChromiumLogs] = createSignal<string[]>([]);
   const [chromiumDone, setChromiumDone] = createSignal(false);
   let chromiumLogRef: HTMLDivElement | undefined;
+
+  // HIL (Human-in-the-Loop) noVNC state
+  const [hilInstance, setHilInstance] = createSignal<string | null>(null);
+  const [hilUrl, setHilUrl] = createSignal("");
+  const [browserLoading, setBrowserLoading] = createSignal("");
+
+  // Listen for HIL events from backend monitor
+  onMount(async () => {
+    const unlisten = await listen<{ instance: string; novnc_url: string }>("hil-required", (ev) => {
+      setHilInstance(ev.payload.instance);
+      setHilUrl(ev.payload.novnc_url);
+    });
+    onCleanup(() => unlisten());
+  });
+
+  async function startBrowserInteractive(instanceName: string) {
+    setBrowserLoading(instanceName);
+    try {
+      const url = await invoke<string>("browser_start_interactive", { name: instanceName });
+      setHilInstance(instanceName);
+      setHilUrl(url);
+    } catch (e) {
+      alert(`Failed to start browser: ${e}`);
+    } finally {
+      setBrowserLoading("");
+    }
+  }
+
+  async function resumeHeadless() {
+    const name = hilInstance();
+    if (!name) return;
+    try {
+      await invoke("browser_resume_headless", { name });
+    } catch { /* ignore */ }
+    setHilInstance(null);
+    setHilUrl("");
+  }
 
   async function handleChromium(instanceName: string) {
     setChromiumFor(instanceName);
@@ -113,7 +151,7 @@ export default function SandboxPage() {
             <For each={managed()} fallback={
               <div class="text-gray-500 text-sm">No managed sandbox instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} browserLoading={browserLoading()} />}
             </For>
           </div>
         </section>
@@ -126,7 +164,7 @@ export default function SandboxPage() {
             <For each={external()} fallback={
               <div class="text-gray-500 text-sm">No external instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} browserLoading={browserLoading()} />}
             </For>
           </div>
         </section>
@@ -174,6 +212,16 @@ export default function SandboxPage() {
           </div>
         </div>
       </Show>
+
+      {/* noVNC HIL Panel */}
+      <Show when={hilInstance()}>
+        <div class="fixed inset-0 z-50 flex flex-col">
+          <NoVncPanel
+            novncUrl={hilUrl()}
+            onClose={resumeHeadless}
+          />
+        </div>
+      </Show>
     </div>
   );
 }
@@ -183,6 +231,8 @@ function VmCard(props: {
   onRefresh: () => void;
   onTerminal: (info: { name: string; ttydPort?: number }) => void;
   onChromium: (name: string) => void;
+  onBrowser: (name: string) => void;
+  browserLoading: string;
 }) {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
@@ -292,6 +342,13 @@ function VmCard(props: {
             onClick={() => { if (!chromiumInstalled()) props.onChromium(instanceName()); }}>
             {chromiumInstalled() ? "Chromium installed" : "Install Chromium"}
           </button>
+          <Show when={chromiumInstalled()}>
+            <button class="px-2 py-0.5 text-xs bg-orange-700 hover:bg-orange-600 rounded"
+              disabled={!!props.browserLoading}
+              onClick={() => props.onBrowser(instanceName())}>
+              {props.browserLoading === instanceName() ? "Starting..." : "Browser HIL"}
+            </button>
+          </Show>
         </Show>
 
         {/* Configure (managed only) */}

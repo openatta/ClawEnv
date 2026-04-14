@@ -1,8 +1,11 @@
 use clawenv_core::api::SandboxListResponse;
+use clawenv_core::browser::chromium::ChromiumBackend;
+use clawenv_core::browser::BrowserBackend;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 #[cfg(target_os = "windows")]
 use clawenv_core::platform::process::silent_cmd;
+use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::cli_bridge;
@@ -183,4 +186,40 @@ pub async fn install_chromium(
             Err(e.to_string())
         }
     }
+}
+
+/// Get browser status for a sandbox instance
+#[tauri::command]
+pub async fn browser_status(name: String) -> Result<serde_json::Value, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
+    let browser = ChromiumBackend::new(backend_arc);
+    let status = browser.status().await.map_err(|e| e.to_string())?;
+    serde_json::to_value(&status).map_err(|e| e.to_string())
+}
+
+/// Start browser in interactive (noVNC) mode for human intervention
+#[tauri::command]
+pub async fn browser_start_interactive(name: String) -> Result<String, String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let vnc_port = inst.browser.vnc_ws_port;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
+    let browser = ChromiumBackend::new(backend_arc);
+    let url = browser.start_interactive(vnc_port).await.map_err(|e| e.to_string())?;
+    Ok(url)
+}
+
+/// Resume headless mode after human intervention
+#[tauri::command]
+pub async fn browser_resume_headless(name: String) -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
+    let browser = ChromiumBackend::new(backend_arc);
+    browser.resume_headless().await.map_err(|e| e.to_string())
 }

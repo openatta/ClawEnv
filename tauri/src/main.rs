@@ -5,6 +5,7 @@ mod cli_bridge;
 mod tray;
 mod ipc;
 
+use clawenv_core::browser::BrowserBackend;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::launcher;
 use tauri::{Emitter, Manager};
@@ -103,6 +104,25 @@ fn main() {
                                 }
                             }
                             prev_health.insert(inst.name.clone(), health);
+
+                            // Check browser HIL status for sandbox instances
+                            if inst.sandbox_type != clawenv_core::sandbox::SandboxType::Native
+                                && inst.browser.enabled
+                            {
+                                if let Ok(backend) = clawenv_core::manager::instance::backend_for_instance(inst) {
+                                    let browser = clawenv_core::browser::chromium::ChromiumBackend::new(
+                                        std::sync::Arc::from(backend) as std::sync::Arc<dyn clawenv_core::sandbox::SandboxBackend>
+                                    );
+                                    if let Ok(status) = browser.status().await {
+                                        if let clawenv_core::browser::BrowserStatus::Interactive { ref novnc_url } = status {
+                                            let _ = monitor_handle.emit("hil-required", serde_json::json!({
+                                                "instance": inst.name,
+                                                "novnc_url": novnc_url,
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -194,6 +214,9 @@ fn main() {
             ipc::sandbox_vm_action,
             ipc::check_chromium_installed,
             ipc::install_chromium,
+            ipc::browser_status,
+            ipc::browser_start_interactive,
+            ipc::browser_resume_headless,
             ipc::get_gateway_token,
             ipc::get_bridge_config,
             ipc::save_bridge_config,

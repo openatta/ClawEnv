@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::claw::ClawRegistry;
-use crate::config::{keychain, mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
+use crate::config::{keychain, mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig, BrowserConfig};
 use crate::platform::network;
 use crate::sandbox::{
     detect_backend_for, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
@@ -413,7 +413,11 @@ pub async fn install(
             channels: Default::default(),
         },
         resources: ResourceConfig::default(),
-        browser: Default::default(),
+        browser: BrowserConfig {
+            cdp_port: allocate_port(opts.gateway_port, 3),
+            vnc_ws_port: allocate_port(opts.gateway_port, 4),
+            ..Default::default()
+        },
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
     });

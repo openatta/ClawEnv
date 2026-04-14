@@ -34,6 +34,10 @@ portForwards:
   hostPort: {TTYD_PORT}
 - guestPort: {BRIDGE_PORT}
   hostPort: {BRIDGE_PORT}
+- guestPort: {CDP_PORT}
+  hostPort: {CDP_PORT}
+- guestPort: {VNC_WS_PORT}
+  hostPort: {VNC_WS_PORT}
 
 provision:
 - mode: system

@@ -230,14 +230,16 @@ impl SandboxBackend for LimaBackend {
                 let gateway_port = opts.gateway_port;
                 let ttyd_port = crate::manager::install::allocate_port(gateway_port, 1);
                 let bridge_port = crate::manager::install::allocate_port(gateway_port, 2);
+                let cdp_port = crate::manager::install::allocate_port(gateway_port, 3);
+                let vnc_ws_port = crate::manager::install::allocate_port(gateway_port, 4);
 
-                // {MIRRORS_SCRIPT} is bundled into proxy_script by the installer,
-                // but for standalone template use, replace with empty.
                 let mut rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
                     .replace("{GATEWAY_PORT}", &gateway_port.to_string())
                     .replace("{TTYD_PORT}", &ttyd_port.to_string())
                     .replace("{BRIDGE_PORT}", &bridge_port.to_string())
+                    .replace("{CDP_PORT}", &cdp_port.to_string())
+                    .replace("{VNC_WS_PORT}", &vnc_ws_port.to_string())
                     .replace("{PROXY_SCRIPT}", &opts.proxy_script)
                     .replace("{MIRRORS_SCRIPT}", "");
 
