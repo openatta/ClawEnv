@@ -22,6 +22,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
@@ -249,6 +250,8 @@ fn main() {
             ipc::upgrade_instance,
             ipc::claw::list_claw_types,
             ipc::restart_computer,
+            ipc::export_sandbox,
+            ipc::export_native_bundle,
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {

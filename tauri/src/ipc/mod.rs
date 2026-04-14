@@ -1,5 +1,6 @@
 mod bridge;
 pub mod claw;
+mod export;
 mod install;
 mod instance;
 mod network;
@@ -8,6 +9,7 @@ mod settings;
 mod upgrade;
 
 pub use bridge::*;
+pub use export::*;
 pub use install::*;
 pub use instance::*;
 pub use network::*;

@@ -103,6 +103,34 @@ export default function SandboxPage() {
     }
   }
 
+  // Export state
+  const [exportProgress, setExportProgress] = createSignal<{ percent: number; message: string } | null>(null);
+
+  async function handleExport(instanceName: string) {
+    setExportProgress({ percent: 0, message: "Starting export..." });
+
+    const unProgress = await listen<{ percent: number; message: string }>("export-progress", (ev) => {
+      setExportProgress(ev.payload);
+    });
+    const unComplete = await listen<string>("export-complete", (ev) => {
+      setExportProgress({ percent: 100, message: `Exported to ${ev.payload}` });
+      setTimeout(() => setExportProgress(null), 3000);
+      unProgress(); unComplete(); unFailed();
+    });
+    const unFailed = await listen<string>("export-failed", (ev) => {
+      setExportProgress({ percent: -1, message: `Export failed: ${ev.payload}` });
+      setTimeout(() => setExportProgress(null), 5000);
+      unProgress(); unComplete(); unFailed();
+    });
+
+    try {
+      await invoke("export_sandbox", { name: instanceName });
+    } catch (e) {
+      setExportProgress(null);
+      unProgress(); unComplete(); unFailed();
+    }
+  }
+
   async function refresh() {
     setLoading(true);
     setError("");
@@ -165,7 +193,7 @@ export default function SandboxPage() {
             <For each={managed()} fallback={
               <div class="text-gray-500 text-sm">No managed sandbox instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} browserLoading={browserLoading()} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} onExport={handleExport} browserLoading={browserLoading()} />}
             </For>
           </div>
         </section>
@@ -178,7 +206,7 @@ export default function SandboxPage() {
             <For each={external()} fallback={
               <div class="text-gray-500 text-sm">No external instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} browserLoading={browserLoading()} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} onBrowser={startBrowserInteractive} onExport={handleExport} browserLoading={browserLoading()} />}
             </For>
           </div>
         </section>
@@ -227,6 +255,26 @@ export default function SandboxPage() {
         </div>
       </Show>
 
+      {/* Export progress overlay */}
+      <Show when={exportProgress()}>
+        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
+            <h3 class="text-base font-bold mb-3">Exporting Instance</h3>
+            <div class="mb-3">
+              <div class="w-full bg-gray-700 rounded-full h-2">
+                <div class="bg-indigo-500 h-2 rounded-full transition-all"
+                  style={{ width: `${Math.max(0, exportProgress()!.percent)}%` }} />
+              </div>
+              <p class="text-xs text-gray-400 mt-2">{exportProgress()!.message}</p>
+            </div>
+            <Show when={exportProgress()!.percent === 100 || exportProgress()!.percent === -1}>
+              <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded w-full"
+                onClick={() => setExportProgress(null)}>Close</button>
+            </Show>
+          </div>
+        </div>
+      </Show>
+
       {/* noVNC HIL Panel */}
       <Show when={hilInstance()}>
         <div class="fixed inset-0 z-50 flex flex-col">
@@ -246,6 +294,7 @@ function VmCard(props: {
   onTerminal: (info: { name: string; ttydPort?: number }) => void;
   onChromium: (name: string) => void;
   onBrowser: (name: string) => void;
+  onExport: (name: string) => void;
   browserLoading: string;
 }) {
   const [actionLoading, setActionLoading] = createSignal("");
@@ -374,6 +423,10 @@ function VmCard(props: {
           <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
             onClick={() => setShowConfig(true)}>
             ⚙ Configure
+          </button>
+          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+            onClick={() => props.onExport(instanceName())}>
+            Export
           </button>
         </Show>
 
