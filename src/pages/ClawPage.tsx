@@ -303,20 +303,28 @@ export default function ClawPage(props: {
 
             {/* Upgrade banner */}
             <Show when={updateInfo() && updateInfo()!.instance === activeTab()}>
-              <div class={`rounded-lg p-3 mb-3 text-sm flex items-center justify-between ${
-                updateInfo()!.security ? "bg-red-900/30 border border-red-700" : "bg-indigo-900/30 border border-indigo-700"
-              }`}>
-                <div>
-                  <span class={updateInfo()!.security ? "text-red-300" : "text-indigo-300"}>
-                    {updateInfo()!.security ? "Security update" : "Update available"}:
-                  </span>
-                  <span class="text-gray-300 ml-1">
-                    {updateInfo()!.current} → {updateInfo()!.latest}
-                  </span>
-                </div>
-                <button class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs text-white"
-                  onClick={() => setShowUpgrade(true)}>Upgrade</button>
-              </div>
+              {(() => {
+                const info = updateInfo()!;
+                const isBeta = /[-](beta|alpha|rc|pre|dev)/i.test(info.latest)
+                  || /[-](beta|alpha|rc|pre|dev)/i.test(info.current);
+                return (
+                  <div class={`rounded-lg p-3 mb-3 text-sm flex items-center justify-between ${
+                    info.security ? "bg-red-900/30 border border-red-700" : "bg-indigo-900/30 border border-indigo-700"
+                  }`}>
+                    <div>
+                      <span class={info.security ? "text-red-300" : "text-indigo-300"}>
+                        {info.security ? "Security update" : "Update available"}:
+                      </span>
+                      <span class="text-gray-300 ml-1">
+                        {info.current} → {info.latest}
+                      </span>
+                      {isBeta && <span class="text-yellow-400 ml-2 text-xs font-medium">(beta)</span>}
+                    </div>
+                    <button class="px-3 py-1 bg-indigo-600 hover:bg-indigo-500 rounded text-xs text-white"
+                      onClick={() => setShowUpgrade(true)}>Upgrade</button>
+                  </div>
+                );
+              })()}
             </Show>
 
             {/* Info table */}
@@ -422,6 +430,7 @@ export default function ClawPage(props: {
               <div class="text-sm text-gray-300 mb-4">
                 <span class="text-gray-400">Latest:</span> <span class="text-green-400">{updateInfo()?.latest}</span>
                 {updateInfo()?.security && <span class="text-red-400 ml-2">Security</span>}
+                {/[-](beta|alpha|rc|pre|dev)/i.test(updateInfo()?.latest || "") && <span class="text-yellow-400 ml-2">(beta)</span>}
               </div>
               <p class="text-xs text-gray-500 mb-4">
                 The upgrade will stop the gateway, update {dn()}, and restart.

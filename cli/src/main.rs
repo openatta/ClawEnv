@@ -256,7 +256,8 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 let print_task = tokio::spawn(async move {
                     while let Some(progress) = rx.recv().await {
                         out_clone.emit(CliEvent::Progress {
-                            stage: format!("{:?}", progress.stage),
+                            stage: serde_json::to_value(&progress.stage).unwrap_or_default()
+                                .as_str().unwrap_or("unknown").to_string(),
                             percent: progress.percent,
                             message: progress.message,
                         });

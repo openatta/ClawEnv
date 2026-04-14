@@ -276,7 +276,7 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
             // Schedule scroll after render
             setTimeout(scrollToBottom, 10);
             return <div class={
-              line.includes("ERROR") || line.includes("✗") || line.includes("fail") ? "text-red-400"
+              line.includes("ERR!") || line.includes("✗ ERROR") || (line.includes("fail") && !line.includes("optional")) ? "text-red-400"
               : line.includes("✓") || line.includes("OK") || line.includes("done") ? "text-green-400"
               : line.startsWith("---") ? "text-gray-600"
               : ""
