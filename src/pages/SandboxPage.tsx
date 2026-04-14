@@ -29,15 +29,6 @@ export default function SandboxPage() {
   let chromiumLogRef: HTMLDivElement | undefined;
 
   async function handleChromium(instanceName: string) {
-    // Check if already installed
-    try {
-      const installed = await invoke<boolean>("check_chromium_installed", { name: instanceName });
-      if (installed) {
-        alert(`Chromium is already installed in '${instanceName}'.`);
-        return;
-      }
-    } catch { /* proceed with install */ }
-
     setChromiumFor(instanceName);
     setChromiumInstalling(true);
     setChromiumDone(false);
@@ -196,6 +187,16 @@ function VmCard(props: {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [showConfig, setShowConfig] = createSignal(false);
+  const [chromiumInstalled, setChromiumInstalled] = createSignal<boolean | null>(null);
+
+  // Check chromium status when VM is running and managed
+  if (props.vm.managed) {
+    const name = props.vm.name.replace(/^clawenv-/, "");
+    invoke<boolean>("check_chromium_installed", { name }).then(
+      (v) => setChromiumInstalled(v),
+      () => setChromiumInstalled(null)
+    );
+  }
   const [cfgCpus, setCfgCpus] = createSignal(parseInt(props.vm.cpus) || 4);
   const [cfgMemory, setCfgMemory] = createSignal(Math.round(parseInt(props.vm.memory) / 1073741824) || 4);
   const [cfgSaving, setCfgSaving] = createSignal(false);
@@ -285,9 +286,11 @@ function VmCard(props: {
             onClick={() => props.onTerminal({ name: instanceName(), ttydPort: props.vm.ttyd_port })}>
             Terminal
           </button>
-          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-            onClick={() => props.onChromium(instanceName())}>
-            Chromium
+          <button
+            class={`px-2 py-0.5 text-xs rounded ${chromiumInstalled() ? "bg-gray-600 text-gray-400 cursor-default" : "bg-indigo-700 hover:bg-indigo-600"}`}
+            disabled={chromiumInstalled() === true}
+            onClick={() => { if (!chromiumInstalled()) props.onChromium(instanceName()); }}>
+            {chromiumInstalled() ? "Chromium installed" : "Install Chromium"}
           </button>
         </Show>
 
