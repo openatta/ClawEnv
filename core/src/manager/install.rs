@@ -138,6 +138,19 @@ pub async fn install(
     validate_instance_name(&opts.instance_name)?;
     validate_port_available(config, &opts.instance_name, opts.gateway_port)?;
 
+    // Native mode: only one instance allowed
+    if opts.use_native || matches!(opts.install_mode, InstallMode::NativeBundle { .. }) {
+        let has_native = config.instances().iter().any(|i| {
+            i.sandbox_type == SandboxType::Native && i.name != opts.instance_name
+        });
+        if has_native {
+            anyhow::bail!(
+                "A native instance already exists. Only one native instance is allowed. \
+                 Use sandbox mode to create additional instances."
+            );
+        }
+    }
+
     // Dispatch: Native vs Sandbox
     // NativeBundle always goes through native path regardless of use_native flag
     if opts.use_native || matches!(opts.install_mode, InstallMode::NativeBundle { .. }) {
@@ -327,7 +340,7 @@ pub async fn install(
 
         let bridge_url = format!("http://{host_ip}:3100");
         let token = backend.exec(
-            &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write(j.token||'') }} catch {{}}"#,
+            &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write((j.gateway&&j.gateway.auth&&j.gateway.auth.token)||j.token||'') }} catch {{}}"#,
                 id = desc.id)
         ).await.unwrap_or_default();
         let token = token.trim();

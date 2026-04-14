@@ -102,11 +102,17 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
+    // Ensure gateway uses the configured port (openclaw may have a different port in its own config)
+    backend.exec(&format!(
+        "{bin} config set gateway.port {port} 2>/dev/null || true",
+        bin = desc.cli_binary
+    )).await.ok();
+
     // For sandbox: bind gateway on 0.0.0.0 so Lima guestagent can detect and forward the port
     if instance.sandbox_type != SandboxType::Native {
         backend.exec(&format!(
-            "{} config set gateway.bind lan 2>/dev/null; {} config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>/dev/null || true",
-            desc.cli_binary, desc.cli_binary
+            "{bin} config set gateway.bind lan 2>/dev/null; {bin} config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>/dev/null || true",
+            bin = desc.cli_binary
         )).await.ok();
     }
 

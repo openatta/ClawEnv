@@ -13,7 +13,7 @@ pub async fn get_gateway_token(name: String) -> Result<String, String> {
     let desc = registry.get(&inst.claw_type);
     let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
 
-    // Use node to reliably parse JSON; try ~ first, then /home/*/
+    // Use node to reliably parse JSON; supports both old (j.token) and new (j.gateway.auth.token) formats
     let script = format!(
         r#"node -e "
 const fs = require('fs'), path = require('path'), id = '{id}';
@@ -22,7 +22,11 @@ const candidates = [
   ...require('fs').readdirSync('/home').map(u => '/home/'+u+'/.'+id+'/'+id+'.json').filter(fs.existsSync)
 ];
 for (const f of candidates) {{
-  try {{ const j = JSON.parse(fs.readFileSync(f,'utf8')); if (j.token) {{ process.stdout.write(j.token); process.exit(0); }} }} catch {{}}
+  try {{
+    const j = JSON.parse(fs.readFileSync(f,'utf8'));
+    const t = (j.gateway && j.gateway.auth && j.gateway.auth.token) || j.token || '';
+    if (t) {{ process.stdout.write(t); process.exit(0); }}
+  }} catch {{}}
 }}
 ""#,
         id = desc.id
