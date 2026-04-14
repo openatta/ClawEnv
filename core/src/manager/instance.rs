@@ -10,11 +10,17 @@ use crate::sandbox::{
 
 /// Get the appropriate sandbox backend for an instance
 pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn SandboxBackend>> {
+    // Use sandbox_id as the actual VM/container/directory name (ASCII-safe)
+    let id = &instance.sandbox_id;
     match instance.sandbox_type {
-        SandboxType::LimaAlpine => Ok(Box::new(LimaBackend::new(&instance.name))),
-        SandboxType::Wsl2Alpine => Ok(Box::new(WslBackend::new(&instance.name))),
-        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(&instance.name, instance.gateway.gateway_port))),
-        SandboxType::Native => Ok(Box::new(native_backend(&instance.name))),
+        SandboxType::LimaAlpine => Ok(Box::new(LimaBackend::new_with_vm_name(id))),
+        SandboxType::Wsl2Alpine => Ok(Box::new(WslBackend::new_with_distro_name(id))),
+        SandboxType::PodmanAlpine => Ok(Box::new(PodmanBackend::with_port(id, instance.gateway.gateway_port))),
+        SandboxType::Native => {
+            // For native, sandbox_id is "native-{dir_id}", extract dir_id
+            let dir_name = id.strip_prefix("native-").unwrap_or(id);
+            Ok(Box::new(native_backend(dir_name)))
+        }
     }
 }
 
@@ -24,10 +30,12 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     if instance.sandbox_type == SandboxType::Native {
         crate::manager::install_native::ensure_node_in_path();
         // Add instance's bin/ to PATH for claw CLI binaries (npm --prefix layout)
+        // Use sandbox_id for directory (ASCII-safe)
+        let dir_name = instance.sandbox_id.strip_prefix("native-").unwrap_or(&instance.sandbox_id);
         let base = dirs::home_dir()
             .unwrap_or_default()
             .join(".clawenv/native")
-            .join(&instance.name);
+            .join(dir_name);
         let current = std::env::var("PATH").unwrap_or_default();
         // npm --prefix puts bins in {prefix}/bin (Unix) or {prefix} (Windows)
         #[cfg(target_os = "windows")]

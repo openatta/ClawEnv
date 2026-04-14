@@ -17,6 +17,10 @@ impl WslBackend {
         }
     }
 
+    pub fn new_with_distro_name(distro_name: &str) -> Self {
+        Self { distro_name: distro_name.to_string() }
+    }
+
     fn distro_dir(&self) -> Result<PathBuf> {
         Ok(dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?

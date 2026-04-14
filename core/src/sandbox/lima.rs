@@ -17,6 +17,11 @@ impl LimaBackend {
         }
     }
 
+    /// Create with an explicit VM name (used when sandbox_id already contains full name)
+    pub fn new_with_vm_name(vm_name: &str) -> Self {
+        Self { vm_name: vm_name.to_string() }
+    }
+
     /// Run limactl and capture stdout (for commands that exit quickly like list, shell)
     async fn limactl(&self, args: &[&str]) -> Result<String> {
         let out = Command::new("limactl")

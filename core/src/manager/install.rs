@@ -60,6 +60,15 @@ pub fn allocate_port(base: u16, offset: u16) -> u16 {
     base + offset
 }
 
+/// Generate an ASCII-safe short ID for directory names.
+/// Uses hex of first 6 bytes of SHA256(name + timestamp).
+pub fn generate_dir_id(name: &str) -> String {
+    use sha2::{Sha256, Digest};
+    let input = format!("{}{}", name, chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+    let hash = Sha256::digest(input.as_bytes());
+    hex::encode(&hash[..6]) // 12 hex chars
+}
+
 pub fn validate_instance_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 63 {
         anyhow::bail!("Instance name must be 1-63 characters");
@@ -158,12 +167,16 @@ pub async fn install(
     }
 
     // ---- Sandbox path below ----
+    let dir_id = generate_dir_id(&opts.instance_name);
+    let sandbox_id = format!("clawenv-{dir_id}");
+
     // Resolve the claw descriptor for this install
     let registry = ClawRegistry::load();
     let desc = registry.get_strict(&opts.claw_type)?;
 
     send(&tx, "Detecting platform...", 5, InstallStage::DetectPlatform).await;
-    let backend: Box<dyn SandboxBackend> = detect_backend_for(&opts.instance_name)?;
+    // Use dir_id for VM name (ASCII-safe, supports non-ASCII instance names)
+    let backend: Box<dyn SandboxBackend> = detect_backend_for(&dir_id)?;
 
     send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
     backend.ensure_prerequisites().await?;
@@ -419,7 +432,7 @@ pub async fn install(
         claw_type: opts.claw_type.clone(),
         version: claw_version.trim().to_string(),
         sandbox_type,
-        sandbox_id: format!("clawenv-{}", opts.instance_name),
+        sandbox_id: sandbox_id.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
         gateway: GatewayConfig {
