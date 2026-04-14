@@ -29,6 +29,8 @@ Thumbs.db
 .env
 .env.*
 docs/UTM.dmg
+docs/14-*.md
+docs/15-*.md
 test-results/
 test-export-*/
 test-bundle-*/
