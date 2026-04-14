@@ -66,24 +66,49 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let desc = registry.get(&instance.claw_type);
     let port = instance.gateway.gateway_port;
 
-    // Start ttyd (sandbox only)
+    // Helper: check if a port is listening inside the sandbox/host via netstat
+    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16) -> bool {
+        let check = backend.exec(&format!(
+            "netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no"
+        )).await.unwrap_or_default();
+        check.trim() == "yes"
+    }
+
+    // Start ttyd (sandbox only) — check by port, not by pgrep
     if instance.sandbox_type != SandboxType::Native {
         let ttyd_port = instance.gateway.ttyd_port;
-        let ttyd_check = backend.exec(&process::check_process_cmd(&format!("ttyd.*-p {ttyd_port}")))
-            .await.unwrap_or_default();
-        if !ttyd_check.contains("running") {
+        if !is_port_listening(backend.as_ref(), ttyd_port).await {
+            // Kill any stale ttyd first
+            backend.exec("pkill -9 ttyd 2>/dev/null || true").await.ok();
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             backend.exec(&format!(
                 "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
             )).await?;
             tracing::info!("ttyd started on 0.0.0.0:{ttyd_port}");
+        } else {
+            tracing::info!("ttyd already listening on {ttyd_port}, skipping");
         }
     }
 
-    // Always kill stale gateway then restart fresh
+    // Check if gateway is already responding on this port — skip restart if already running
+    if is_port_listening(backend.as_ref(), port).await {
+        tracing::info!("Gateway already running on port {port}, skipping restart");
+        return Ok(());
+    }
+
+    // Kill stale gateway processes then start fresh
     for pn in &desc.process_names() {
         backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // For sandbox: bind gateway on 0.0.0.0 so Lima guestagent can detect and forward the port
+    if instance.sandbox_type != SandboxType::Native {
+        backend.exec(&format!(
+            "{} config set gateway.bind lan 2>/dev/null; {} config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>/dev/null || true",
+            desc.cli_binary, desc.cli_binary
+        )).await.ok();
+    }
 
     let gateway_cmd = desc.gateway_start_cmd(port);
     #[cfg(not(target_os = "windows"))]
