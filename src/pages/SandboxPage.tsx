@@ -1,5 +1,6 @@
 import { createSignal, onMount, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import SandboxTerminal from "../components/Terminal";
 
 type SandboxVm = {
@@ -19,6 +20,45 @@ export default function SandboxPage() {
   const [error, setError] = createSignal("");
   const [diskUsage, setDiskUsage] = createSignal("");
   const [terminalFor, setTerminalFor] = createSignal<{ name: string; ttydPort?: number } | null>(null);
+
+  // Chromium install state
+  const [chromiumFor, setChromiumFor] = createSignal<string | null>(null);
+  const [chromiumInstalling, setChromiumInstalling] = createSignal(false);
+  const [chromiumLogs, setChromiumLogs] = createSignal<string[]>([]);
+  const [chromiumDone, setChromiumDone] = createSignal(false);
+  let chromiumLogRef: HTMLDivElement | undefined;
+
+  async function handleChromium(instanceName: string) {
+    // Check if already installed
+    try {
+      const installed = await invoke<boolean>("check_chromium_installed", { name: instanceName });
+      if (installed) {
+        alert(`Chromium is already installed in '${instanceName}'.`);
+        return;
+      }
+    } catch { /* proceed with install */ }
+
+    setChromiumFor(instanceName);
+    setChromiumInstalling(true);
+    setChromiumDone(false);
+    setChromiumLogs(["Starting Chromium installation..."]);
+
+    const unlisten = await listen<string>("chromium-install-progress", (event) => {
+      setChromiumLogs((l) => [...l, event.payload]);
+      if (chromiumLogRef) setTimeout(() => { if (chromiumLogRef) chromiumLogRef.scrollTop = chromiumLogRef.scrollHeight; }, 10);
+    });
+
+    try {
+      await invoke("install_chromium", { name: instanceName });
+      setChromiumLogs((l) => [...l, "✓ Chromium installed successfully"]);
+    } catch (e) {
+      setChromiumLogs((l) => [...l, `✗ Error: ${e}`]);
+    } finally {
+      setChromiumInstalling(false);
+      setChromiumDone(true);
+      unlisten();
+    }
+  }
 
   async function refresh() {
     setLoading(true);
@@ -82,7 +122,7 @@ export default function SandboxPage() {
             <For each={managed()} fallback={
               <div class="text-gray-500 text-sm">No managed sandbox instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} />}
             </For>
           </div>
         </section>
@@ -95,7 +135,7 @@ export default function SandboxPage() {
             <For each={external()} fallback={
               <div class="text-gray-500 text-sm">No external instances</div>
             }>
-              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} />}
+              {(vm) => <VmCard vm={vm} onRefresh={refresh} onTerminal={setTerminalFor} onChromium={handleChromium} />}
             </For>
           </div>
         </section>
@@ -105,6 +145,44 @@ export default function SandboxPage() {
       {terminalFor() && (
         <SandboxTerminal instanceName={terminalFor()!.name} ttydPort={terminalFor()!.ttydPort} onClose={() => setTerminalFor(null)} />
       )}
+
+      {/* Chromium install modal */}
+      <Show when={chromiumFor()}>
+        <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[650px] h-[420px] flex flex-col shadow-2xl">
+            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
+              <span class="font-medium text-sm">
+                {chromiumInstalling() ? `Installing Chromium in '${chromiumFor()}'...` : "Chromium Install"}
+              </span>
+              <div class="flex gap-2">
+                <Show when={chromiumDone() && !chromiumInstalling()}>
+                  <button class="px-3 py-0.5 text-xs bg-gray-600 hover:bg-gray-500 rounded"
+                    onClick={() => handleChromium(chromiumFor()!)}>Retry</button>
+                </Show>
+                <Show when={!chromiumInstalling()}>
+                  <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
+                    onClick={() => setChromiumFor(null)}>Close</button>
+                </Show>
+              </div>
+            </div>
+            <div class="flex-1 overflow-y-auto p-3 font-mono text-xs bg-gray-950 min-h-0" ref={chromiumLogRef}>
+              {chromiumLogs().map((line) => (
+                <div class={
+                  line.includes("✓") || line.includes("OK:") ? "text-green-400"
+                  : line.includes("✗") || line.includes("ERROR") ? "text-red-400"
+                  : line.includes("Installing") || line.includes("Fetching") ? "text-indigo-300"
+                  : "text-gray-400"
+                }>
+                  {line || "\u00A0"}
+                </div>
+              ))}
+              <Show when={chromiumInstalling()}>
+                <div class="text-indigo-400 animate-pulse mt-1">Working...</div>
+              </Show>
+            </div>
+          </div>
+        </div>
+      </Show>
     </div>
   );
 }
@@ -113,6 +191,7 @@ function VmCard(props: {
   vm: SandboxVm;
   onRefresh: () => void;
   onTerminal: (info: { name: string; ttydPort?: number }) => void;
+  onChromium: (name: string) => void;
 }) {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
@@ -205,6 +284,10 @@ function VmCard(props: {
           <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
             onClick={() => props.onTerminal({ name: instanceName(), ttydPort: props.vm.ttyd_port })}>
             Terminal
+          </button>
+          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+            onClick={() => props.onChromium(instanceName())}>
+            Chromium
           </button>
         </Show>
 

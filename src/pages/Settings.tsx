@@ -1,6 +1,5 @@
 import { createSignal, Show, For, onMount } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 
 type BridgeConfig = {
   enabled: boolean;
@@ -274,8 +273,6 @@ export default function Settings() {
             </div>
           </section>
 
-          <BrowserInstallSection />
-
           <section>
             <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Approval Policy</h2>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-400 space-y-1">
@@ -309,126 +306,6 @@ function PermRow(props: { label: string; hint: string; value: string; onChange: 
       <input type="text" class={`w-full bg-gray-700 text-sm rounded px-2 py-1.5 border ${props.color === "red" ? "border-red-700/50" : "border-gray-600"}`}
         value={props.value} onInput={e => props.onChange(e.target.value)} />
     </div>
-  );
-}
-
-function BrowserInstallSection() {
-  const [showModal, setShowModal] = createSignal(false);
-  const [installing, setInstalling] = createSignal(false);
-  const [installed, setInstalled] = createSignal<boolean | null>(null);
-  const [logs, setLogs] = createSignal<string[]>([]);
-  const [done, setDone] = createSignal(false);
-  let logRef: HTMLDivElement | undefined;
-
-  // Check on mount
-  onMount(async () => {
-    try {
-      const result = await invoke<boolean>("check_chromium_installed", { name: "default" });
-      setInstalled(result);
-    } catch {
-      setInstalled(null);
-    }
-  });
-
-  async function installChromium() {
-    setShowModal(true);
-    setInstalling(true);
-    setDone(false);
-    setLogs(["Checking current status...", ""]);
-
-    // Listen for streaming progress
-    const unlisten = await listen<string>("chromium-install-progress", (event) => {
-      setLogs((l) => [...l, event.payload]);
-      if (logRef) setTimeout(() => { if (logRef) logRef.scrollTop = logRef.scrollHeight; }, 10);
-    });
-
-    try {
-      await invoke("install_chromium", { name: "default" });
-      setInstalled(true);
-    } catch (e) {
-      setLogs((l) => [...l, `✗ Error: ${e}`]);
-    } finally {
-      setInstalling(false);
-      setDone(true);
-      unlisten();
-      if (logRef) logRef.scrollTop = logRef.scrollHeight;
-    }
-  }
-
-  return (
-    <>
-      <section class="mb-6">
-        <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Browser Automation</h2>
-        <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 space-y-3">
-          <p class="text-xs text-gray-400">
-            Chromium headless is required for web scraping, CDP automation, screenshots, and CAPTCHA handling.
-          </p>
-
-          {/* Status */}
-          <div class="text-sm">
-            {installed() === true && (
-              <span class="text-green-400">✓ Chromium is installed</span>
-            )}
-            {installed() === false && (
-              <span class="text-yellow-400">○ Chromium is not installed</span>
-            )}
-            {installed() === null && (
-              <span class="text-gray-500">Checking...</span>
-            )}
-          </div>
-
-          <button
-            class={`px-4 py-1.5 text-sm rounded ${
-              installed() ? "bg-gray-600 hover:bg-gray-500" : "bg-indigo-600 hover:bg-indigo-500"
-            }`}
-            onClick={installChromium}
-          >
-            {installed() ? "Reinstall / Update Chromium" : "Install Chromium (~630MB)"}
-          </button>
-          <p class="text-[10px] text-gray-500">
-            Packages: chromium + GUI libs + noVNC. Resumes from previous partial install.
-          </p>
-        </div>
-      </section>
-
-      {/* Install Progress Modal */}
-      <Show when={showModal()}>
-        <div class="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-xl w-[650px] h-[420px] flex flex-col shadow-2xl">
-            <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
-              <span class="font-medium text-sm">
-                {installing() ? "Installing Chromium..." : done() ? "Complete" : "Install Chromium"}
-              </span>
-              <div class="flex gap-2">
-                <Show when={done() && !installing()}>
-                  <button class="px-3 py-0.5 text-xs bg-gray-600 hover:bg-gray-500 rounded"
-                    onClick={installChromium}>Retry</button>
-                </Show>
-                <Show when={!installing()}>
-                  <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
-                    onClick={() => setShowModal(false)}>✕ Close</button>
-                </Show>
-              </div>
-            </div>
-            <div class="flex-1 overflow-y-auto p-3 font-mono text-xs bg-gray-950 min-h-0" ref={logRef}>
-              {logs().map((line) => (
-                <div class={
-                  line.includes("✓") || line.includes("OK:") ? "text-green-400"
-                  : line.includes("✗") || line.includes("ERROR") ? "text-red-400"
-                  : line.includes("Installing") || line.includes("Fetching") ? "text-indigo-300"
-                  : "text-gray-400"
-                }>
-                  {line || "\u00A0"}
-                </div>
-              ))}
-              <Show when={installing()}>
-                <div class="text-indigo-400 animate-pulse mt-1">Working...</div>
-              </Show>
-            </div>
-          </div>
-        </div>
-      </Show>
-    </>
   );
 }
 
