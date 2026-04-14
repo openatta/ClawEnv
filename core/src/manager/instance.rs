@@ -108,8 +108,9 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         bin = desc.cli_binary
     )).await.ok();
 
-    // For sandbox: bind gateway on 0.0.0.0 so Lima guestagent can detect and forward the port
-    if instance.sandbox_type != SandboxType::Native {
+    // For Lima: bind gateway on 0.0.0.0 so guestagent can detect and forward the port
+    // WSL2/Podman don't need this — they use netsh/direct networking
+    if instance.sandbox_type == SandboxType::LimaAlpine {
         backend.exec(&format!(
             "{bin} config set gateway.bind lan 2>/dev/null; {bin} config set gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback true 2>/dev/null || true",
             bin = desc.cli_binary
@@ -124,19 +125,18 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if instance.sandbox_type == SandboxType::Native {
-            // Windows native: launch gateway as a detached process.
-            // npm installs openclaw as .ps1/.cmd wrapper, so we must invoke
-            // via cmd.exe or powershell to resolve the wrapper correctly.
-            // Start-Process -NoNewWindow launches a persistent detached process.
+            // Windows native: launch gateway as a hidden detached process via cmd.exe.
+            // Pass current PATH explicitly so detached process can find node/claw binaries.
             let log_path = dirs::home_dir().unwrap_or_default()
                 .join(format!(".clawenv/native/{}/gateway.log", instance.name));
-            // Escape for PowerShell single-quote context
-            let args = desc.gateway_cmd.replace("{port}", &port.to_string()).replace('\'', "''");
-            let bin = desc.cli_binary.replace('\'', "''");
             let log = log_path.display().to_string().replace('\'', "''");
+            let current_path = std::env::var("PATH").unwrap_or_default().replace('\'', "''");
+            let full_cmd = format!("{} > \"{}\" 2>&1",
+                gateway_cmd.replace('\'', "''"), log);
             backend.exec(&format!(
-                "Start-Process -NoNewWindow -FilePath 'cmd.exe' \
-                 -ArgumentList '/c {bin} {args} > \"{log}\" 2>&1'"
+                "$env:PATH = '{current_path}'; \
+                 Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
+                 -ArgumentList '/c {full_cmd}'"
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux

@@ -203,10 +203,9 @@ pub async fn install_native(
     )).await?;
     #[cfg(target_os = "windows")]
     {
-        let args = desc.gateway_cmd.replace("{port}", &port.to_string()).replace('\'', "''");
-        let bin = desc.cli_binary.replace('\'', "''");
+        let full_cmd = gateway_cmd.replace('\'', "''");
         backend.exec(&format!(
-            "Start-Process -NoNewWindow -FilePath 'cmd.exe' -ArgumentList '/c {bin} {args}'"
+            "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
         )).await?;
     }
 
@@ -337,8 +336,12 @@ async fn install_from_bundle(
     #[cfg(not(target_os = "windows"))]
     backend.exec(&format!("nohup {gateway_cmd} > /tmp/clawenv-gateway-{}.log 2>&1 &", opts.instance_name)).await?;
     #[cfg(target_os = "windows")]
-    backend.exec(&format!("Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
-        desc.cli_binary, desc.gateway_cmd.replace("{port}", &opts.gateway_port.to_string()))).await?;
+    {
+        let full_cmd = gateway_cmd.replace('\'', "''");
+        backend.exec(&format!(
+            "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
+        )).await?;
+    }
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     send(tx, &format!("{} gateway started", desc.display_name), 85, InstallStage::StartOpenClaw).await;

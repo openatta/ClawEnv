@@ -662,6 +662,13 @@ echo "0" > "$DONE"
                 .output().await?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
+                if stderr.contains("denied") || stderr.contains("1314") {
+                    anyhow::bail!(
+                        "WSL2 port forwarding requires Administrator privileges.\n\
+                         Please run ClawEnv as Administrator.\n\
+                         netsh error: {stderr}"
+                    );
+                }
                 anyhow::bail!("netsh portproxy add failed for {host_port}->{guest_port}: {stderr}");
             }
         }
