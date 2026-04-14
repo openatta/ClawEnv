@@ -713,6 +713,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         cpus: p[2].into(), memory: p[3].into(),
                                         disk: p[4].into(), dir_size: "-".into(),
                                         managed: p[0].starts_with("clawenv-"),
+                                        ttyd_port: None,
                                     });
                                 }
                             }
@@ -733,6 +734,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         cpus: "-".into(), memory: "-".into(),
                                         disk: p.get(2).unwrap_or(&"-").to_string(), dir_size: "-".into(),
                                         managed: p[0].starts_with("clawenv-"),
+                                        ttyd_port: None,
                                     });
                                 }
                             }
@@ -754,8 +756,20 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         cpus: "-".into(), memory: "-".into(),
                                         disk: "-".into(), dir_size: "-".into(),
                                         managed: name.starts_with("ClawEnv"),
+                                        ttyd_port: None,
                                     });
                                 }
+                            }
+                        }
+                    }
+
+                    // Fill ttyd_port for managed instances from config
+                    let config = ConfigManager::load()?;
+                    for vm in &mut vms {
+                        if vm.managed {
+                            let inst_name = vm.name.trim_start_matches("clawenv-").trim_start_matches("ClawEnv-");
+                            if let Some(inst) = config.instances().iter().find(|i| i.name == inst_name) {
+                                vm.ttyd_port = Some(inst.gateway.ttyd_port);
                             }
                         }
                     }

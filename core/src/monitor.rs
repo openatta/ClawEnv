@@ -62,9 +62,9 @@ impl InstanceMonitor {
                 return InstanceHealth::Unreachable;
             }
         }
-        // Fallback: check if process exists via pidof (no self-match issue)
-        match backend.exec("pidof node 2>/dev/null || echo ''").await {
-            Ok(out) if !out.trim().is_empty() => InstanceHealth::Stopped, // process alive but not responding on port
+        // Fallback: check if process exists via pgrep (Alpine-compatible)
+        match backend.exec("pgrep -x node 2>/dev/null || echo ''").await {
+            Ok(out) if !out.trim().is_empty() => InstanceHealth::Running, // process alive but not responding on port yet
             _ => InstanceHealth::Stopped,
         }
     }

@@ -123,6 +123,9 @@ pub struct SandboxVmInfo {
     pub dir_size: String,
     /// Whether this VM is managed by ClawEnv
     pub managed: bool,
+    /// ttyd port for terminal access (only for managed instances)
+    #[serde(default)]
+    pub ttyd_port: Option<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

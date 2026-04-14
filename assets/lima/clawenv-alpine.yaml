@@ -40,5 +40,5 @@ provision:
     {PROXY_SCRIPT}
     {MIRRORS_SCRIPT}
     apk update
-    apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3
+    apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3 procps
     ssh-keygen -A

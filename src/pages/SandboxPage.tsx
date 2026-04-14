@@ -10,6 +10,7 @@ type SandboxVm = {
   disk: string;
   dir_size: string;
   managed: boolean;
+  ttyd_port?: number;
 };
 
 export default function SandboxPage() {
@@ -17,7 +18,7 @@ export default function SandboxPage() {
   const [loading, setLoading] = createSignal(true);
   const [error, setError] = createSignal("");
   const [diskUsage, setDiskUsage] = createSignal("");
-  const [terminalFor, setTerminalFor] = createSignal<string | null>(null);
+  const [terminalFor, setTerminalFor] = createSignal<{ name: string; ttydPort?: number } | null>(null);
 
   async function refresh() {
     setLoading(true);
@@ -102,7 +103,7 @@ export default function SandboxPage() {
 
       {/* Terminal modal */}
       {terminalFor() && (
-        <SandboxTerminal instanceName={terminalFor()!} onClose={() => setTerminalFor(null)} />
+        <SandboxTerminal instanceName={terminalFor()!.name} ttydPort={terminalFor()!.ttydPort} onClose={() => setTerminalFor(null)} />
       )}
     </div>
   );
@@ -111,7 +112,7 @@ export default function SandboxPage() {
 function VmCard(props: {
   vm: SandboxVm;
   onRefresh: () => void;
-  onTerminal: (name: string) => void;
+  onTerminal: (info: { name: string; ttydPort?: number }) => void;
 }) {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
@@ -202,7 +203,7 @@ function VmCard(props: {
         {/* Terminal only for managed + running */}
         <Show when={isRunning() && props.vm.managed}>
           <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-            onClick={() => props.onTerminal(instanceName())}>
+            onClick={() => props.onTerminal({ name: instanceName(), ttydPort: props.vm.ttyd_port })}>
             Terminal
           </button>
         </Show>
