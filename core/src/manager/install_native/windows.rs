@@ -22,8 +22,9 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
     let parent = node_dir.parent().unwrap_or(&node_dir).to_path_buf();
     let zip_path = parent.join("node.zip");
     let tmp_dir = parent.join("node-tmp");
+    let bak_dir = parent.join("node.bak");
 
-    // Download using curl.exe (built into Windows 10+)
+    // Download
     let status = crate::platform::process::silent_cmd("curl.exe")
         .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
         .status()
@@ -34,60 +35,63 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
 
     send(tx, "Extracting Node.js (this may take a moment)...", 18, InstallStage::EnsurePrerequisites).await;
 
-    // Clean previous installs
-    let cleanup_cmd = format!(
-        "Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
-         Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue",
-        node_dir.to_string_lossy(),
-        tmp_dir.to_string_lossy(),
-    );
+    // Kill any node/openclaw processes that might lock files
+    let kill_cmd = "Get-Process -ErrorAction SilentlyContinue | \
+        Where-Object { $_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*node*' } | \
+        Where-Object { $_.Id -ne $PID } | \
+        Stop-Process -Force -ErrorAction SilentlyContinue";
     crate::platform::process::silent_cmd("powershell")
-        .args(["-Command", &cleanup_cmd])
+        .args(["-Command", kill_cmd])
         .status().await.ok();
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Clean temp/backup dirs
+    for d in [&tmp_dir, &bak_dir] {
+        let _ = tokio::fs::remove_dir_all(d).await;
+    }
 
     // Extract to temp dir
     let extract_cmd = format!(
         "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        zip_path.to_string_lossy(),
-        tmp_dir.to_string_lossy(),
+        zip_path.to_string_lossy(), tmp_dir.to_string_lossy(),
     );
     let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &extract_cmd])
-        .status()
-        .await?;
+        .status().await?;
     if !status.success() {
         anyhow::bail!("Failed to extract Node.js zip");
     }
 
-    // Move the nested directory (e.g. node-v22.16.0-win-arm64/) to final location
-    // The zip contains exactly one top-level directory
+    // Rename old node dir out of the way (instead of deleting — avoids lock issues)
+    if node_dir.exists() {
+        let _ = tokio::fs::rename(&node_dir, &bak_dir).await;
+        // If rename fails (locked), try harder
+        if node_dir.exists() {
+            let _ = tokio::fs::remove_dir_all(&node_dir).await;
+        }
+    }
+
+    // Move the extracted nested directory to final location
+    // Zip contains one top-level dir: node-v22.16.0-win-arm64/
     let move_cmd = format!(
         "$src = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
-         if ($src) {{ \
-           Move-Item -Path $src.FullName -Destination '{}' -Force \
-         }} else {{ \
-           Move-Item -Path '{}' -Destination '{}' -Force \
-         }}",
-        tmp_dir.to_string_lossy(),
-        node_dir.to_string_lossy(),
-        tmp_dir.to_string_lossy(),
-        node_dir.to_string_lossy(),
+         if ($src) {{ Rename-Item $src.FullName '{}' }}",
+        tmp_dir.to_string_lossy(), node_dir.to_string_lossy(),
     );
     let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &move_cmd])
-        .status()
-        .await?;
+        .status().await?;
     if !status.success() {
-        anyhow::bail!("Failed to move Node.js files");
+        anyhow::bail!("Failed to move Node.js to final location");
     }
 
     // Cleanup
-    tokio::fs::remove_file(&zip_path).await.ok();
-    tokio::fs::remove_dir_all(&tmp_dir).await.ok();
+    let _ = tokio::fs::remove_file(&zip_path).await;
+    let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    let _ = tokio::fs::remove_dir_all(&bak_dir).await;
 
-    // Verify npm.cmd exists
-    let npm_cmd = node_dir.join("npm.cmd");
-    if !npm_cmd.exists() {
+    // Verify
+    if !node_dir.join("npm.cmd").exists() {
         anyhow::bail!("Node.js extraction incomplete: npm.cmd not found in {}", node_dir.display());
     }
 
