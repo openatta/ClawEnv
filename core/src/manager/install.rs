@@ -330,31 +330,48 @@ pub async fn install(
         SandboxType::Native => "127.0.0.1".into(),
     };
 
-    // MCP Bridge (only if the claw supports it)
+    // MCP plugins (Bridge + HIL skill)
     if opts.install_mcp_bridge && desc.supports_mcp {
-        send(&tx, "Installing MCP Bridge plugin...", 78, InstallStage::StartOpenClaw).await;
+        send(&tx, "Installing plugins (MCP Bridge + HIL Skill)...", 78, InstallStage::StartOpenClaw).await;
+        let bridge_url = format!("http://{host_ip}:{}", allocate_port(opts.gateway_port, 2));
+
+        // Deploy MCP Bridge
         let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
         let mcp_dir = "/workspace/mcp-bridge";
         backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
         backend.exec(&format!("cat > {mcp_dir}/index.mjs << 'MCPEOF'\n{mcp_js}\nMCPEOF")).await?;
 
-        let bridge_url = format!("http://{host_ip}:3100");
+        // Deploy HIL Skill
+        let hil_js = include_str!("../../../assets/mcp/hil-skill.mjs");
+        let hil_dir = "/workspace/hil-skill";
+        backend.exec(&format!("mkdir -p {hil_dir}")).await?;
+        backend.exec(&format!("cat > {hil_dir}/index.mjs << 'HILEOF'\n{hil_js}\nHILEOF")).await?;
+
+        // Register both with OpenClaw
         let token = backend.exec(
             &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write((j.gateway&&j.gateway.auth&&j.gateway.auth.token)||j.token||'') }} catch {{}}"#,
                 id = desc.id)
         ).await.unwrap_or_default();
         let token = token.trim();
         if !token.is_empty() {
+            let env_prefix = format!(
+                "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token}",
+                id_upper = desc.id.to_uppercase(),
+                p = opts.gateway_port,
+            );
+            // Register MCP Bridge
             if let Some(mcp_cmd) = desc.mcp_register_cmd(
                 "clawenv",
                 &format!("{{\"command\":\"node\",\"args\":[\"{mcp_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}")
             ) {
-                let env_prefix = format!(
-                    "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token}",
-                    id_upper = desc.id.to_uppercase(),
-                    p = opts.gateway_port,
-                );
                 backend.exec(&format!("{env_prefix} {mcp_cmd} 2>/dev/null || true")).await?;
+            }
+            // Register HIL Skill
+            if let Some(hil_cmd) = desc.mcp_register_cmd(
+                "clawenv-hil",
+                &format!("{{\"command\":\"node\",\"args\":[\"{hil_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}")
+            ) {
+                backend.exec(&format!("{env_prefix} {hil_cmd} 2>/dev/null || true")).await?;
             }
         }
     }
