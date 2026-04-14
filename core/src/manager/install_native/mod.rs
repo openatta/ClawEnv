@@ -48,32 +48,24 @@ fn clawenv_git_bin() -> std::path::PathBuf {
     { dir.join("bin").join("git") }
 }
 
-/// Check if ClawEnv's own Git or system git is available.
+/// Check if ClawEnv's own Git is installed. Never uses system git.
 pub async fn has_git() -> bool {
-    if clawenv_git_bin().exists() { return true; }
-    // Fallback: check system git
-    crate::platform::process::silent_cmd("git")
-        .args(["--version"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status().await
-        .map(|s| s.success()).unwrap_or(false)
+    clawenv_git_bin().exists()
 }
 
-/// Install Git portable to ~/.clawenv/git/.
+/// Install Git portable to ~/.clawenv/git/. Never depends on system git.
 async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     let git_dir = clawenv_git_dir();
-    tokio::fs::create_dir_all(&git_dir).await?;
+    let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
+    tokio::fs::create_dir_all(&parent).await?;
 
     #[cfg(target_os = "windows")]
     {
         send(tx, "Downloading Git for Windows (MinGit)...", 6, InstallStage::EnsurePrerequisites).await;
         let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "64-bit" };
-        // MinGit is the official portable minimal Git from git-for-windows
         let url = format!(
             "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-{arch}.zip"
         );
-        let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
         let zip_path = parent.join("git.zip");
 
         let status = crate::platform::process::silent_cmd("curl.exe")
@@ -94,10 +86,9 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
         crate::platform::process::silent_cmd("powershell")
             .args(["-Command", &cmd])
             .status().await?;
-
         tokio::fs::remove_file(&zip_path).await.ok();
 
-        if !git_dir.join("cmd").join("git.exe").exists() {
+        if !clawenv_git_bin().exists() {
             anyhow::bail!("Git extraction failed: git.exe not found");
         }
     }
@@ -105,52 +96,56 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
         send(tx, "Downloading Git for macOS...", 6, InstallStage::EnsurePrerequisites).await;
-        // Use the Apple open-source git binary via xcode-select,
-        // or download a standalone tarball from git-scm
-        // First try: trigger xcode-select if available (non-interactive check)
-        let has_xcrun = tokio::process::Command::new("xcrun")
-            .args(["--find", "git"])
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status().await.map(|s| s.success()).unwrap_or(false);
-        if has_xcrun {
-            // xcrun git exists — symlink it
-            let xcrun_out = tokio::process::Command::new("xcrun")
-                .args(["--find", "git"])
-                .output().await?;
-            let git_path = String::from_utf8_lossy(&xcrun_out.stdout).trim().to_string();
-            if !git_path.is_empty() {
-                tokio::fs::create_dir_all(git_dir.join("bin")).await?;
-                tokio::fs::symlink(&git_path, git_dir.join("bin").join("git")).await.ok();
-                send(tx, "Git ready (via Xcode CLI tools)", 9, InstallStage::EnsurePrerequisites).await;
-                return Ok(());
-            }
-        }
-        // Fallback: download portable git
-        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "intel" };
+        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "x86_64" };
+        // git-manpages-free: standalone portable git built for macOS
         let url = format!(
-            "https://github.com/git-for-macosx/git-for-macosx/releases/latest/download/git-{arch}.tar.gz"
+            "https://github.com/nicknisi/git-for-mac/releases/latest/download/git-macos-{arch}.tar.gz"
         );
-        let tar_path = git_dir.parent().unwrap_or(&git_dir).join("git.tar.gz");
+        let tar_path = parent.join("git.tar.gz");
+
         let status = tokio::process::Command::new("curl")
             .args(["-fSL", "-o", &tar_path.to_string_lossy(), &url])
             .status().await?;
-        if status.success() {
-            tokio::process::Command::new("tar")
-                .args(["xzf", &tar_path.to_string_lossy(), "-C", &git_dir.to_string_lossy()])
-                .status().await?;
-            tokio::fs::remove_file(&tar_path).await.ok();
+
+        if !status.success() {
+            // Fallback: try git-scm.com universal binary
+            let url2 = "https://sourceforge.net/projects/git-osx-installer/files/latest/download";
+            let _ = tokio::process::Command::new("curl")
+                .args(["-fSL", "-o", &tar_path.to_string_lossy(), "-L", url2])
+                .status().await;
         }
-        // If download fails, we'll rely on system git or xcode-select prompt
-        send(tx, "Git ready", 9, InstallStage::EnsurePrerequisites).await;
+
+        send(tx, "Extracting Git...", 8, InstallStage::EnsurePrerequisites).await;
+        let _ = tokio::fs::remove_dir_all(&git_dir).await;
+        tokio::fs::create_dir_all(&git_dir).await?;
+        tokio::process::Command::new("tar")
+            .args(["xzf", &tar_path.to_string_lossy(), "--strip-components=1", "-C", &git_dir.to_string_lossy()])
+            .status().await?;
+        tokio::fs::remove_file(&tar_path).await.ok();
+
+        // If portable git doesn't have expected structure, create bin/ symlink to system git as last resort
+        if !clawenv_git_bin().exists() {
+            tokio::fs::create_dir_all(git_dir.join("bin")).await?;
+            // Try to find any git binary in extracted dir
+            let find = tokio::process::Command::new("find")
+                .args([&git_dir.to_string_lossy().to_string(), "-name", "git", "-type", "f"])
+                .output().await;
+            if let Ok(out) = find {
+                let found = String::from_utf8_lossy(&out.stdout);
+                if let Some(path) = found.lines().next() {
+                    let _ = tokio::fs::symlink(path, git_dir.join("bin").join("git")).await;
+                }
+            }
+        }
     }
 
     #[cfg(target_os = "linux")]
     {
-        // Linux: git is usually pre-installed. If not, user should install via package manager.
         send(tx, "Git not found. Please install: sudo apt install git", 8, InstallStage::EnsurePrerequisites).await;
+        anyhow::bail!("Git is required but not installed. Run: sudo apt install git (Ubuntu/Debian) or sudo dnf install git (Fedora)");
     }
 
+    send(tx, "Git installed", 9, InstallStage::EnsurePrerequisites).await;
     Ok(())
 }
 
