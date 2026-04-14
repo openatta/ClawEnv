@@ -33,22 +33,33 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
         anyhow::bail!("Failed to download Node.js from {url}");
     }
 
-    send(tx, "Extracting Node.js...", 18, InstallStage::EnsurePrerequisites).await;
+    send(tx, "Extracting Node.js (this may take a moment)...", 18, InstallStage::EnsurePrerequisites).await;
 
-    // Extract zip using PowerShell (no admin needed)
-    // 1. Expand-Archive into node dir
-    // 2. Move contents from nested node-vX.Y.Z-win-arch/ up to node dir
+    // Extract zip using PowerShell:
+    // 1. Clean node dir first to avoid merge conflicts
+    // 2. Expand-Archive to a temp dir
+    // 3. Move contents from nested node-vX.Y.Z-win-arch/ up to node dir
+    let temp_dir = node_dir.parent().unwrap_or(&node_dir).join("node-extract-tmp");
     let extract_cmd = format!(
-        "Expand-Archive -Path '{}' -DestinationPath '{}' -Force; \
+        "Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
+         Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
+         Expand-Archive -Path '{}' -DestinationPath '{}' -Force; \
          $d = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
-         if ($d) {{ Get-ChildItem $d.FullName | Move-Item -Destination '{}' -Force; Remove-Item $d.FullName -Force }}",
-        zip_path.to_string_lossy(),
+         if ($d) {{ Move-Item -Path $d.FullName -Destination '{}' -Force }} \
+         else {{ Move-Item -Path '{}' -Destination '{}' -Force }}; \
+         Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue",
+        node_dir.to_string_lossy(),         // clean old node dir
+        temp_dir.to_string_lossy(),         // clean temp dir
+        zip_path.to_string_lossy(),         // source zip
+        temp_dir.to_string_lossy(),         // extract to temp
+        temp_dir.to_string_lossy(),         // find nested dir
+        node_dir.to_string_lossy(),         // move nested → node dir
+        temp_dir.to_string_lossy(),         // fallback: move temp → node dir
         node_dir.to_string_lossy(),
-        node_dir.to_string_lossy(),
-        node_dir.to_string_lossy(),
+        temp_dir.to_string_lossy(),         // cleanup temp
     );
     let status = crate::platform::process::silent_cmd("powershell")
-        .args(["-WindowStyle", "Hidden", "-Command", &extract_cmd])
+        .args(["-Command", &extract_cmd])
         .status()
         .await?;
 

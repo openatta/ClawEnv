@@ -34,7 +34,7 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         let dir_name = instance.sandbox_id.strip_prefix("native-").unwrap_or(&instance.sandbox_id);
         let base = dirs::home_dir()
             .unwrap_or_default()
-            .join(".clawenv/native")
+            .join(".clawenv").join("native")
             .join(dir_name);
         let current = std::env::var("PATH").unwrap_or_default();
         // npm --prefix puts bins in {prefix}/bin (Unix) or {prefix} (Windows)
@@ -142,9 +142,9 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     {
         if instance.sandbox_type == SandboxType::Native {
             // Windows native: launch gateway as a hidden detached process via cmd.exe.
-            // Pass current PATH explicitly so detached process can find node/claw binaries.
+            let native_dir = instance.sandbox_id.strip_prefix("native-").unwrap_or(&instance.sandbox_id);
             let log_path = dirs::home_dir().unwrap_or_default()
-                .join(format!(".clawenv/native/{}/gateway.log", instance.name));
+                .join(".clawenv").join("native").join(native_dir).join("gateway.log");
             let log = log_path.display().to_string().replace('\'', "''");
             let current_path = std::env::var("PATH").unwrap_or_default().replace('\'', "''");
             let full_cmd = format!("{} > \"{}\" 2>&1",

@@ -104,7 +104,8 @@ pub async fn install_native(
     let dir_id = super::install::generate_dir_id(&opts.instance_name);
     let install_dir = dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".clawenv/native")
+        .join(".clawenv")
+        .join("native")
         .join(&dir_id);
     tokio::fs::create_dir_all(&install_dir).await?;
 

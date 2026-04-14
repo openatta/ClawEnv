@@ -20,7 +20,7 @@ impl NativeBackend {
     pub fn new(instance_name: &str) -> Self {
         let install_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
-            .join(".clawenv/native")
+            .join(".clawenv").join("native")
             .join(instance_name);
         Self { install_dir }
     }
