@@ -86,9 +86,10 @@ export default function ClawPage(props: {
     }
   }
 
-  async function fetchToken() {
+  async function fetchToken(name?: string) {
+    const n = name || activeTab();
     try {
-      const token = await invoke<string>("get_gateway_token", { name: activeTab() });
+      const token = await invoke<string>("get_gateway_token", { name: n });
       setGatewayToken(token);
     } catch { setGatewayToken(""); }
   }
@@ -131,6 +132,8 @@ export default function ClawPage(props: {
   async function openInBrowser() {
     const inst = activeInstance();
     const port = inst?.gateway_port ?? props.clawType.default_port;
+    // Always fetch fresh token before opening
+    await fetchToken();
     const token = gatewayToken();
     const url = token ? `http://127.0.0.1:${port}/?token=${token}` : `http://127.0.0.1:${port}`;
     try { await invoke("open_url_in_browser", { url }); }
