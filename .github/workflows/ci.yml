@@ -169,4 +169,4 @@ jobs:
           restore-keys: ${{ runner.os }}-tauri-
 
       - name: Check Tauri
-        run: cargo check -p clawenv-tauri
+        run: cargo check -p clawenv-gui

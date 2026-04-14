@@ -60,18 +60,18 @@ cargo tauri build
 # 产物位置
 ls target/release/bundle/deb/    # .deb 安装包
 ls target/release/bundle/appimage/  # AppImage
-ls target/release/clawenv-tauri  # 二进制
+ls target/release/clawenv-gui  # 二进制
 ```
 
 ### 3. 运行并收集日志
 
 ```bash
 # 运行（带详细日志）
-RUST_LOG=debug ./target/release/clawenv-tauri 2>&1 | tee /tmp/clawenv-debug.log
+RUST_LOG=debug ./target/release/clawenv-gui 2>&1 | tee /tmp/clawenv-debug.log
 
 # 或安装 deb 后运行
 sudo dpkg -i target/release/bundle/deb/clawenv_*.deb
-RUST_LOG=debug clawenv-tauri 2>&1 | tee /tmp/clawenv-debug.log
+RUST_LOG=debug clawenv-gui 2>&1 | tee /tmp/clawenv-debug.log
 ```
 
 ### 4. 日志回传
@@ -146,7 +146,7 @@ cargo tauri build
 # 产物位置
 dir target\release\bundle\msi\    # .msi 安装包
 dir target\release\bundle\nsis\   # NSIS 安装包
-dir target\release\clawenv-tauri.exe
+dir target\release\clawenv-gui.exe
 ```
 
 ### 3. 运行并收集日志
@@ -154,12 +154,12 @@ dir target\release\clawenv-tauri.exe
 ```powershell
 # 运行（带详细日志）
 $env:RUST_LOG="debug"
-.\target\release\clawenv-tauri.exe 2>&1 | Tee-Object -FilePath C:\clawenv-debug.log
+.\target\release\clawenv-gui.exe 2>&1 | Tee-Object -FilePath C:\clawenv-debug.log
 
 # 或安装 msi 后运行
 msiexec /i target\release\bundle\msi\ClawEnv_*.msi
 $env:RUST_LOG="debug"
-& "C:\Program Files\ClawEnv\clawenv-tauri.exe" 2>&1 | Tee-Object -FilePath C:\clawenv-debug.log
+& "C:\Program Files\ClawEnv\clawenv-gui.exe" 2>&1 | Tee-Object -FilePath C:\clawenv-debug.log
 ```
 
 ### 4. 日志回传
