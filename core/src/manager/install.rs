@@ -27,6 +27,21 @@ pub fn validate_port_available(config: &ConfigManager, instance_name: &str, port
     Ok(())
 }
 
+/// Find the next available gateway port starting from `base_port`.
+/// Each instance occupies a gateway port and a ttyd port (gateway + 4681),
+/// so we skip in increments of 1000 to avoid collisions.
+pub fn next_available_port(config: &ConfigManager, base_port: u16) -> u16 {
+    let used: std::collections::HashSet<u16> = config.instances().iter()
+        .map(|i| i.gateway.gateway_port)
+        .collect();
+    let mut port = base_port;
+    while used.contains(&port) {
+        port = port.saturating_add(1000);
+        if port > 60000 { break; }
+    }
+    port
+}
+
 pub fn validate_instance_name(name: &str) -> Result<()> {
     if name.is_empty() || name.len() > 63 {
         anyhow::bail!("Instance name must be 1-63 characters");

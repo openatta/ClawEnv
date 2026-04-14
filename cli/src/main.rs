@@ -218,8 +218,14 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 InstallMode::OnlineBuild
             };
 
-            let actual_port = if port == 0 { desc.default_port } else { port };
             let use_native = mode == "native";
+            let actual_port = if port == 0 {
+                let config = ConfigManager::load()
+                    .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+                install::next_available_port(&config, desc.default_port)
+            } else {
+                port
+            };
 
             // Developer mode: --step <name> runs a single step
             if let Some(step_name) = step {

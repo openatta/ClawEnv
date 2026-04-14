@@ -29,7 +29,7 @@ function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) =
   );
 }
 type Lang = "zh-CN" | "en";
-type StatusDetail = { processes: string; resources: string; gateway_log: string };
+type StatusDetail = { gateway_log: string };
 
 const t: Record<Lang, Record<string, string>> = {
   "zh-CN": {
@@ -38,7 +38,7 @@ const t: Record<Lang, Record<string, string>> = {
     running: "运行中", stopped: "已停止", unreachable: "不可达",
     allUpToDate: "所有组件版本最新", noCve: "无已知 CVE",
     noInstances: "暂无实例", close: "关闭", refresh: "刷新",
-    processes: "进程列表", resources: "资源使用", logs: "终端日志",
+    logs: "终端日志",
   },
   en: {
     home: "Home", instances: "Instances", security: "Security",
@@ -46,7 +46,7 @@ const t: Record<Lang, Record<string, string>> = {
     running: "running", stopped: "stopped", unreachable: "unreachable",
     allUpToDate: "All components up to date", noCve: "No known CVEs",
     noInstances: "No instances configured", close: "Close", refresh: "Refresh",
-    processes: "Processes", resources: "Resources", logs: "Logs",
+    logs: "Logs",
   },
 };
 
@@ -66,15 +66,13 @@ export default function Home(props: {
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
   const [showClawPicker, setShowClawPicker] = createSignal(false);
 
-  // Status modal
+  // Status modal (gateway log only)
   const [statusFor, setStatusFor] = createSignal<string | null>(null);
-  const [statusTab, setStatusTab] = createSignal<"processes" | "resources" | "logs">("processes");
   const [statusData, setStatusData] = createSignal<StatusDetail | null>(null);
   const [statusLoading, setStatusLoading] = createSignal(false);
 
   async function openStatus(name: string) {
     setStatusFor(name);
-    setStatusTab("processes");
     await refreshStatus(name);
   }
 
@@ -85,10 +83,10 @@ export default function Home(props: {
   async function refreshStatus(name: string) {
     setStatusLoading(true);
     try {
-      const data = await invoke<StatusDetail>("get_instance_status_detail", { name });
-      setStatusData(data);
+      const logs = await invoke<string>("get_instance_logs", { name });
+      setStatusData({ gateway_log: logs });
     } catch (e) {
-      setStatusData({ processes: `Error: ${e}`, resources: `Error: ${e}`, gateway_log: `Error: ${e}` });
+      setStatusData({ gateway_log: `Error: ${e}` });
     } finally {
       setStatusLoading(false);
     }
@@ -201,50 +199,31 @@ export default function Home(props: {
         </div>
       </section>
 
-      {/* Status Modal — no click-outside-close */}
+      {/* Log Modal */}
       <Show when={statusFor()}>
         <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div class="bg-gray-800 border border-gray-700 rounded-xl w-[700px] h-[70vh] flex flex-col shadow-2xl">
-            {/* Header */}
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
-              <span class="font-medium">{l().status}: {statusFor()}</span>
+              <span class="font-medium">{l().logs}: {statusFor()}</span>
               <div class="flex gap-2">
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
                   onClick={() => refreshStatus(statusFor()!)}>{l().refresh}</button>
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
                   onClick={() => {
-                    const content = statusTab() === "processes" ? statusData()?.processes
-                      : statusTab() === "resources" ? statusData()?.resources
-                      : statusData()?.gateway_log;
+                    const content = statusData()?.gateway_log;
                     if (content) navigator.clipboard.writeText(content);
                   }}>Copy</button>
                 <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
                   onClick={closeStatus}>✕ {l().close}</button>
               </div>
             </div>
-            {/* Tabs */}
-            <div class="flex border-b border-gray-700 px-2 shrink-0">
-              {(["processes", "resources", "logs"] as const).map((tab) => (
-                <button
-                  class={`px-3 py-2 text-sm border-b-2 transition-colors ${
-                    statusTab() === tab ? "border-indigo-500 text-white" : "border-transparent text-gray-400 hover:text-gray-200"
-                  }`}
-                  onClick={() => setStatusTab(tab)}
-                >
-                  {l()[tab]}
-                </button>
-              ))}
-            </div>
-            {/* Content — fixed height */}
             <div class="flex-1 overflow-y-auto p-4 min-h-0">
               <Show when={statusLoading()}>
                 <div class="text-gray-400 text-sm">Loading...</div>
               </Show>
               <Show when={!statusLoading() && statusData()}>
                 <pre class="font-mono text-xs text-gray-300 whitespace-pre-wrap select-text">
-                  {statusTab() === "processes" && statusData()!.processes}
-                  {statusTab() === "resources" && statusData()!.resources}
-                  {statusTab() === "logs" && statusData()!.gateway_log}
+                  {statusData()!.gateway_log}
                 </pre>
               </Show>
             </div>
