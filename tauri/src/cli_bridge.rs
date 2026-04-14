@@ -38,14 +38,22 @@ fn cli_binary_path() -> String {
 
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent().unwrap_or(std::path::Path::new("."));
-        let bundled = dir.join(cli_name);
-        if bundled.exists() {
-            return bundled.to_string_lossy().to_string();
+
+        // 1. Exact name (dev mode: target/debug/ or target/release/)
+        let exact = dir.join(cli_name);
+        if exact.exists() {
+            return exact.to_string_lossy().to_string();
         }
-        if dir.ends_with("debug") || dir.ends_with("release") {
-            let sibling = dir.join(cli_name);
-            if sibling.exists() {
-                return sibling.to_string_lossy().to_string();
+
+        // 2. Tauri sidecar: <cli_name>-<target-triple>[.exe] in same directory
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            let prefix = "clawenv-cli-";
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with(prefix) && entry.path().is_file() {
+                    return entry.path().to_string_lossy().to_string();
+                }
             }
         }
     }
