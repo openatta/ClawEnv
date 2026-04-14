@@ -23,19 +23,23 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     // For native mode, ensure Node.js and claw binaries are in PATH
     if instance.sandbox_type == SandboxType::Native {
         crate::manager::install_native::ensure_node_in_path();
-        // Also add the instance's node_modules/.bin to PATH for claw CLI binaries
-        let install_dir = dirs::home_dir()
+        // Add instance's bin/ to PATH for claw CLI binaries (npm --prefix layout)
+        let base = dirs::home_dir()
             .unwrap_or_default()
             .join(".clawenv/native")
-            .join(&instance.name)
-            .join("node_modules/.bin");
+            .join(&instance.name);
         let current = std::env::var("PATH").unwrap_or_default();
-        let bin_str = install_dir.to_string_lossy();
+        // npm --prefix puts bins in {prefix}/bin (Unix) or {prefix} (Windows)
+        #[cfg(target_os = "windows")]
+        let bin_dir = base.clone();
+        #[cfg(not(target_os = "windows"))]
+        let bin_dir = base.join("bin");
+        let bin_str = bin_dir.to_string_lossy();
         if !current.contains(bin_str.as_ref()) {
             #[cfg(target_os = "windows")]
-            std::env::set_var("PATH", format!("{};{current}", install_dir.display()));
+            std::env::set_var("PATH", format!("{};{current}", bin_dir.display()));
             #[cfg(not(target_os = "windows"))]
-            std::env::set_var("PATH", format!("{}:{current}", install_dir.display()));
+            std::env::set_var("PATH", format!("{}:{current}", bin_dir.display()));
         }
     }
 
@@ -66,18 +70,21 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let desc = registry.get(&instance.claw_type);
     let port = instance.gateway.gateway_port;
 
-    // Helper: check if a port is listening inside the sandbox/host via netstat
-    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16) -> bool {
-        let check = backend.exec(&format!(
-            "netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no"
-        )).await.unwrap_or_default();
-        check.trim() == "yes"
+    // Helper: check if a port is listening (cross-platform)
+    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16, is_native_windows: bool) -> bool {
+        let cmd = if is_native_windows {
+            format!("powershell -Command \"if (Test-NetConnection -ComputerName 127.0.0.1 -Port {port} -InformationLevel Quiet -WarningAction SilentlyContinue) {{ echo yes }} else {{ echo no }}\"")
+        } else {
+            format!("netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no")
+        };
+        let check = backend.exec(&cmd).await.unwrap_or_default();
+        check.trim().contains("yes") || check.trim() == "True"
     }
 
     // Start ttyd (sandbox only) — check by port, not by pgrep
     if instance.sandbox_type != SandboxType::Native {
         let ttyd_port = instance.gateway.ttyd_port;
-        if !is_port_listening(backend.as_ref(), ttyd_port).await {
+        if !is_port_listening(backend.as_ref(), ttyd_port, false).await {
             // Kill any stale ttyd first
             backend.exec("pkill -9 ttyd 2>/dev/null || true").await.ok();
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
@@ -91,7 +98,8 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     // Check if gateway is already responding on this port — skip restart if already running
-    if is_port_listening(backend.as_ref(), port).await {
+    let is_win_native = cfg!(target_os = "windows") && instance.sandbox_type == SandboxType::Native;
+    if is_port_listening(backend.as_ref(), port, is_win_native).await {
         tracing::info!("Gateway already running on port {port}, skipping restart");
         return Ok(());
     }
@@ -225,7 +233,8 @@ pub async fn instance_health(instance: &InstanceConfig) -> InstanceHealth {
         Ok(b) => b,
         Err(_) => return InstanceHealth::Unreachable,
     };
-    InstanceMonitor::check_health_with_port(backend.as_ref(), instance.gateway.gateway_port).await
+    let is_win_native = cfg!(target_os = "windows") && instance.sandbox_type == SandboxType::Native;
+    InstanceMonitor::check_health_with_port_platform(backend.as_ref(), instance.gateway.gateway_port, is_win_native).await
 }
 
 /// Get instance by name from config

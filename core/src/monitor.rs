@@ -42,18 +42,28 @@ impl InstanceMonitor {
     /// Check the health of a single instance
     /// Uses HTTP probe on the gateway port — most reliable method.
     pub async fn check_health_with_port(backend: &dyn SandboxBackend, port: u16) -> InstanceHealth {
-        // Primary: HTTP probe the gateway inside the VM
-        let curl_result = backend.exec(&format!(
-            "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-        )).await;
-        match &curl_result {
+        Self::check_health_with_port_platform(backend, port, false).await
+    }
+
+    /// Check health — `is_native_windows` uses PowerShell instead of curl.
+    pub async fn check_health_with_port_platform(backend: &dyn SandboxBackend, port: u16, is_native_windows: bool) -> InstanceHealth {
+        // Primary: HTTP probe the gateway
+        let probe_cmd = if is_native_windows {
+            format!(
+                "powershell -Command \"try {{ $r = Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing; $r.StatusCode }} catch {{ '000' }}\""
+            )
+        } else {
+            format!(
+                "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
+            )
+        };
+        let result = backend.exec(&probe_cmd).await;
+        match &result {
             Ok(out) => {
                 let raw = out.trim();
                 let code = raw.trim_matches('\'').trim();
                 tracing::debug!("Health check port {port}: raw='{}' code='{}'", raw, code);
-                // Any HTTP response (non-000) means gateway process is running and responding.
-                // 500 = app-level error but process is alive. 000 = no connection.
-                if code != "000" && !code.is_empty() {
+                if code != "000" && !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()) {
                     return InstanceHealth::Running;
                 }
             }
@@ -63,8 +73,13 @@ impl InstanceMonitor {
             }
         }
         // Fallback: check if gateway-like process exists
-        match backend.exec("pgrep -f 'gateway' 2>/dev/null || echo ''").await {
-            Ok(out) if !out.trim().is_empty() => InstanceHealth::Running,
+        let pgrep_cmd = if is_native_windows {
+            "powershell -Command \"if (Get-Process | Where-Object {$_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*gateway*'}) { echo 'running' } else { echo '' }\"".to_string()
+        } else {
+            "pgrep -f 'gateway' 2>/dev/null || echo ''".to_string()
+        };
+        match backend.exec(&pgrep_cmd).await {
+            Ok(out) if !out.trim().is_empty() && out.trim() != "" => InstanceHealth::Running,
             _ => InstanceHealth::Stopped,
         }
     }

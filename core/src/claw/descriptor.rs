@@ -102,7 +102,7 @@ impl ClawDescriptor {
         ))
     }
 
-    /// The npm install command string.
+    /// The npm install command string. `prefix` sets the install root for native mode.
     pub fn npm_install_cmd(&self, version: &str) -> String {
         format!("npm install -g {}@{}", self.npm_package, version)
     }
@@ -110,6 +110,11 @@ impl ClawDescriptor {
     /// The npm install command with verbose logging (for progress tracking).
     pub fn npm_install_verbose_cmd(&self, version: &str) -> String {
         format!("npm install -g --loglevel verbose {}@{}", self.npm_package, version)
+    }
+
+    /// npm install with --prefix for native mode (installs into instance dir).
+    pub fn npm_install_prefix_cmd(&self, version: &str, prefix: &str) -> String {
+        format!("npm install -g --prefix \"{}\" --loglevel verbose {}@{}", prefix, self.npm_package, version)
     }
 
     /// Process name patterns for kill commands.

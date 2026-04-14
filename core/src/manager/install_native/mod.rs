@@ -167,7 +167,7 @@ pub async fn install_native(
         });
 
         let result = backend.exec_with_progress(
-            &desc.npm_install_verbose_cmd(&opts.claw_version),
+            &desc.npm_install_prefix_cmd(&opts.claw_version, &install_dir.to_string_lossy()),
             &progress_tx,
         ).await;
         drop(progress_tx);
