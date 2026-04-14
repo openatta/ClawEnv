@@ -112,9 +112,14 @@ impl ClawDescriptor {
         format!("npm install -g --loglevel verbose {}@{}", self.npm_package, version)
     }
 
-    /// Process name pattern for kill commands.
-    pub fn process_name(&self) -> String {
-        format!("{} gateway", self.cli_binary)
+    /// Process name patterns for kill commands.
+    /// Returns both "binary gateway" and "binary-gateway" to match
+    /// different process naming conventions.
+    pub fn process_names(&self) -> Vec<String> {
+        vec![
+            format!("{} gateway", self.cli_binary),
+            format!("{}-gateway", self.cli_binary),
+        ]
     }
 }
 

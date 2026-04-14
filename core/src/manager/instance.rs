@@ -80,7 +80,9 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     // Always kill stale gateway then restart fresh
-    backend.exec(&process::kill_by_name_cmd(&desc.process_name())).await.ok();
+    for pn in &desc.process_names() {
+        backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+    }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     let gateway_cmd = desc.gateway_start_cmd(port);
@@ -142,7 +144,12 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     // Gateway did not respond after 6 probes (~13s). Check if process even started.
-    let proc_check = backend.exec(&process::check_process_cmd(&desc.process_name())).await.unwrap_or_default();
+    // Check any of the process name variants
+    let mut proc_check = String::new();
+    for pn in &desc.process_names() {
+        let check = backend.exec(&process::check_process_cmd(pn)).await.unwrap_or_default();
+        if check.contains("running") { proc_check = check; break; }
+    }
     if proc_check.contains("running") {
         // Process is alive but not responding to HTTP yet — warn but don't fail.
         // It may be doing first-time initialization.
@@ -165,7 +172,9 @@ pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
     let desc = registry.get(&instance.claw_type);
     let backend = backend_for_instance(instance)?;
     // Force kill gateway and ttyd
-    backend.exec(&process::kill_by_name_cmd(&desc.process_name())).await.ok();
+    for pn in &desc.process_names() {
+        backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+    }
     backend.exec(&process::kill_by_name_cmd("ttyd")).await.ok();
     backend.stop().await?;
     tracing::info!("Instance '{}' stopped", instance.name);

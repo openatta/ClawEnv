@@ -62,9 +62,9 @@ impl InstanceMonitor {
                 return InstanceHealth::Unreachable;
             }
         }
-        // Fallback: check if process exists via pgrep (Alpine-compatible)
-        match backend.exec("pgrep -x node 2>/dev/null || echo ''").await {
-            Ok(out) if !out.trim().is_empty() => InstanceHealth::Running, // process alive but not responding on port yet
+        // Fallback: check if gateway-like process exists
+        match backend.exec("pgrep -f 'gateway' 2>/dev/null || echo ''").await {
+            Ok(out) if !out.trim().is_empty() => InstanceHealth::Running,
             _ => InstanceHealth::Stopped,
         }
     }

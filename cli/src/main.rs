@@ -366,8 +366,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 format!("cat /tmp/clawenv-gateway.log 2>/dev/null | tail -200")
             };
             let output = backend.exec(&cmd).await?;
-            // Logs are raw text, not JSON events
-            print!("{output}");
+            out.emit(CliEvent::Data { data: serde_json::Value::String(output) });
         }
 
         // ====== Upgrade ======

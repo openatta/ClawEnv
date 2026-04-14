@@ -43,7 +43,9 @@ pub async fn upgrade_instance(
 
     // 1. Stop gateway before upgrade
     send(tx, "Stopping gateway...", 20, "prepare").await;
-    backend.exec(&crate::platform::process::kill_by_name_cmd(&desc.process_name())).await.ok();
+    for pn in &desc.process_names() {
+        backend.exec(&crate::platform::process::kill_by_name_cmd(pn)).await.ok();
+    }
 
     // 2. Run npm upgrade
     let install_cmd = desc.npm_install_verbose_cmd(version);
