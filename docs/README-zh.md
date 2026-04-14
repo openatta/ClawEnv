@@ -52,3 +52,4 @@ cargo tauri build
 - [核心架构](02-architecture.md)
 - [技术栈](03-tech-stack.md)
 - [沙盒实现](04-sandbox.md)
+- [打包与发布](05-packaging.md)

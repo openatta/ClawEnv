@@ -87,6 +87,7 @@ cargo clippy --workspace # Lint
 - [Architecture](docs/02-architecture.md)
 - [Tech Stack](docs/03-tech-stack.md)
 - [Sandbox Implementation](docs/04-sandbox.md)
+- [Packaging & Distribution](docs/05-packaging.md)
 
 ## License
 

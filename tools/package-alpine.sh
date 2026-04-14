@@ -2,33 +2,46 @@
 # ClawEnv — Package an Alpine sandbox instance as a distributable image
 #
 # Usage:
-#   bash tools/package-alpine.sh [instance_name] [output_dir]
+#   bash tools/package-alpine.sh [OPTIONS] [instance_name] [output_dir]
+#
+# Options:
+#   --chromium    Include Chromium + noVNC (adds ~630MB, default: skip)
 #
 # Examples:
-#   bash tools/package-alpine.sh default ./dist-packages
-#   bash tools/package-alpine.sh              # defaults: instance=default, output=./packages
+#   bash tools/package-alpine.sh                          # default instance, no chromium
+#   bash tools/package-alpine.sh --chromium default ./dist
+#   bash tools/package-alpine.sh my-instance              # custom instance
 #
-# This script detects the current platform and exports the sandbox
-# in the appropriate format:
-#   macOS (Lima):   qcow2 disk image
-#   Linux (Podman): OCI container image tar
-#   Windows (WSL2): rootfs tar.gz
+# Platform behavior:
+#   macOS (Lima):   exports Lima VM as tar.gz (qcow2/vz disk)
+#   Linux (Podman): exports container as OCI image tar.gz
+#   Windows (WSL2): exports distro as rootfs tar.gz
 
 set -e
 
-INSTANCE="${1:-default}"
-OUTPUT_DIR="${2:-./packages}"
+# Parse options
+INSTALL_CHROMIUM=false
+POSITIONAL=()
+for arg in "$@"; do
+    case "$arg" in
+        --chromium) INSTALL_CHROMIUM=true ;;
+        *)          POSITIONAL+=("$arg") ;;
+    esac
+done
+
+INSTANCE="${POSITIONAL[0]:-default}"
+OUTPUT_DIR="${POSITIONAL[1]:-./packages}"
 VM_NAME="clawenv-${INSTANCE}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 
 mkdir -p "$OUTPUT_DIR"
 
 echo "=========================================="
-echo "  ClawEnv Package Builder"
+echo "  ClawEnv Alpine Package Builder"
 echo "=========================================="
-echo ""
 echo "Instance:   $INSTANCE"
 echo "VM Name:    $VM_NAME"
+echo "Chromium:   $INSTALL_CHROMIUM"
 echo "Output:     $OUTPUT_DIR"
 echo ""
 
@@ -45,19 +58,25 @@ PLATFORM=$(detect_platform)
 echo "Platform:   $PLATFORM"
 echo ""
 
-# Detect which claw binary is installed inside the sandbox
-get_claw_version() {
-    local cmd="for bin in openclaw zeroclaw autoclaw qclaw kimi-claw easyclaw duclaw arkclaw maxclaw chatclaw; do which \$bin >/dev/null 2>&1 && echo \"\$bin \$(\$bin --version 2>/dev/null || echo unknown)\" && exit 0; done; echo 'unknown unknown'"
+# Install Chromium if requested
+if [ "$INSTALL_CHROMIUM" = true ]; then
+    echo "=== Installing Chromium + noVNC ==="
     case "$PLATFORM" in
-        macos)
-            limactl shell "$VM_NAME" -- sh -c "$cmd" 2>/dev/null | head -1
-            ;;
-        linux)
-            podman exec "$VM_NAME" sh -c "$cmd" 2>/dev/null | head -1
-            ;;
-        windows)
-            wsl -d "ClawEnv-Alpine" -- sh -c "$cmd" 2>/dev/null | head -1
-            ;;
+        macos)   limactl shell "$VM_NAME" -- sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont ;;
+        linux)   podman exec "$VM_NAME" sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont ;;
+        windows) wsl -d "$VM_NAME" -- sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont ;;
+    esac
+    echo "Chromium installed."
+    echo ""
+fi
+
+# Detect claw version
+get_claw_version() {
+    local cmd="for bin in openclaw zeroclaw autoclaw; do which \$bin >/dev/null 2>&1 && echo \"\$bin \$(\$bin --version 2>/dev/null || echo unknown)\" && exit 0; done; echo 'unknown unknown'"
+    case "$PLATFORM" in
+        macos)   limactl shell "$VM_NAME" -- sh -c "$cmd" 2>/dev/null | head -1 ;;
+        linux)   podman exec "$VM_NAME" sh -c "$cmd" 2>/dev/null | head -1 ;;
+        windows) wsl -d "$VM_NAME" -- sh -c "$cmd" 2>/dev/null | head -1 ;;
     esac
 }
 
@@ -69,104 +88,50 @@ echo ""
 
 case "$PLATFORM" in
     macos)
-        echo "=== Exporting Lima VM as disk image ==="
-        # Stop VM first for clean export
-        echo "Stopping VM..."
+        echo "=== Exporting Lima VM ==="
         limactl stop "$VM_NAME" 2>/dev/null || true
         sleep 2
 
-        # Copy the disk image
         LIMA_DIR="$HOME/.lima/$VM_NAME"
-        if [ ! -d "$LIMA_DIR" ]; then
-            echo "ERROR: Lima instance '$VM_NAME' not found at $LIMA_DIR"
-            exit 1
-        fi
+        [ -d "$LIMA_DIR" ] || { echo "ERROR: Lima instance not found at $LIMA_DIR"; exit 1; }
 
         OUTFILE="$OUTPUT_DIR/clawenv-${INSTANCE}-${TIMESTAMP}-macos-$(uname -m).tar.gz"
-
-        echo "Packaging Lima instance..."
-        # Export essential files: disk + config + EFI (excludes logs, sockets, pids)
-        # Supports both QEMU (diffdisk/basedisk) and VZ (disk, vz-efi) drivers.
-        # GNU tar supports --sparse for efficient packing of VZ sparse disk files.
-        TAR_CMD="tar"
-        TAR_SPARSE=""
-        if command -v gtar &>/dev/null; then
-            TAR_CMD="gtar"
-            TAR_SPARSE="--sparse"
-        fi
+        TAR_CMD="tar"; TAR_SPARSE=""
+        command -v gtar &>/dev/null && { TAR_CMD="gtar"; TAR_SPARSE="--sparse"; }
 
         $TAR_CMD $TAR_SPARSE -czf "$OUTFILE" \
             -C "$HOME/.lima" \
-            --exclude="$VM_NAME/*.sock" \
-            --exclude="$VM_NAME/*.pid" \
-            --exclude="$VM_NAME/*.log" \
-            --exclude="$VM_NAME/cidata.iso" \
-            --exclude="$VM_NAME/ssh.config" \
-            --exclude="$VM_NAME/cloud-config.yaml" \
+            --exclude="$VM_NAME/*.sock" --exclude="$VM_NAME/*.pid" \
+            --exclude="$VM_NAME/*.log" --exclude="$VM_NAME/cidata.iso" \
+            --exclude="$VM_NAME/ssh.config" --exclude="$VM_NAME/cloud-config.yaml" \
             "$VM_NAME/"
 
-        if [ $? -ne 0 ]; then
-            echo "ERROR: Failed to package Lima instance"
-            echo "TIP: Install GNU tar for better sparse file handling: brew install gnu-tar"
-            exit 1
-        fi
-
-        # Restart VM
-        echo "Restarting VM..."
         limactl start "$VM_NAME" 2>/dev/null &
-
-        echo ""
-        echo "=== Package created ==="
-        ls -lh "$OUTFILE"
         ;;
 
     linux)
-        echo "=== Exporting Podman container as OCI image ==="
-        OUTFILE="$OUTPUT_DIR/clawenv-${INSTANCE}-${TIMESTAMP}-linux-$(uname -m).tar"
-
-        # Commit running container to image
-        echo "Committing container state..."
-        podman commit "$VM_NAME" "clawenv-export:${INSTANCE}" 2>/dev/null
-
-        # Save as tar
-        echo "Saving image..."
-        podman save -o "$OUTFILE" "clawenv-export:${INSTANCE}"
-
-        # Compress
-        echo "Compressing..."
-        gzip "$OUTFILE"
-        OUTFILE="${OUTFILE}.gz"
-
-        echo ""
-        echo "=== Package created ==="
-        ls -lh "$OUTFILE"
+        echo "=== Exporting Podman container ==="
+        OUTFILE="$OUTPUT_DIR/clawenv-${INSTANCE}-${TIMESTAMP}-linux-$(uname -m).tar.gz"
+        podman commit "$VM_NAME" "clawenv-export:${INSTANCE}"
+        podman save -o "${OUTFILE%.gz}" "clawenv-export:${INSTANCE}"
+        gzip "${OUTFILE%.gz}"
         ;;
 
     windows)
-        echo "=== Exporting WSL2 distro as tar.gz ==="
+        echo "=== Exporting WSL2 distro ==="
         OUTFILE="$OUTPUT_DIR/clawenv-${INSTANCE}-${TIMESTAMP}-windows-$(uname -m).tar.gz"
-
-        echo "Exporting WSL distro..."
-        wsl --export "ClawEnv-Alpine" "$OUTFILE"
-
-        echo ""
-        echo "=== Package created ==="
-        ls -lh "$OUTFILE"
+        wsl --export "$VM_NAME" "$OUTFILE"
         ;;
 
-    *)
-        echo "ERROR: Unsupported platform: $PLATFORM"
-        exit 1
-        ;;
+    *) echo "ERROR: Unsupported platform: $PLATFORM"; exit 1 ;;
 esac
 
-# Generate manifest
-MANIFEST="$OUTPUT_DIR/manifest-${INSTANCE}-${TIMESTAMP}.toml"
+# Manifest
 FILESIZE=$(stat -f%z "$OUTFILE" 2>/dev/null || stat -c%s "$OUTFILE" 2>/dev/null || echo 0)
 SHA256=$(shasum -a 256 "$OUTFILE" 2>/dev/null | awk '{print $1}' || sha256sum "$OUTFILE" 2>/dev/null | awk '{print $1}' || echo "unknown")
 
+MANIFEST="$OUTPUT_DIR/manifest-${INSTANCE}-${TIMESTAMP}.toml"
 cat > "$MANIFEST" << EOF
-# ClawEnv Package Manifest
 [package]
 instance = "$INSTANCE"
 platform = "$PLATFORM"
@@ -174,6 +139,7 @@ arch = "$(uname -m)"
 created_at = "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 claw_binary = "$CLAW_BIN"
 claw_version = "$CLAW_VERSION"
+chromium = $INSTALL_CHROMIUM
 
 [image]
 file = "$(basename "$OUTFILE")"
@@ -185,12 +151,9 @@ version = "0.2.0"
 EOF
 
 echo ""
+echo "=== Package complete ==="
+ls -lh "$OUTFILE"
 echo "Manifest: $MANIFEST"
-cat "$MANIFEST"
 echo ""
-echo "=========================================="
-echo "  Package complete!"
-echo "=========================================="
-echo ""
-echo "To install on another machine:"
+echo "Install on another machine:"
 echo "  clawenv install --image $(basename "$OUTFILE")"
