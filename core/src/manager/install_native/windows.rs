@@ -50,10 +50,12 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
         let _ = tokio::fs::remove_dir_all(d).await;
     }
 
-    // Extract to temp dir
+    // Extract to temp dir (normalize paths for PowerShell)
+    let zip_str = zip_path.to_string_lossy().replace('/', "\\");
+    let tmp_str = tmp_dir.to_string_lossy().replace('/', "\\");
     let extract_cmd = format!(
         "Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
-        zip_path.to_string_lossy(), tmp_dir.to_string_lossy(),
+        zip_str, tmp_str,
     );
     let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &extract_cmd])
@@ -73,10 +75,11 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
 
     // Move the extracted nested directory to final location
     // Zip contains one top-level dir: node-v22.16.0-win-arm64/
+    let node_dir_str = node_dir.to_string_lossy().replace('/', "\\");
     let move_cmd = format!(
         "$src = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
-         if ($src) {{ Rename-Item $src.FullName '{}' }}",
-        tmp_dir.to_string_lossy(), node_dir.to_string_lossy(),
+         if ($src) {{ Move-Item -Path $src.FullName -Destination '{}' -Force }}",
+        tmp_dir.to_string_lossy().replace('/', "\\"), node_dir_str,
     );
     let status = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &move_cmd])
