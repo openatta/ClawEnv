@@ -60,7 +60,7 @@ NPM_REGISTRY_MIRROR=https://registry.npmmirror.com \
 bash tools/package-native.sh
 ```
 
-Note: `--chromium` is ignored for native mode (uses system browser).
+Native mode uses the system browser — no Chromium installation needed.
 
 ### Output
 
@@ -130,10 +130,11 @@ Output:
 ### Remote Windows Build (via SSH)
 
 ```bash
-# From macOS, build on Windows VM
-ssh clawenv@192.168.64.7 \
-  "set \"PATH=C:\Program Files\Git\cmd;C:\Program Files\nodejs;C:\Users\clawenv\.cargo\bin;%PATH%\" && \
-   cd C:\Users\clawenv\ClawEnv && git pull && npm install && cargo tauri build"
+# From macOS/Linux, build on a Windows machine via SSH
+# Replace <USER>, <HOST> with your Windows SSH credentials
+ssh <USER>@<HOST> \
+  "set \"PATH=C:\Program Files\Git\cmd;C:\Program Files\nodejs;C:\Users\<USER>\.cargo\bin;%PATH%\" && \
+   cd C:\Users\<USER>\ClawEnv && git pull && npm install && cargo tauri build"
 ```
 
 ---

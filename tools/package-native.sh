@@ -4,13 +4,9 @@
 # Usage:
 #   bash tools/package-native.sh [OPTIONS] [openclaw_version] [output_dir]
 #
-# Options:
-#   --chromium    Ignored for native mode (native uses system browser)
-#
 # Examples:
 #   bash tools/package-native.sh                          # latest version
 #   bash tools/package-native.sh 2026.4.12 ./dist
-#   bash tools/package-native.sh --chromium latest        # --chromium is ignored
 #
 # Mirror env vars (for China / behind firewall):
 #   NODEJS_DIST_MIRROR=https://npmmirror.com/mirrors/node
@@ -20,17 +16,8 @@
 
 set -e
 
-# Parse options
-POSITIONAL=()
-for arg in "$@"; do
-    case "$arg" in
-        --chromium) echo "Note: --chromium ignored for native mode (uses system browser)" ;;
-        *)          POSITIONAL+=("$arg") ;;
-    esac
-done
-
-OC_VERSION="${POSITIONAL[0]:-latest}"
-OUTPUT_DIR="${POSITIONAL[1]:-./packages}"
+OC_VERSION="${1:-latest}"
+OUTPUT_DIR="${2:-./packages}"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 NODE_VERSION="v22.16.0"
 
