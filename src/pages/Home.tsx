@@ -64,6 +64,7 @@ export default function Home(props: {
   const [lang, setLang] = createSignal<Lang>("zh-CN");
   const l = () => t[lang()];
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
+  const [actionError, setActionError] = createSignal("");
   const [showClawPicker, setShowClawPicker] = createSignal(false);
 
   // Status modal (gateway log only)
@@ -93,21 +94,21 @@ export default function Home(props: {
   }
 
   async function handleStop(name: string) {
-    setActionLoading(`stop-${name}`);
+    setActionLoading(`stop-${name}`); setActionError("");
     try { await invoke("stop_instance", { name }); props.onHealthChange(); }
-    catch (e) { console.error(e); }
+    catch (e) { setActionError(`Stop failed: ${e}`); }
     finally { setActionLoading(null); }
   }
   async function handleStart(name: string) {
-    setActionLoading(`start-${name}`);
+    setActionLoading(`start-${name}`); setActionError("");
     try { await invoke("start_instance", { name }); props.onHealthChange(); }
-    catch (e) { console.error(e); }
+    catch (e) { setActionError(`Start failed: ${e}`); }
     finally { setActionLoading(null); }
   }
   async function handleRestart(name: string) {
-    setActionLoading(`restart-${name}`);
+    setActionLoading(`restart-${name}`); setActionError("");
     try { await invoke("stop_instance", { name }); await invoke("start_instance", { name }); props.onHealthChange(); }
-    catch (e) { console.error(e); }
+    catch (e) { setActionError(`Restart failed: ${e}`); }
     finally { setActionLoading(null); }
   }
 
@@ -124,6 +125,10 @@ export default function Home(props: {
             onClick={() => setLang("en")}>EN</button>
         </div>
       </div>
+
+      <Show when={actionError()}>
+        <div class="mb-4 p-3 bg-red-900/30 border border-red-700 rounded text-sm text-red-400">{actionError()}</div>
+      </Show>
 
       <section class="mb-6">
         <div class="flex items-center justify-between mb-3">
@@ -160,17 +165,17 @@ export default function Home(props: {
                     {isRunning() ? (
                       <button class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
                         disabled={loading()} onClick={() => handleStop(inst.name)}>
-                        {loading() ? "..." : l().stop}
+                        {actionLoading() === `stop-${inst.name}` ? `${l().stop}...` : l().stop}
                       </button>
                     ) : (
                       <button class="px-3 py-1 text-xs bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-50"
                         disabled={loading()} onClick={() => handleStart(inst.name)}>
-                        {loading() ? "..." : l().start}
+                        {actionLoading() === `start-${inst.name}` ? `${l().start}...` : l().start}
                       </button>
                     )}
                     <button class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
                       disabled={loading()} onClick={() => handleRestart(inst.name)}>
-                      {loading() ? "..." : l().restart}
+                      {actionLoading() === `restart-${inst.name}` ? `${l().restart}...` : l().restart}
                     </button>
                     <button class="px-3 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded ml-auto"
                       onClick={() => openStatus(inst.name)}>

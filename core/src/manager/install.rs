@@ -5,7 +5,7 @@ use crate::claw::ClawRegistry;
 use crate::config::{keychain, mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
 use crate::platform::network;
 use crate::sandbox::{
-    detect_backend, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
+    detect_backend_for, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
 };
 
 /// Escape a string for use inside single-quoted shell arguments.
@@ -130,7 +130,7 @@ pub async fn install(
     let desc = registry.get_strict(&opts.claw_type)?;
 
     send(&tx, "Detecting platform...", 5, InstallStage::DetectPlatform).await;
-    let backend: Box<dyn SandboxBackend> = detect_backend()?;
+    let backend: Box<dyn SandboxBackend> = detect_backend_for(&opts.instance_name)?;
 
     send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
     backend.ensure_prerequisites().await?;
