@@ -26,6 +26,7 @@ impl NativeBackend {
     }
 
     /// Build PATH with ClawEnv's own Node.js + instance bin dir prepended.
+    /// On Windows, also includes common tool paths (Git) that may be missing from SSH sessions.
     fn clawenv_path(&self) -> String {
         let home = dirs::home_dir().unwrap_or_default();
         #[cfg(target_os = "windows")]
@@ -38,7 +39,23 @@ impl NativeBackend {
         #[cfg(not(target_os = "windows"))]
         let inst_bin = self.install_dir.join("bin");
 
-        let current = std::env::var("PATH").unwrap_or_default();
+        let mut current = std::env::var("PATH").unwrap_or_default();
+
+        // On Windows, ensure Git and other common tools are in PATH
+        #[cfg(target_os = "windows")]
+        {
+            let extra_paths = [
+                r"C:\Program Files\Git\cmd",
+                r"C:\Program Files\Git\bin",
+                r"C:\Program Files\LLVM\bin",
+            ];
+            for p in &extra_paths {
+                if std::path::Path::new(p).exists() && !current.contains(p) {
+                    current = format!("{};{}", current, p);
+                }
+            }
+        }
+
         #[cfg(target_os = "windows")]
         { format!("{};{};{}", node_bin.display(), inst_bin.display(), current) }
         #[cfg(not(target_os = "windows"))]
