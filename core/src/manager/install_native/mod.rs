@@ -21,13 +21,137 @@ use crate::sandbox::{InstallMode, SandboxType, native_backend, SandboxBackend};
 
 use super::install::{InstallOptions, InstallProgress, InstallStage, send, shell_escape};
 
-// ---- Node.js location helpers (shared across platforms) ----
+// ---- Self-managed tool directories ----
 
 /// ClawEnv-private Node.js directory (~/.clawenv/node/).
 pub fn clawenv_node_dir() -> std::path::PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".clawenv/node")
+        .join(".clawenv").join("node")
+}
+
+/// ClawEnv-private Git directory (~/.clawenv/git/).
+pub fn clawenv_git_dir() -> std::path::PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| std::path::PathBuf::from("."))
+        .join(".clawenv").join("git")
+}
+
+/// Git binary path inside ClawEnv's private Git.
+fn clawenv_git_bin() -> std::path::PathBuf {
+    let dir = clawenv_git_dir();
+    #[cfg(target_os = "windows")]
+    { dir.join("cmd").join("git.exe") }
+    #[cfg(target_os = "macos")]
+    { dir.join("bin").join("git") }
+    #[cfg(target_os = "linux")]
+    { dir.join("bin").join("git") }
+}
+
+/// Check if ClawEnv's own Git or system git is available.
+pub async fn has_git() -> bool {
+    if clawenv_git_bin().exists() { return true; }
+    // Fallback: check system git
+    crate::platform::process::silent_cmd("git")
+        .args(["--version"])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status().await
+        .map(|s| s.success()).unwrap_or(false)
+}
+
+/// Install Git portable to ~/.clawenv/git/.
+async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
+    let git_dir = clawenv_git_dir();
+    tokio::fs::create_dir_all(&git_dir).await?;
+
+    #[cfg(target_os = "windows")]
+    {
+        send(tx, "Downloading Git for Windows (MinGit)...", 6, InstallStage::EnsurePrerequisites).await;
+        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "64-bit" };
+        // MinGit is the official portable minimal Git from git-for-windows
+        let url = format!(
+            "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-{arch}.zip"
+        );
+        let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
+        let zip_path = parent.join("git.zip");
+
+        let status = crate::platform::process::silent_cmd("curl.exe")
+            .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
+            .status().await?;
+        if !status.success() {
+            anyhow::bail!("Failed to download MinGit from {url}");
+        }
+
+        send(tx, "Extracting Git...", 8, InstallStage::EnsurePrerequisites).await;
+        let git_str = git_dir.to_string_lossy().replace('/', "\\");
+        let zip_str = zip_path.to_string_lossy().replace('/', "\\");
+        let cmd = format!(
+            "Remove-Item -Recurse -Force '{}' -ErrorAction SilentlyContinue; \
+             Expand-Archive -Path '{}' -DestinationPath '{}' -Force",
+            git_str, zip_str, git_str,
+        );
+        crate::platform::process::silent_cmd("powershell")
+            .args(["-Command", &cmd])
+            .status().await?;
+
+        tokio::fs::remove_file(&zip_path).await.ok();
+
+        if !git_dir.join("cmd").join("git.exe").exists() {
+            anyhow::bail!("Git extraction failed: git.exe not found");
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        send(tx, "Downloading Git for macOS...", 6, InstallStage::EnsurePrerequisites).await;
+        // Use the Apple open-source git binary via xcode-select,
+        // or download a standalone tarball from git-scm
+        // First try: trigger xcode-select if available (non-interactive check)
+        let has_xcrun = tokio::process::Command::new("xcrun")
+            .args(["--find", "git"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await.map(|s| s.success()).unwrap_or(false);
+        if has_xcrun {
+            // xcrun git exists — symlink it
+            let xcrun_out = tokio::process::Command::new("xcrun")
+                .args(["--find", "git"])
+                .output().await?;
+            let git_path = String::from_utf8_lossy(&xcrun_out.stdout).trim().to_string();
+            if !git_path.is_empty() {
+                tokio::fs::create_dir_all(git_dir.join("bin")).await?;
+                tokio::fs::symlink(&git_path, git_dir.join("bin").join("git")).await.ok();
+                send(tx, "Git ready (via Xcode CLI tools)", 9, InstallStage::EnsurePrerequisites).await;
+                return Ok(());
+            }
+        }
+        // Fallback: download portable git
+        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "intel" };
+        let url = format!(
+            "https://github.com/git-for-macosx/git-for-macosx/releases/latest/download/git-{arch}.tar.gz"
+        );
+        let tar_path = git_dir.parent().unwrap_or(&git_dir).join("git.tar.gz");
+        let status = tokio::process::Command::new("curl")
+            .args(["-fSL", "-o", &tar_path.to_string_lossy(), &url])
+            .status().await?;
+        if status.success() {
+            tokio::process::Command::new("tar")
+                .args(["xzf", &tar_path.to_string_lossy(), "-C", &git_dir.to_string_lossy()])
+                .status().await?;
+            tokio::fs::remove_file(&tar_path).await.ok();
+        }
+        // If download fails, we'll rely on system git or xcode-select prompt
+        send(tx, "Git ready", 9, InstallStage::EnsurePrerequisites).await;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        // Linux: git is usually pre-installed. If not, user should install via package manager.
+        send(tx, "Git not found. Please install: sudo apt install git", 8, InstallStage::EnsurePrerequisites).await;
+    }
+
+    Ok(())
 }
 
 /// Node binary path inside ClawEnv's private Node.js.
@@ -114,6 +238,11 @@ pub async fn install_native(
     }
 
     let mirrors = &config.config().clawenv.mirrors;
+
+    // Step 0: Ensure Git (needed by npm for some dependencies)
+    if !has_git().await {
+        install_git(tx).await?;
+    }
 
     // Step 1: Ensure Node.js
     send(tx, "Checking Node.js environment...", 10, InstallStage::EnsurePrerequisites).await;

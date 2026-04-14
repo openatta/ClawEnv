@@ -25,14 +25,20 @@ impl NativeBackend {
         Self { install_dir }
     }
 
-    /// Build PATH with ClawEnv's own Node.js + instance bin dir prepended.
-    /// On Windows, also includes common tool paths (Git) that may be missing from SSH sessions.
+    /// Build PATH with ClawEnv's own Node.js, Git, and instance bin dir prepended.
     fn clawenv_path(&self) -> String {
         let home = dirs::home_dir().unwrap_or_default();
+        let clawenv = home.join(".clawenv");
+
         #[cfg(target_os = "windows")]
-        let node_bin = home.join(".clawenv").join("node");
+        let node_bin = clawenv.join("node");
         #[cfg(not(target_os = "windows"))]
-        let node_bin = home.join(".clawenv").join("node").join("bin");
+        let node_bin = clawenv.join("node").join("bin");
+
+        #[cfg(target_os = "windows")]
+        let git_bin = clawenv.join("git").join("cmd");
+        #[cfg(not(target_os = "windows"))]
+        let git_bin = clawenv.join("git").join("bin");
 
         #[cfg(target_os = "windows")]
         let inst_bin = self.install_dir.clone();
@@ -41,15 +47,10 @@ impl NativeBackend {
 
         let mut current = std::env::var("PATH").unwrap_or_default();
 
-        // On Windows, ensure Git and other common tools are in PATH
+        // Also include system Git paths as fallback (Windows)
         #[cfg(target_os = "windows")]
         {
-            let extra_paths = [
-                r"C:\Program Files\Git\cmd",
-                r"C:\Program Files\Git\bin",
-                r"C:\Program Files\LLVM\bin",
-            ];
-            for p in &extra_paths {
+            for p in [r"C:\Program Files\Git\cmd", r"C:\Program Files\LLVM\bin"] {
                 if std::path::Path::new(p).exists() && !current.contains(p) {
                     current = format!("{};{}", current, p);
                 }
@@ -57,9 +58,9 @@ impl NativeBackend {
         }
 
         #[cfg(target_os = "windows")]
-        { format!("{};{};{}", node_bin.display(), inst_bin.display(), current) }
+        { format!("{};{};{};{}", node_bin.display(), git_bin.display(), inst_bin.display(), current) }
         #[cfg(not(target_os = "windows"))]
-        { format!("{}:{}:{}", node_bin.display(), inst_bin.display(), current) }
+        { format!("{}:{}:{}:{}", node_bin.display(), git_bin.display(), inst_bin.display(), current) }
     }
 
     /// Create a platform-appropriate shell command with ClawEnv node in PATH.
