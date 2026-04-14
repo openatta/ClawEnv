@@ -283,7 +283,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             claw_type: inst.claw_type.clone(),
                             version: inst.version.clone(),
                             sandbox_type: inst.sandbox_type.display_name().to_string(),
-                            health: format!("{:?}", health),
+                            health: serde_json::to_value(&health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
                             gateway_port: inst.gateway.gateway_port,
                             ttyd_port: inst.gateway.ttyd_port,
                         });
@@ -337,7 +337,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 claw_type: inst.claw_type.clone(),
                 version: inst.version.clone(),
                 sandbox_type: inst.sandbox_type.display_name().to_string(),
-                health: format!("{:?}", health),
+                health: serde_json::to_value(&health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
                 gateway_port: inst.gateway.gateway_port,
                 ttyd_port: inst.gateway.ttyd_port,
                 capabilities: None,

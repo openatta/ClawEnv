@@ -73,9 +73,9 @@ fn main() {
                                 Ok(data) => {
                                     serde_json::from_value::<StatusResponse>(data)
                                         .map(|r| r.health)
-                                        .unwrap_or_else(|_| "Unreachable".into())
+                                        .unwrap_or_else(|_| "unreachable".into())
                                 }
-                                Err(_) => "Unreachable".into(),
+                                Err(_) => "unreachable".into(),
                             };
 
                             // Emit health event to frontend
@@ -89,14 +89,14 @@ fn main() {
                                 if *prev != health {
                                     let _ = tray::refresh_tray(&monitor_handle);
                                     let (title, body) = match health.as_str() {
-                                        "Running" => ("Instance Recovered", format!("'{}' is now running", inst.name)),
-                                        "Stopped" => ("Instance Stopped", format!("'{}' has stopped", inst.name)),
+                                        "running" => ("Instance Recovered", format!("'{}' is now running", inst.name)),
+                                        "stopped" => ("Instance Stopped", format!("'{}' has stopped", inst.name)),
                                         _ => ("Instance Unreachable", format!("'{}' is unreachable", inst.name)),
                                     };
                                     tray::send_notification(&monitor_handle, title, &body);
                                     let tray_status = match health.as_str() {
-                                        "Running" => tray::TrayStatus::Running,
-                                        "Stopped" => tray::TrayStatus::Stopped,
+                                        "running" => tray::TrayStatus::Running,
+                                        "stopped" => tray::TrayStatus::Stopped,
                                         _ => tray::TrayStatus::Error,
                                     };
                                     tray::set_tray_status(&monitor_handle, tray_status);
