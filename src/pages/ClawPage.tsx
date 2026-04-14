@@ -117,10 +117,14 @@ export default function ClawPage(props: {
 
   async function doDelete() {
     setShowDeleteConfirm(false);
-    setActionLoading(`delete:${activeTab()}`);
+    const deletedName = activeTab();
+    setActionLoading(`delete:${deletedName}`);
     setActionError("");
     try {
-      await invoke("delete_instance", { name: activeTab() });
+      await invoke("delete_instance", { name: deletedName });
+      // Switch to another tab or clear
+      const remaining = props.instances.filter(i => i.name !== deletedName);
+      setActiveTab(remaining[0]?.name ?? "");
       props.onInstancesChanged?.();
     } catch (e) {
       setActionError(String(e));

@@ -291,10 +291,14 @@ function VmCard(props: {
     setConfirmDelete(false);
     setActionLoading("delete");
     try {
+      // If managed, also delete the associated OC instance config
+      if (props.vm.managed) {
+        try { await invoke("delete_instance", { name: instanceName() }); } catch { /* may already be gone */ }
+      }
       await invoke("sandbox_vm_action", { vmName: props.vm.name, action: "delete" });
       props.onRefresh();
     } catch (e) {
-      alert(`Delete failed: ${e}`);
+      console.error(`Delete failed: ${e}`);
     } finally {
       setActionLoading("");
     }

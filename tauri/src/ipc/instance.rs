@@ -3,7 +3,7 @@ use clawenv_core::claw::ClawRegistry;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 use serde::Serialize;
-use tauri::{Manager, webview::WebviewWindowBuilder};
+use tauri::{Emitter, Manager, webview::WebviewWindowBuilder};
 
 use crate::cli_bridge;
 
@@ -92,8 +92,9 @@ pub async fn stop_instance(name: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub async fn delete_instance(name: String) -> Result<(), String> {
+pub async fn delete_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["uninstall", "--name", &name]).await.map_err(|e| e.to_string())?;
+    let _ = app.emit("instances-changed", ());
     Ok(())
 }
 
