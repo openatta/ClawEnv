@@ -37,14 +37,21 @@ fn main() {
             });
 
             // Start bridge server if enabled
+            let bridge_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 if let Ok(config) = ConfigManager::load() {
                     let bridge_cfg = &config.config().clawenv.bridge;
                     if bridge_cfg.enabled {
                         tracing::info!("Starting bridge server on port {}", bridge_cfg.port);
+                        // Create event emitter closure for HIL notifications
+                        let bh = bridge_handle.clone();
+                        let emitter: Box<dyn Fn(&str, &str) + Send + Sync> = Box::new(move |event, payload| {
+                            let _ = bh.emit(event, payload.to_string());
+                        });
                         if let Err(e) = clawenv_core::bridge::server::start_bridge(
                             bridge_cfg.port,
                             bridge_cfg.permissions.clone(),
+                            Some(emitter),
                         ).await {
                             tracing::error!("Bridge server failed: {e}");
                         }
@@ -217,6 +224,7 @@ fn main() {
             ipc::browser_status,
             ipc::browser_start_interactive,
             ipc::browser_resume_headless,
+            ipc::hil_complete,
             ipc::get_gateway_token,
             ipc::get_bridge_config,
             ipc::save_bridge_config,

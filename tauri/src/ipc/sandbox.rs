@@ -223,3 +223,13 @@ pub async fn browser_resume_headless(name: String) -> Result<(), String> {
     let browser = ChromiumBackend::new(backend_arc);
     browser.resume_headless().await.map_err(|e| e.to_string())
 }
+
+/// Notify bridge server that HIL is complete (unblocks hil_request)
+#[tauri::command]
+pub async fn hil_complete() -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let port = config.config().clawenv.bridge.port;
+    let url = format!("http://127.0.0.1:{port}/api/hil/complete");
+    reqwest::Client::new().post(&url).send().await.map_err(|e| e.to_string())?;
+    Ok(())
+}

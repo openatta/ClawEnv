@@ -137,10 +137,10 @@ export default function Home(props: {
       <section class="mb-6">
         <div class="flex items-center justify-between mb-3">
           <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">{l().instances}</h2>
-          <Show when={props.onAddInstance && props.clawTypes && props.clawTypes.length > 0}>
+          <Show when={props.onAddInstance}>
             <button
               class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white"
-              onClick={() => setShowClawPicker(true)}
+              onClick={() => props.onAddInstance?.("openclaw")}
             >+ Add</button>
           </Show>
         </div>

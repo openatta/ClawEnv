@@ -34,13 +34,25 @@ export default function SandboxPage() {
   const [hilUrl, setHilUrl] = createSignal("");
   const [browserLoading, setBrowserLoading] = createSignal("");
 
-  // Listen for HIL events from backend monitor
+  // Listen for HIL events from backend health monitor AND bridge server
   onMount(async () => {
-    const unlisten = await listen<{ instance: string; novnc_url: string }>("hil-required", (ev) => {
+    const un1 = await listen<{ instance: string; novnc_url: string }>("hil-required", (ev) => {
       setHilInstance(ev.payload.instance);
       setHilUrl(ev.payload.novnc_url);
     });
-    onCleanup(() => unlisten());
+    // Bridge-originated HIL: hil-skill called /api/hil/request
+    const un2 = await listen<string>("hil-bridge-request", async (ev) => {
+      try {
+        const data = JSON.parse(ev.payload);
+        // Auto-start interactive mode for the first managed sandbox instance
+        const vmList = vms().filter(v => v.managed && v.status.toLowerCase().includes("running"));
+        if (vmList.length > 0) {
+          const name = vmList[0].name.replace(/^clawenv-/, "");
+          await startBrowserInteractive(name);
+        }
+      } catch { /* ignore parse errors */ }
+    });
+    onCleanup(() => { un1(); un2(); });
   });
 
   async function startBrowserInteractive(instanceName: string) {
@@ -50,7 +62,7 @@ export default function SandboxPage() {
       setHilInstance(instanceName);
       setHilUrl(url);
     } catch (e) {
-      alert(`Failed to start browser: ${e}`);
+      console.error(`Failed to start browser: ${e}`);
     } finally {
       setBrowserLoading("");
     }
@@ -61,6 +73,8 @@ export default function SandboxPage() {
     if (!name) return;
     try {
       await invoke("browser_resume_headless", { name });
+      // Notify bridge to unblock the hil_request call
+      try { await invoke("hil_complete"); } catch { /* bridge may not be running */ }
     } catch { /* ignore */ }
     setHilInstance(null);
     setHilUrl("");
