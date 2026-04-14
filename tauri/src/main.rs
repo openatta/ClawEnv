@@ -22,9 +22,20 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_autostart::init(
+            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+            Some(vec!["--minimized"]),
+        ))
         .setup(|app| {
             // Initialize system tray
             tray::setup_tray(app.handle())?;
+
+            // If launched with --minimized (autostart), hide main window
+            if std::env::args().any(|a| a == "--minimized") {
+                if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.hide();
+                }
+            }
 
             // Detect launch state and emit to frontend
             let handle = app.handle().clone();
@@ -211,6 +222,8 @@ fn main() {
             ipc::open_install_window,
             ipc::get_instance_health,
             ipc::save_settings,
+            ipc::autostart_is_enabled,
+            ipc::autostart_set,
             ipc::test_connectivity,
             ipc::detect_system_proxy,
             ipc::system_check,
@@ -225,6 +238,8 @@ fn main() {
             ipc::browser_start_interactive,
             ipc::browser_resume_headless,
             ipc::hil_complete,
+            ipc::exec_approve,
+            ipc::exec_deny,
             ipc::get_gateway_token,
             ipc::get_bridge_config,
             ipc::save_bridge_config,

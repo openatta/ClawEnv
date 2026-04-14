@@ -36,6 +36,24 @@ pub async fn save_settings(settings_json: String) -> Result<(), String> {
     config.save().map_err(|e| e.to_string())
 }
 
+/// Check if autostart is enabled at OS level
+#[tauri::command]
+pub async fn autostart_is_enabled(app: tauri::AppHandle) -> Result<bool, String> {
+    use tauri_plugin_autostart::ManagerExt;
+    app.autolaunch().is_enabled().map_err(|e| e.to_string())
+}
+
+/// Enable or disable autostart at OS level
+#[tauri::command]
+pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
+    use tauri_plugin_autostart::ManagerExt;
+    if enabled {
+        app.autolaunch().enable().map_err(|e| e.to_string())
+    } else {
+        app.autolaunch().disable().map_err(|e| e.to_string())
+    }
+}
+
 #[tauri::command]
 pub async fn create_default_config(user_mode: String) -> Result<(), String> {
     let mode = match user_mode.to_lowercase().as_str() {

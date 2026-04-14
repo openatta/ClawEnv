@@ -12,6 +12,12 @@ pub struct BridgeState {
     pub hil_complete: Arc<Notify>,
     /// HIL: current pending request (reason, url)
     pub hil_pending: Option<HilRequest>,
+    /// Exec approval: signals when user approves/denies
+    pub approval_notify: Arc<Notify>,
+    /// Exec approval: user decision (true=approved, false=denied)
+    pub approval_decision: Option<bool>,
+    /// Exec approval: pending command for display
+    pub approval_pending: Option<String>,
     /// Tauri app handle for emitting events to frontend
     pub event_emitter: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
 }
@@ -229,7 +235,36 @@ async fn exec_handler(
     match perms.can_exec(&full_cmd) {
         PermissionResult::Allowed => {}
         PermissionResult::Denied(reason) => return Err(forbidden_json(reason)),
-        PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
+        PermissionResult::RequiresApproval(_) => {
+            // Store pending command and emit approval request to frontend
+            let notify = {
+                let mut s = state.write().await;
+                s.approval_pending = Some(full_cmd.clone());
+                s.approval_decision = None;
+                if let Some(ref emitter) = s.event_emitter {
+                    let payload = serde_json::json!({ "command": full_cmd }).to_string();
+                    emitter("exec-approval-required", &payload);
+                }
+                s.approval_notify.clone()
+            };
+            // Block until user approves/denies (60s timeout)
+            let result = tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                notify.notified(),
+            ).await;
+            let approved = {
+                let mut s = state.write().await;
+                let decision = s.approval_decision.unwrap_or(false);
+                s.approval_pending = None;
+                s.approval_decision = None;
+                decision
+            };
+            match result {
+                Ok(()) if approved => {} // proceed to execute
+                Ok(()) => return Err(forbidden_json("User denied the command".to_string())),
+                Err(_) => return Err(forbidden_json("Approval timed out (60s)".to_string())),
+            }
+        }
     }
 
     let output = tokio::process::Command::new(&req.command)
@@ -336,10 +371,44 @@ async fn hil_complete_handler(
     Json(HilCompleteRes { ok: true, message: "Notified agent to continue.".into() })
 }
 
+// ---------- Exec approval handlers ----------
+
+#[derive(Serialize)]
+struct ApprovalStatusRes {
+    pending: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<String>,
+}
+
+/// POST /api/exec/approve — user approves the pending command
+async fn exec_approve_handler(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let mut s = state.write().await;
+    s.approval_decision = Some(true);
+    s.approval_notify.notify_one();
+    tracing::info!("Exec approved by user");
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// POST /api/exec/deny — user denies the pending command
+async fn exec_deny_handler(State(state): State<SharedState>) -> Json<serde_json::Value> {
+    let mut s = state.write().await;
+    s.approval_decision = Some(false);
+    s.approval_notify.notify_one();
+    tracing::info!("Exec denied by user");
+    Json(serde_json::json!({ "ok": true }))
+}
+
+/// GET /api/exec/pending — check if there's a pending approval
+async fn exec_pending_handler(State(state): State<SharedState>) -> Json<ApprovalStatusRes> {
+    let s = state.read().await;
+    Json(ApprovalStatusRes {
+        pending: s.approval_pending.is_some(),
+        command: s.approval_pending.clone(),
+    })
+}
+
 // ---------- Server entry point ----------
 
-/// Start the bridge server. `event_emitter` is an optional callback to emit
-/// Tauri events (e.g., for HIL notifications to the frontend).
 pub async fn start_bridge(
     port: u16,
     permissions: BridgePermissions,
@@ -349,6 +418,9 @@ pub async fn start_bridge(
         permissions,
         hil_complete: Arc::new(Notify::new()),
         hil_pending: None,
+        approval_notify: Arc::new(Notify::new()),
+        approval_decision: None,
+        approval_pending: None,
         event_emitter,
     }));
 
@@ -359,6 +431,9 @@ pub async fn start_bridge(
         .route("/api/file/write", post(file_write_handler))
         .route("/api/file/list", post(file_list_handler))
         .route("/api/exec", post(exec_handler))
+        .route("/api/exec/approve", post(exec_approve_handler))
+        .route("/api/exec/deny", post(exec_deny_handler))
+        .route("/api/exec/pending", get(exec_pending_handler))
         .route("/api/hil/request", post(hil_request_handler))
         .route("/api/hil/status", get(hil_status_handler))
         .route("/api/hil/complete", post(hil_complete_handler))

@@ -233,3 +233,25 @@ pub async fn hil_complete() -> Result<(), String> {
     reqwest::Client::new().post(&url).send().await.map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Approve a pending exec command
+#[tauri::command]
+pub async fn exec_approve() -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let port = config.config().clawenv.bridge.port;
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/exec/approve"))
+        .send().await.map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Deny a pending exec command
+#[tauri::command]
+pub async fn exec_deny() -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let port = config.config().clawenv.bridge.port;
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/exec/deny"))
+        .send().await.map_err(|e| e.to_string())?;
+    Ok(())
+}

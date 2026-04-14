@@ -70,6 +70,20 @@ export default function App() {
   const [showQuitDialog, setShowQuitDialog] = createSignal(false);
   const [runningCount, setRunningCount] = createSignal(0);
 
+  // Exec approval dialog state
+  const [approvalCommand, setApprovalCommand] = createSignal<string | null>(null);
+
+  // Listen for exec-approval-required from bridge
+  onMount(async () => {
+    const unlisten = await listen<string>("exec-approval-required", (ev) => {
+      try {
+        const data = JSON.parse(ev.payload);
+        setApprovalCommand(data.command || "unknown command");
+      } catch { setApprovalCommand(ev.payload); }
+    });
+    onCleanup(() => unlisten());
+  });
+
   // Listen for quit-requested from tray
   onMount(async () => {
     const unlisten = await listen("quit-requested", async () => {
@@ -196,6 +210,29 @@ export default function App() {
               onClick={() => setShowQuitDialog(false)}>Cancel</button>
             <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
               onClick={() => invoke("exit_app")}>Quit</button>
+          </div>
+        </div>
+      </div>
+    </Show>
+
+    {/* Exec approval dialog */}
+    <Show when={approvalCommand()}>
+      <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl text-white">
+          <h3 class="text-base font-bold mb-2 text-orange-400">Exec Approval Required</h3>
+          <p class="text-sm text-gray-300 mb-2">An agent wants to execute a command on your machine:</p>
+          <pre class="bg-gray-950 border border-gray-600 rounded p-2 text-xs text-green-400 mb-4 whitespace-pre-wrap break-all">
+            {approvalCommand()}
+          </pre>
+          <div class="flex gap-2 justify-end">
+            <button class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded"
+              onClick={async () => { await invoke("exec_deny"); setApprovalCommand(null); }}>
+              Deny
+            </button>
+            <button class="px-3 py-1.5 text-sm bg-green-700 hover:bg-green-600 rounded"
+              onClick={async () => { await invoke("exec_approve"); setApprovalCommand(null); }}>
+              Approve
+            </button>
           </div>
         </div>
       </div>

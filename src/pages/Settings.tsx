@@ -33,6 +33,15 @@ export default function Settings() {
   const [httpProxy, setHttpProxy] = createSignal("");
   const [noProxy, setNoProxy] = createSignal("localhost,127.0.0.1");
   const [autoCheck, setAutoCheck] = createSignal(true);
+  const [autostart, setAutostart] = createSignal(false);
+
+  // Load autostart status on mount
+  onMount(async () => {
+    try {
+      const enabled = await invoke<boolean>("autostart_is_enabled");
+      setAutostart(enabled);
+    } catch { /* plugin may not be available */ }
+  });
 
   // Bridge settings
   const [bridgeEnabled, setBridgeEnabled] = createSignal(false);
@@ -168,6 +177,12 @@ export default function Settings() {
               <Row label="Enable tray"><Toggle checked={trayEnabled()} onChange={setTrayEnabled} /></Row>
               <Row label="Start minimized"><Toggle checked={startMinimized()} onChange={setStartMinimized} /></Row>
               <Row label="Show notifications"><Toggle checked={showNotifications()} onChange={setShowNotifications} /></Row>
+              <Row label="Launch at login">
+                <Toggle checked={autostart()} onChange={async (v) => {
+                  try { await invoke("autostart_set", { enabled: v }); setAutostart(v); }
+                  catch (e) { console.error("autostart_set failed:", e); }
+                }} />
+              </Row>
             </div>
           </section>
 
