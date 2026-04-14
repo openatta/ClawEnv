@@ -50,9 +50,11 @@ mod descriptor_tests {
     }
 
     #[test]
-    fn openclaw_process_name() {
+    fn openclaw_process_names() {
         let d = openclaw_descriptor();
-        assert_eq!(d.process_name(), "openclaw gateway");
+        let names = d.process_names();
+        assert!(names.contains(&"openclaw gateway".to_string()));
+        assert!(names.contains(&"openclaw-gateway".to_string()));
     }
 
     #[test]
@@ -98,9 +100,9 @@ mod descriptor_tests {
         assert!(npm.contains(&d.npm_package), "npm install missing package for {id}: {npm}");
         assert!(npm.contains("@latest"), "npm install missing version for {id}: {npm}");
 
-        // process_name must contain binary
-        let pn = d.process_name();
-        assert!(pn.contains(expected_binary), "process_name missing binary for {id}: {pn}");
+        // process_names must contain binary
+        let pns = d.process_names();
+        assert!(pns.iter().any(|p| p.contains(expected_binary)), "process_names missing binary for {id}: {pns:?}");
 
         // API key support
         if has_apikey {

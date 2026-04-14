@@ -14,20 +14,6 @@ pub async fn detect_launch_state() -> Result<clawenv_core::launcher::LaunchState
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
-pub fn get_openclaw_url(instance_name: Option<String>) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let name = instance_name.unwrap_or_else(|| "default".into());
-
-    let inst = config
-        .instances()
-        .iter()
-        .find(|i| i.name == name)
-        .ok_or_else(|| format!("Instance '{}' not found", name))?;
-
-    Ok(format!("http://127.0.0.1:{}", inst.gateway.gateway_port))
-}
-
 #[derive(Debug, Serialize)]
 pub struct InstanceInfo {
     pub name: String,
@@ -63,34 +49,6 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
     Ok(instances)
 }
 
-#[derive(Serialize)]
-pub struct InstanceStatusDetail {
-    pub processes: String,
-    pub resources: String,
-    pub gateway_log: String,
-}
-
-#[tauri::command]
-pub async fn get_instance_status_detail(name: String) -> Result<InstanceStatusDetail, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-
-    let processes = backend.exec(
-        "ps aux 2>/dev/null || ps -ef 2>/dev/null || echo 'ps not available'"
-    ).await.unwrap_or_else(|e| format!("Error: {e}"));
-
-    let resources = backend.exec(
-        "echo '--- Memory ---' && free -m 2>/dev/null || cat /proc/meminfo 2>/dev/null | head -5; echo ''; echo '--- Disk ---' && df -h / 2>/dev/null; echo ''; echo '--- Uptime ---' && uptime 2>/dev/null"
-    ).await.unwrap_or_else(|e| format!("Error: {e}"));
-
-    let gateway_log = backend.exec(
-        "tail -100 /tmp/clawenv-gateway.log 2>/dev/null || echo 'No gateway log found'"
-    ).await.unwrap_or_else(|e| format!("Error: {e}"));
-
-    Ok(InstanceStatusDetail { processes, resources, gateway_log })
-}
-
 #[tauri::command]
 pub async fn get_instance_logs(name: String) -> Result<String, String> {
     let data = cli_bridge::run_cli(&["logs", &name]).await.map_err(|e| e.to_string())?;
@@ -119,13 +77,6 @@ pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<St
         .map_err(|e| e.to_string())?;
 
     Ok(())
-}
-
-#[tauri::command]
-pub async fn get_sandbox_ip(name: String) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    instance::get_sandbox_ip(inst).await.map_err(|e| e.to_string())
 }
 
 #[tauri::command]

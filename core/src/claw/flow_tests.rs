@@ -96,8 +96,7 @@ async fn upgrade_commands_use_descriptor_for_all_claws() {
         let version = "2.0.0";
 
         // Step 1: kill old gateway
-        let process_name = desc.process_name();
-        let kill_cmd = crate::platform::process::kill_by_name_cmd(&process_name);
+        let kill_cmd = crate::platform::process::kill_by_name_cmd(&desc.process_names()[0]);
         let _ = backend.exec(&kill_cmd).await;
 
         // Step 2: upgrade script
@@ -136,8 +135,7 @@ async fn instance_lifecycle_uses_descriptor_for_all_claws() {
         backend.set_default_response("");
 
         // Start: kill stale + start gateway
-        let process_name = desc.process_name();
-        let kill_cmd = crate::platform::process::kill_by_name_cmd(&process_name);
+        let kill_cmd = crate::platform::process::kill_by_name_cmd(&desc.process_names()[0]);
         let _ = backend.exec(&kill_cmd).await;
 
         let gateway_cmd = desc.gateway_start_cmd(desc.default_port);

@@ -171,10 +171,8 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             ipc::detect_launch_state,
-            ipc::get_openclaw_url,
             ipc::list_instances,
             ipc::get_instance_logs,
-            ipc::get_instance_status_detail,
             ipc::install_openclaw,
             ipc::start_instance,
             ipc::stop_instance,
@@ -184,10 +182,8 @@ fn main() {
             ipc::edit_instance_ports,
             ipc::get_instance_capabilities,
             ipc::open_install_window,
-            ipc::get_sandbox_ip,
             ipc::get_instance_health,
             ipc::save_settings,
-            ipc::test_proxy,
             ipc::test_connectivity,
             ipc::detect_system_proxy,
             ipc::system_check,

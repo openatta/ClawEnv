@@ -32,7 +32,7 @@ pub fn silent_cmd(program: &str) -> tokio::process::Command {
 /// For sandbox: use `backend.exec(&kill_by_name("openclaw gateway"))`
 /// For host: use `kill_by_name_host("openclaw gateway").await`
 pub fn kill_by_name_cmd(pattern: &str) -> String {
-    // Pattern comes from desc.process_name() (TOML descriptor, trusted).
+    // Pattern comes from desc.process_names() (TOML descriptor, trusted).
     // Still escape to prevent accidental injection if pattern changes.
     let esc = pattern.replace('\'', "'\\''");
     #[cfg(target_os = "windows")]
