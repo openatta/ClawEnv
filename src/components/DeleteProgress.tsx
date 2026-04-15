@@ -1,6 +1,7 @@
 import { createSignal, onMount, onCleanup, Show, For } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { t } from "../i18n";
 
 type StageInfo = {
   stage: string;
@@ -9,10 +10,10 @@ type StageInfo = {
 };
 
 const STAGE_LABELS: Record<string, string> = {
-  stop: "Stop Instance",
-  kill: "Kill Processes",
-  delete_files: "Delete Files",
-  update_config: "Update Config",
+  stop: t("停止实例", "Stop Instance"),
+  kill: t("终止进程", "Kill Processes"),
+  delete_files: t("删除文件", "Delete Files"),
+  update_config: t("更新配置", "Update Config"),
 };
 
 const STAGES = ["stop", "kill", "delete_files", "update_config"];
@@ -57,7 +58,7 @@ export default function DeleteProgress(props: {
     <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
         <h3 class="text-base font-bold mb-4">
-          {done() ? "Deleted" : error() ? "Delete Failed" : `Deleting '${props.instanceName}'...`}
+          {done() ? t("已删除", "Deleted") : error() ? t("删除失败", "Delete Failed") : `${t("删除中", "Deleting")} '${props.instanceName}'...`}
         </h3>
 
         <div class="mb-4 space-y-1">
@@ -92,12 +93,12 @@ export default function DeleteProgress(props: {
             {error()}
           </div>
           <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded w-full"
-            onClick={() => props.onComplete()}>Close</button>
+            onClick={() => props.onComplete()}>{t("关闭", "Close")}</button>
         </Show>
 
         <Show when={done()}>
           <div class="p-2 bg-green-900/30 border border-green-700 rounded text-xs text-green-400">
-            Instance deleted successfully
+            {t("实例已成功删除", "Instance deleted successfully")}
           </div>
         </Show>
       </div>

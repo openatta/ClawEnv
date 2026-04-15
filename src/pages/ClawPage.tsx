@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { Instance, ClawType, UpgradeInfo, UpgradeProgress } from "../types";
 import ExportProgress from "../components/ExportProgress";
 import DeleteProgress from "../components/DeleteProgress";
+import { t } from "../i18n";
 
 export default function ClawPage(props: {
   clawType: ClawType;
@@ -287,27 +288,27 @@ export default function ClawPage(props: {
             <div class="flex items-center justify-center gap-2 mb-1">
               <Show when={!isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                  onClick={() => doAction("start")}>Start</button>
+                  onClick={() => doAction("start")}>{t("启动", "Start")}</button>
               </Show>
               <Show when={isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                  onClick={openInBrowser}>Open Control Panel</button>
+                  onClick={openInBrowser}>{t("打开控制面板", "Open Control Panel")}</button>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                  onClick={() => doAction("stop")}>Stop</button>
+                  onClick={() => doAction("stop")}>{t("停止", "Stop")}</button>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                  onClick={() => doAction("restart")}>Restart</button>
+                  onClick={() => doAction("restart")}>{t("重启", "Restart")}</button>
               </Show>
             </div>
             <div class="flex items-center justify-center gap-2 mb-2">
               <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
-                onClick={openConfig}>Configure</button>
+                onClick={openConfig}>{t("配置", "Configure")}</button>
               <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
                 <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
-                  onClick={doExportBundle}>Export Bundle</button>
+                  onClick={doExportBundle}>{t("导出 Bundle", "Export Bundle")}</button>
               </Show>
               <button class="px-3 py-1.5 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-xs disabled:opacity-50"
                 disabled={anyLoading()} onClick={() => setShowDeleteConfirm(true)}>
-                {loading("delete") ? "Deleting..." : "Delete"}
+                {loading("delete") ? t("删除中...", "Deleting...") : t("删除", "Delete")}
               </button>
             </div>
 

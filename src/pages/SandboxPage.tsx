@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import SandboxTerminal from "../components/Terminal";
 import NoVncPanel from "../components/NoVncPanel";
 import ExportProgress from "../components/ExportProgress";
+import { t } from "../i18n";
 
 type SandboxVm = {
   name: string;

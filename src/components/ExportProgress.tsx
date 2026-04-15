@@ -1,6 +1,7 @@
 import { createSignal, onMount, onCleanup, Show, For } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { t } from "../i18n";
 
 type StageInfo = {
   stage: string;
@@ -13,11 +14,11 @@ const SANDBOX_STAGES = ["stop", "count", "compress", "checksum", "restart"];
 const NATIVE_STAGES = ["count", "compress", "checksum"];
 
 const STAGE_LABELS: Record<string, string> = {
-  stop: "Stop Instance",
-  count: "Count Files",
-  compress: "Compress",
-  checksum: "Checksum",
-  restart: "Restart Instance",
+  stop: t("停止实例", "Stop Instance"),
+  count: t("统计文件", "Count Files"),
+  compress: t("压缩", "Compress"),
+  checksum: t("校验", "Checksum"),
+  restart: t("重启实例", "Restart Instance"),
 };
 
 export default function ExportProgress(props: {
@@ -63,7 +64,7 @@ export default function ExportProgress(props: {
     <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
       <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-[420px] shadow-2xl">
         <h3 class="text-base font-bold mb-4">
-          {done() ? "Export Complete" : error() ? "Export Failed" : "Exporting..."}
+          {done() ? t("导出完成", "Export Complete") : error() ? t("导出失败", "Export Failed") : t("导出中...", "Exporting...")}
         </h3>
 
         {/* Stage timeline */}
@@ -123,11 +124,11 @@ export default function ExportProgress(props: {
         <div class="flex justify-end gap-2">
           <Show when={!done() && !error()}>
             <button class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded"
-              onClick={doCancel}>Cancel</button>
+              onClick={doCancel}>{t("取消", "Cancel")}</button>
           </Show>
           <Show when={done() || error()}>
             <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-              onClick={props.onClose}>Close</button>
+              onClick={props.onClose}>{t("关闭", "Close")}</button>
           </Show>
         </div>
       </div>

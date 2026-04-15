@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { emit, listen } from "@tauri-apps/api/event";
 import MainLayout from "./layouts/MainLayout";
+import { t } from "./i18n";
 import InstallWizard from "./pages/Install";
 import UpgradePrompt from "./components/UpgradePrompt";
 import type { Instance } from "./types";
@@ -194,25 +195,25 @@ export default function App() {
     <Show when={showQuitDialog()}>
       <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]">
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl text-white">
-          <h3 class="text-base font-bold mb-2">Quit ClawEnv</h3>
+          <h3 class="text-base font-bold mb-2">{t("退出 ClawEnv", "Quit ClawEnv")}</h3>
           <p class="text-sm text-gray-300 mb-4">
-            Instances may still be running. Choose how to exit:
+            {t("实例可能仍在运行，请选择退出方式：", "Instances may still be running. Choose how to exit:")}
           </p>
           <div class="flex flex-col gap-2">
             <button class="px-3 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 rounded w-full"
               onClick={() => invoke("exit_app")}>
-              Quit (keep instances running)
+              {t("退出（保持实例运行）", "Quit (keep instances running)")}
             </button>
             <button class="px-3 py-2 text-sm bg-red-700 hover:bg-red-600 rounded w-full"
               onClick={async () => {
                 try { await invoke("stop_all_instances"); } catch {}
                 invoke("exit_app");
               }}>
-              Stop all instances and quit
+              {t("停止所有实例并退出", "Stop all instances and quit")}
             </button>
             <button class="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded w-full"
               onClick={() => setShowQuitDialog(false)}>
-              Cancel
+              {t("取消", "Cancel")}
             </button>
           </div>
         </div>
@@ -223,19 +224,19 @@ export default function App() {
     <Show when={approvalCommand()}>
       <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]">
         <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl text-white">
-          <h3 class="text-base font-bold mb-2 text-orange-400">Exec Approval Required</h3>
-          <p class="text-sm text-gray-300 mb-2">An agent wants to execute a command on your machine:</p>
+          <h3 class="text-base font-bold mb-2 text-orange-400">{t("执行审批", "Exec Approval Required")}</h3>
+          <p class="text-sm text-gray-300 mb-2">{t("Agent 请求在你的机器上执行命令：", "An agent wants to execute a command on your machine:")}</p>
           <pre class="bg-gray-950 border border-gray-600 rounded p-2 text-xs text-green-400 mb-4 whitespace-pre-wrap break-all">
             {approvalCommand()}
           </pre>
           <div class="flex gap-2 justify-end">
             <button class="px-3 py-1.5 text-sm bg-red-700 hover:bg-red-600 rounded"
               onClick={async () => { await invoke("exec_deny"); setApprovalCommand(null); }}>
-              Deny
+              {t("拒绝", "Deny")}
             </button>
             <button class="px-3 py-1.5 text-sm bg-green-700 hover:bg-green-600 rounded"
               onClick={async () => { await invoke("exec_approve"); setApprovalCommand(null); }}>
-              Approve
+              {t("允许", "Approve")}
             </button>
           </div>
         </div>

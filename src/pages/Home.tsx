@@ -1,6 +1,7 @@
 import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { Instance, ClawType } from "../types";
+import OperationModal from "../components/OperationModal";
 
 function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) => void; onClose: () => void }) {
   return (
@@ -94,24 +95,22 @@ export default function Home(props: {
     }
   }
 
-  async function handleStop(name: string) {
-    setActionLoading(`stop-${name}`); setActionError(""); setActionHint(`Stopping ${name}...`);
-    try { await invoke("stop_instance", { name }); props.onHealthChange(); setActionHint(""); }
-    catch (e) { setActionError(`Stop failed: ${e}`); setActionHint(""); }
-    finally { setActionLoading(null); }
+  // Operation modal state
+  const [opModal, setOpModal] = createSignal<{ op: "start" | "stop" | "restart"; name: string } | null>(null);
+
+  function showOp(op: "start" | "stop" | "restart", name: string) {
+    setActionError("");
+    setOpModal({ op, name });
   }
-  async function handleStart(name: string) {
-    setActionLoading(`start-${name}`); setActionError(""); setActionHint(`Starting ${name}, please wait ~10s...`);
-    try { await invoke("start_instance", { name }); props.onHealthChange(); setActionHint(""); }
-    catch (e) { setActionError(`Start failed: ${e}`); setActionHint(""); }
-    finally { setActionLoading(null); }
+
+  function onOpComplete() {
+    setOpModal(null);
+    props.onHealthChange();
   }
-  async function handleRestart(name: string) {
-    setActionLoading(`restart-${name}`); setActionError(""); setActionHint(`Restarting ${name}, please wait ~15s...`);
-    try { await invoke("stop_instance", { name }); await invoke("start_instance", { name }); props.onHealthChange(); setActionHint(""); }
-    catch (e) { setActionError(`Restart failed: ${e}`); setActionHint(""); }
-    finally { setActionLoading(null); }
-  }
+
+  function handleStop(name: string) { showOp("stop", name); }
+  function handleStart(name: string) { showOp("start", name); }
+  function handleRestart(name: string) { showOp("restart", name); }
 
   const getHealth = (name: string) => props.healths[name] || "unreachable";
 
@@ -127,8 +126,19 @@ export default function Home(props: {
         </div>
       </div>
 
-      <Show when={actionHint()}>
-        <div class="mb-4 p-3 bg-indigo-900/30 border border-indigo-700 rounded text-sm text-indigo-300 animate-pulse">{actionHint()}</div>
+      {/* Operation modal */}
+      <Show when={opModal()}>
+        <OperationModal
+          operation={opModal()!.op}
+          instanceName={opModal()!.name}
+          onComplete={onOpComplete}
+          doAction={async () => {
+            const { op, name } = opModal()!;
+            if (op === "start") await invoke("start_instance", { name });
+            else if (op === "stop") await invoke("stop_instance", { name });
+            else { await invoke("stop_instance", { name }); await invoke("start_instance", { name }); }
+          }}
+        />
       </Show>
       <Show when={actionError()}>
         <div class="mb-4 p-3 bg-red-900/30 border border-red-700 rounded text-sm text-red-400">{actionError()}</div>
