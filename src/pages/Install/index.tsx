@@ -575,8 +575,8 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                   </label>
 
                   {/* Browser Automation — default OFF */}
-                  <label class={`flex items-start gap-3 p-2.5 rounded border border-gray-700 bg-gray-800/50 ${installMethod() === "native" ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-gray-500"}`}>
-                    <input type="checkbox" checked={installBrowser() && installMethod() !== "native"} disabled={installMethod() === "native"}
+                  <label class={`flex items-start gap-3 p-2.5 rounded border border-gray-700 bg-gray-800/50 ${installMethod() !== "online" ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-gray-500"}`}>
+                    <input type="checkbox" checked={installBrowser() && installMethod() === "online"} disabled={installMethod() !== "online"}
                       onChange={e => setInstallBrowser(e.currentTarget.checked)}
                       class="w-4 h-4 mt-0.5 shrink-0" />
                     <div>
