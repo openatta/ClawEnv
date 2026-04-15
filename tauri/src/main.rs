@@ -149,25 +149,11 @@ fn main() {
                 }
             });
 
-            // Background update check — first emit cached results immediately,
-            // then check network every hour, cache results to config.
+            // Background update check — cache results silently, no popup.
+            // User can check updates manually from ClawPage.
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Emit cached update info immediately on startup
-                if let Ok(config) = ConfigManager::load() {
-                    for inst in config.instances() {
-                        if !inst.cached_latest_version.is_empty() && inst.cached_latest_version != inst.version {
-                            let _ = update_handle.emit("update-available", &serde_json::json!({
-                                "instance": inst.name,
-                                "current": inst.version,
-                                "latest": inst.cached_latest_version,
-                                "security": false,
-                            }));
-                        }
-                    }
-                }
-
-                // Then check network periodically
+                // Check network periodically
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 loop {
                     if let Ok(mut config) = ConfigManager::load() {
@@ -186,12 +172,7 @@ fn main() {
 
                                     if info.has_upgrade {
                                         tracing::info!("Update available for '{}': {} → {}", inst.name, info.current, info.latest);
-                                        let _ = update_handle.emit("update-available", &serde_json::json!({
-                                            "instance": inst.name,
-                                            "current": info.current,
-                                            "latest": info.latest,
-                                            "security": info.is_security_release,
-                                        }));
+                                        // No popup — user checks updates from ClawPage manually
                                         let title = if info.is_security_release { "Security Update Available" } else { "Update Available" };
                                         tray::send_notification(&update_handle, title,
                                             &format!("OpenClaw {} → {} for '{}'", info.current, info.latest, inst.name));

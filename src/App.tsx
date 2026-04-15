@@ -84,18 +84,11 @@ export default function App() {
     onCleanup(() => unlisten());
   });
 
-  // Listen for quit-requested from tray
+  // Listen for quit-requested from tray — fast path, no health check
   onMount(async () => {
-    const unlisten = await listen("quit-requested", async () => {
-      try {
-        const instances = await invoke<Instance[]>("list_instances");
-        setRunningCount(instances.length);
-      } catch { setRunningCount(0); }
-      if (runningCount() > 0) {
-        setShowQuitDialog(true);
-      } else {
-        invoke("exit_app");
-      }
+    const unlisten = await listen("quit-requested", () => {
+      // Just show the dialog immediately — no slow CLI calls
+      setShowQuitDialog(true);
     });
     onCleanup(() => unlisten());
   });

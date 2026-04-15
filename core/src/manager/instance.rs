@@ -93,9 +93,27 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         return Ok(());
     }
 
-    // Kill stale gateway processes then start fresh
-    for pn in &desc.process_names() {
-        backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+    // Kill stale gateway on this port — match port AND process name to avoid killing unrelated processes
+    #[cfg(target_os = "windows")]
+    if instance.sandbox_type == SandboxType::Native {
+        // Find PID listening on this port, verify it's openclaw/node, then kill
+        backend.exec(&format!(
+            "powershell -ExecutionPolicy Bypass -Command \"\
+            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+            if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
+            if ($p -and ($p.ProcessName -like '*node*' -or $p.ProcessName -like '*openclaw*')) {{ \
+            Stop-Process -Id $c.OwningProcess -Force }} }}\""
+        )).await.ok();
+    } else {
+        for pn in &desc.process_names() {
+            backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        for pn in &desc.process_names() {
+            backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+        }
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
@@ -194,13 +212,28 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         if check.contains("running") { proc_check = check; break; }
     }
     if proc_check.contains("running") {
-        // Process is alive but not responding to HTTP yet — warn but don't fail.
-        // It may be doing first-time initialization.
         tracing::warn!("Instance '{}' gateway process is running but not yet responding on port {port}", instance.name);
         Ok(())
     } else {
-        // Process is not running — real failure
-        let log = backend.exec("tail -20 /tmp/clawenv-gateway.log 2>/dev/null || echo 'no log'").await.unwrap_or_default();
+        // Process is not running — read log for error details
+        let log_cmd = if instance.sandbox_type == SandboxType::Native {
+            #[cfg(target_os = "windows")]
+            {
+                let log_path = dirs::home_dir().unwrap_or_default()
+                    .join(".clawenv").join("native").join("gateway.log");
+                format!("powershell -ExecutionPolicy Bypass -Command \"Get-Content '{}' -Tail 20 -ErrorAction SilentlyContinue\"",
+                    log_path.display())
+            }
+            #[cfg(not(target_os = "windows"))]
+            {
+                let log_path = dirs::home_dir().unwrap_or_default()
+                    .join(".clawenv").join("native").join("gateway.log");
+                format!("tail -20 '{}' 2>/dev/null || echo 'no log'", log_path.display())
+            }
+        } else {
+            "tail -20 /tmp/clawenv-gateway.log 2>/dev/null || echo 'no log'".to_string()
+        };
+        let log = backend.exec(&log_cmd).await.unwrap_or_else(|_| "no log available".into());
         anyhow::bail!(
             "Gateway failed to start for '{}' on port {port}. \
              Process exited unexpectedly.\n\nGateway log:\n{log}",
@@ -214,7 +247,24 @@ pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
     let registry = ClawRegistry::load();
     let desc = registry.get(&instance.claw_type);
     let backend = backend_for_instance(instance)?;
-    // Force kill gateway and ttyd
+    let port = instance.gateway.gateway_port;
+
+    // Kill gateway: by port+process on Windows native, by name elsewhere
+    #[cfg(target_os = "windows")]
+    if instance.sandbox_type == SandboxType::Native {
+        backend.exec(&format!(
+            "powershell -ExecutionPolicy Bypass -Command \"\
+            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+            if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
+            if ($p -and ($p.ProcessName -like '*node*' -or $p.ProcessName -like '*openclaw*')) {{ \
+            Stop-Process -Id $c.OwningProcess -Force }} }}\""
+        )).await.ok();
+    } else {
+        for pn in &desc.process_names() {
+            backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
     for pn in &desc.process_names() {
         backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
     }
