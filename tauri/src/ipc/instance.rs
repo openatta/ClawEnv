@@ -108,6 +108,72 @@ pub async fn delete_instance(app: tauri::AppHandle, name: String) -> Result<(), 
     Ok(())
 }
 
+/// Delete instance with staged progress events for UI dialog
+#[tauri::command]
+pub async fn delete_instance_with_progress(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    use clawenv_core::manager::instance;
+    use clawenv_core::sandbox::SandboxType;
+
+    let emit = |stage: &str, status: &str, msg: &str| {
+        let _ = app.emit("delete-progress", serde_json::json!({
+            "stage": stage, "status": status, "message": msg,
+        }));
+    };
+
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?.clone();
+
+    // Stage 1: Stop
+    emit("stop", "active", "Stopping instance...");
+    let _ = instance::stop_instance(&inst).await;
+    emit("stop", "done", "Stopped");
+
+    // Stage 2: Kill processes
+    emit("kill", "active", "Killing processes...");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    if inst.sandbox_type == SandboxType::Native {
+        instance::kill_native_gateway_public(inst.gateway.gateway_port).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    emit("kill", "done", "Killed");
+
+    // Stage 3: Delete files
+    emit("delete_files", "active", "Deleting files...");
+    let backend = instance::backend_for_instance(&inst).map_err(|e| e.to_string())?;
+    let mut retries = 3;
+    loop {
+        match backend.destroy().await {
+            Ok(_) => { emit("delete_files", "done", "Deleted"); break; }
+            Err(e) if retries > 0 => {
+                retries -= 1;
+                emit("delete_files", "active", &format!("Retrying... ({})", e));
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                // Kill again in case something respawned
+                if inst.sandbox_type == SandboxType::Native {
+                    instance::kill_native_gateway_public(inst.gateway.gateway_port).await;
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                }
+            }
+            Err(e) => {
+                emit("delete_files", "error", &e.to_string());
+                let _ = app.emit("delete-failed", e.to_string());
+                return Err(e.to_string());
+            }
+        }
+    }
+
+    // Stage 4: Update config
+    emit("update_config", "active", "Updating config...");
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+    config.config_mut().instances.retain(|i| i.name != name);
+    config.save().map_err(|e| e.to_string())?;
+    emit("update_config", "done", "Done");
+
+    let _ = app.emit("delete-complete", ());
+    let _ = app.emit("instances-changed", ());
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn rename_instance(old_name: String, new_name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["rename", &old_name, &new_name]).await.map_err(|e| e.to_string())?;

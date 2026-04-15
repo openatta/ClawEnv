@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Instance, ClawType, UpgradeInfo, UpgradeProgress } from "../types";
 import ExportProgress from "../components/ExportProgress";
+import DeleteProgress from "../components/DeleteProgress";
 
 export default function ClawPage(props: {
   clawType: ClawType;
@@ -126,22 +127,22 @@ export default function ClawPage(props: {
     }
   }
 
-  async function doDelete() {
+  // Delete with progress dialog
+  const [deletingInstance, setDeletingInstance] = createSignal<string | null>(null);
+
+  function doDelete() {
     setShowDeleteConfirm(false);
-    const deletedName = activeTab();
-    setActionLoading(`delete:${deletedName}`);
-    setActionError("");
-    try {
-      await invoke("delete_instance", { name: deletedName });
-      // Switch to another tab or clear
-      const remaining = props.instances.filter(i => i.name !== deletedName);
+    setDeletingInstance(activeTab());
+  }
+
+  function onDeleteComplete() {
+    const deleted = deletingInstance();
+    setDeletingInstance(null);
+    if (deleted) {
+      const remaining = props.instances.filter(i => i.name !== deleted);
       setActiveTab(remaining[0]?.name ?? "");
-      props.onInstancesChanged?.();
-    } catch (e) {
-      setActionError(String(e));
-    } finally {
-      setActionLoading(null);
     }
+    props.onInstancesChanged?.();
   }
 
   async function openInBrowser() {
@@ -490,6 +491,15 @@ export default function ClawPage(props: {
       {/* Export progress */}
       <Show when={showExport()}>
         <ExportProgress isNative={true} onClose={() => setShowExport(false)} />
+      </Show>
+
+      {/* Delete progress */}
+      <Show when={deletingInstance()}>
+        <DeleteProgress
+          instanceName={deletingInstance()!}
+          onComplete={onDeleteComplete}
+          onError={() => setDeletingInstance(null)}
+        />
       </Show>
     </div>
   );

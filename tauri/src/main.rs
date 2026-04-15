@@ -198,6 +198,7 @@ fn main() {
             ipc::stop_instance,
             ipc::stop_all_instances,
             ipc::delete_instance,
+            ipc::delete_instance_with_progress,
             ipc::rename_instance,
             ipc::edit_instance_resources,
             ipc::edit_instance_ports,

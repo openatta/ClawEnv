@@ -9,8 +9,12 @@ use crate::sandbox::{
 };
 
 /// Kill native gateway process — pure Rust, no shell dependency.
-/// Uses taskkill on Windows, kill on Unix. Kills by process name "node".
 async fn kill_native_gateway(_port: u16) {
+    kill_native_gateway_public(_port).await;
+}
+
+/// Public version for use from IPC handlers.
+pub async fn kill_native_gateway_public(_port: u16) {
     #[cfg(target_os = "windows")]
     {
         // taskkill /f /im node.exe kills all node processes — acceptable for native mode
