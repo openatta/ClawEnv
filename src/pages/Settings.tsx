@@ -206,6 +206,8 @@ export default function Settings() {
             </div>
           </section>
 
+          <DiagnosticSection />
+
           <section>
             <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">About</h2>
             <div class="bg-gray-800 rounded-lg p-4 border border-gray-700 text-sm text-gray-400">
@@ -330,5 +332,70 @@ function Toggle(props: { checked: boolean; onChange: (v: boolean) => void }) {
       onClick={() => props.onChange(!props.checked)}>
       <div class={`w-4 h-4 bg-white rounded-full transform transition-transform ${props.checked ? "translate-x-5" : "translate-x-0.5"}`} />
     </button>
+  );
+}
+
+type DiagIssue = { instance: string; type: string; message: string; fixable: boolean };
+
+function DiagnosticSection() {
+  const [issues, setIssues] = createSignal<DiagIssue[]>([]);
+  const [scanning, setScanning] = createSignal(false);
+  const [fixing, setFixing] = createSignal("");
+
+  async function runDiag() {
+    setScanning(true);
+    try {
+      const result = await invoke<{ issues: DiagIssue[]; instance_count: number }>("diagnose_instances");
+      setIssues(result.issues);
+    } catch { setIssues([]); }
+    finally { setScanning(false); }
+  }
+
+  async function fixIssue(inst: string, type: string) {
+    setFixing(`${inst}:${type}`);
+    try {
+      await invoke("fix_diagnostic_issue", { instanceName: inst, issueType: type });
+      await runDiag(); // re-scan
+    } catch {}
+    finally { setFixing(""); }
+  }
+
+  return (
+    <section class="mb-8">
+      <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">Diagnostics</h2>
+      <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-xs text-gray-400">Check instance/config consistency and clean up orphan data.</p>
+          <button class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded"
+            disabled={scanning()} onClick={runDiag}>
+            {scanning() ? "Scanning..." : "Run Diagnostic"}
+          </button>
+        </div>
+        <Show when={issues().length > 0}>
+          <div class="space-y-2">
+            <For each={issues()}>
+              {(issue) => (
+                <div class="flex items-center justify-between p-2 bg-gray-900 rounded border border-gray-700 text-xs">
+                  <div>
+                    <span class="text-yellow-400">{issue.instance}</span>
+                    <span class="text-gray-400 ml-2">{issue.message}</span>
+                  </div>
+                  <Show when={issue.fixable}>
+                    <button class="px-2 py-0.5 bg-red-700 hover:bg-red-600 rounded text-[10px] shrink-0 ml-2"
+                      disabled={!!fixing()}
+                      onClick={() => fixIssue(issue.instance, issue.type)}>
+                      {fixing() === `${issue.instance}:${issue.type}` ? "Fixing..." : "Fix"}
+                    </button>
+                  </Show>
+                </div>
+              )}
+            </For>
+          </div>
+        </Show>
+        <Show when={issues().length === 0 && !scanning()}>
+          <p class="text-xs text-gray-500">Click "Run Diagnostic" to check.</p>
+        </Show>
+      </div>
+    </section>
   );
 }

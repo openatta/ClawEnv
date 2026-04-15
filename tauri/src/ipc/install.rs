@@ -19,6 +19,7 @@ pub async fn install_openclaw(
     install_browser: bool,
     _install_mcp_bridge: Option<bool>,
     gateway_port: u16,
+    image: Option<String>,
 ) -> Result<(), String> {
     if INSTALL_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("Installation already in progress. Please wait for it to finish.".into());
@@ -42,6 +43,12 @@ pub async fn install_openclaw(
     if let Some(key) = api_key {
         args.push("--api-key".to_string());
         args.push(key);
+    }
+    if let Some(ref img) = image {
+        if !img.is_empty() {
+            args.push("--image".to_string());
+            args.push(img.clone());
+        }
     }
 
     let app_handle = app.clone();
@@ -173,4 +180,100 @@ pub async fn restart_computer() -> Result<(), String> {
     {
         Err("Restart is only needed on Windows for WSL2 installation".into())
     }
+}
+
+/// Open file picker for import and return selected path
+#[tauri::command]
+pub async fn pick_import_file(app: tauri::AppHandle) -> Result<String, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let path = app.dialog().file()
+        .add_filter("ClawEnv Package", &["tar.gz", "gz"])
+        .blocking_pick_file();
+    match path {
+        Some(p) => Ok(p.to_string()),
+        None => Err("No file selected".into()),
+    }
+}
+
+/// Validate an import file name against current platform
+#[tauri::command]
+pub async fn validate_import_file(file_path: String) -> Result<serde_json::Value, String> {
+    let filename = std::path::Path::new(&file_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or_default();
+
+    // Expected format: {platform}-{arch}-{timestamp}.tar.gz
+    let parts: Vec<&str> = filename.split('-').collect();
+    if parts.len() < 3 {
+        return Ok(serde_json::json!({
+            "valid": false,
+            "error": "Unrecognized file name format. Expected: {platform}-{arch}-{timestamp}.tar.gz",
+            "is_native": false,
+        }));
+    }
+
+    let file_platform = parts[0];
+    let file_arch = parts[1];
+
+    // Determine if native or sandbox
+    let is_native = matches!(file_platform, "windows" | "macos" | "linux");
+    let is_sandbox = matches!(file_platform, "lima" | "wsl2" | "podman");
+
+    if !is_native && !is_sandbox {
+        return Ok(serde_json::json!({
+            "valid": false,
+            "error": format!("Unknown platform '{}' in file name", file_platform),
+            "is_native": false,
+        }));
+    }
+
+    // Check platform match
+    let current_platform = if cfg!(target_os = "macos") { "macos" }
+        else if cfg!(target_os = "windows") { "windows" }
+        else { "linux" };
+    let current_backend = if cfg!(target_os = "macos") { "lima" }
+        else if cfg!(target_os = "windows") { "wsl2" }
+        else { "podman" };
+
+    let platform_ok = if is_native {
+        file_platform == current_platform
+    } else {
+        file_platform == current_backend
+    };
+
+    // Check arch match
+    let current_arch = std::env::consts::ARCH;
+    let arch_ok = file_arch == current_arch
+        || (file_arch == "arm64" && current_arch == "aarch64")
+        || (file_arch == "aarch64" && current_arch == "aarch64")
+        || (file_arch == "x64" && current_arch == "x86_64")
+        || (file_arch == "x86_64" && current_arch == "x86_64");
+
+    let mut errors = Vec::new();
+    if !platform_ok {
+        errors.push(format!("Platform mismatch: file is for '{}', this machine is '{}'",
+            file_platform, if is_native { current_platform } else { current_backend }));
+    }
+    if !arch_ok {
+        errors.push(format!("Architecture mismatch: file is for '{}', this machine is '{}'",
+            file_arch, current_arch));
+    }
+
+    Ok(serde_json::json!({
+        "valid": errors.is_empty(),
+        "error": errors.join("; "),
+        "is_native": is_native,
+        "platform": file_platform,
+        "arch": file_arch,
+    }))
+}
+
+/// Check if a native instance already exists
+#[tauri::command]
+pub async fn has_native_instance() -> Result<bool, String> {
+    use clawenv_core::config::ConfigManager;
+    use clawenv_core::sandbox::SandboxType;
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    Ok(config.instances().iter().any(|i| i.sandbox_type == SandboxType::Native))
 }

@@ -63,3 +63,84 @@ pub async fn create_default_config(user_mode: String) -> Result<(), String> {
     ConfigManager::create_default(mode).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+/// Diagnose instance/config consistency. Returns issues and offers repair.
+#[tauri::command]
+pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
+    use clawenv_core::sandbox::SandboxType;
+
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let home = dirs::home_dir().unwrap_or_default();
+    let mut issues: Vec<serde_json::Value> = Vec::new();
+
+    for inst in config.instances() {
+        match inst.sandbox_type {
+            SandboxType::Native => {
+                let native_dir = home.join(".clawenv").join("native");
+                if !native_dir.exists() {
+                    issues.push(serde_json::json!({
+                        "instance": inst.name, "type": "missing_dir",
+                        "message": format!("Native directory missing: {}", native_dir.display()),
+                        "fixable": true,
+                    }));
+                }
+                let node_dir = home.join(".clawenv").join("node");
+                if !node_dir.exists() {
+                    issues.push(serde_json::json!({
+                        "instance": inst.name, "type": "missing_node",
+                        "message": "ClawEnv Node.js not installed (~/.clawenv/node/)",
+                        "fixable": false,
+                    }));
+                }
+            }
+            SandboxType::LimaAlpine => {
+                let vm_dir = home.join(".lima").join(&inst.sandbox_id);
+                if !vm_dir.exists() {
+                    issues.push(serde_json::json!({
+                        "instance": inst.name, "type": "missing_vm",
+                        "message": format!("Lima VM missing: {}", inst.sandbox_id),
+                        "fixable": true,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Check orphan directories
+    let native_dir = home.join(".clawenv").join("native");
+    if native_dir.exists() && !config.instances().iter().any(|i| i.sandbox_type == SandboxType::Native) {
+        issues.push(serde_json::json!({
+            "instance": "(orphan)", "type": "orphan_native",
+            "message": "Orphan native directory exists but no native instance in config",
+            "fixable": true,
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "issues": issues,
+        "instance_count": config.instances().len(),
+    }))
+}
+
+/// Fix a diagnostic issue by removing orphan data or config entries
+#[tauri::command]
+pub async fn fix_diagnostic_issue(instance_name: String, issue_type: String) -> Result<(), String> {
+    let home = dirs::home_dir().unwrap_or_default();
+
+    match issue_type.as_str() {
+        "missing_dir" | "missing_vm" => {
+            // Remove instance from config (data is gone)
+            let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+            config.config_mut().instances.retain(|i| i.name != instance_name);
+            config.save().map_err(|e| e.to_string())?;
+        }
+        "orphan_native" => {
+            // Delete orphan native directory
+            let native_dir = home.join(".clawenv").join("native");
+            tokio::fs::remove_dir_all(&native_dir).await.ok();
+        }
+        _ => return Err(format!("Unknown issue type: {issue_type}")),
+    }
+    Ok(())
+}

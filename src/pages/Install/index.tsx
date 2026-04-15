@@ -70,10 +70,25 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
   };
 
   // Step 4
-  const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native">("online");
+  const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native" | "native-import">("online");
   const [localFilePath, setLocalFilePath] = createSignal("");
+  const [fileValidation, setFileValidation] = createSignal<{ valid: boolean; error: string } | null>(null);
+  const [hasNative, setHasNative] = createSignal(false);
   const [installMcpBridge, setInstallMcpBridge] = createSignal(true); // default ON
   const [installBrowser, setInstallBrowser] = createSignal(false);
+
+  // Check if native instance exists
+  invoke<boolean>("has_native_instance").then(v => setHasNative(v)).catch(() => {});
+
+  async function pickFile() {
+    try {
+      const path = await invoke<string>("pick_import_file");
+      setLocalFilePath(path);
+      // Validate
+      const result = await invoke<{ valid: boolean; error: string; is_native: boolean }>("validate_import_file", { filePath: path });
+      setFileValidation(result);
+    } catch { /* cancelled */ }
+  }
 
   // Step 5
   const [apiKey, setApiKey] = createSignal("");
@@ -241,12 +256,26 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
     });
 
     try {
-      await invoke("install_openclaw", {
-        instanceName: instanceName(), clawType: clawType(), clawVersion: "latest",
-        apiKey: apiKey() || null, useNative: installMethod() === "native",
-        installBrowser: installBrowser(), installMcpBridge: installMcpBridge(),
-        gatewayPort: 0,
-      });
+      const method = installMethod();
+      if (method === "native-import") {
+        // Native bundle import — use CLI import with --native-bundle flag
+        // For now, use the same install IPC but pass the bundle file path
+        await invoke("install_openclaw", {
+          instanceName: instanceName(), clawType: clawType(), clawVersion: "latest",
+          apiKey: apiKey() || null, useNative: true,
+          installBrowser: false, installMcpBridge: false,
+          gatewayPort: 0, image: localFilePath(),
+        });
+      } else {
+        await invoke("install_openclaw", {
+          instanceName: instanceName(), clawType: clawType(), clawVersion: "latest",
+          apiKey: apiKey() || null, useNative: method === "native",
+          installBrowser: installBrowser() && method !== "native",
+          installMcpBridge: installMcpBridge(),
+          gatewayPort: 0,
+          image: method === "local" ? localFilePath() : null,
+        });
+      }
     } catch (e) { clearTimeout(timer); cleanup(); setInstalling(false); setInstallError(String(e)); }
   }
 
@@ -486,18 +515,39 @@ export default function InstallWizard(props: { onComplete: (instances: Instance[
                       <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "导入预构建的沙盒镜像文件" : "Import a pre-built sandbox image file"}</div>
                     </div>
                   </label>
-                  <label class="flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 cursor-pointer hover:border-yellow-600/50">
-                    <input type="radio" name="im" checked={installMethod() === "native"} onChange={() => setInstallMethod("native")} class="w-4 h-4 shrink-0" />
+                  <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
+                    <input type="radio" name="im" checked={installMethod() === "native"} disabled={hasNative()}
+                      onChange={() => setInstallMethod("native")} class="w-4 h-4 shrink-0" />
                     <div>
-                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "本地安装" : "Local Install"}</div>
-                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "直接安装在本机 — 无需虚拟机，启动更快" : "Install directly on this machine — no VM, faster startup"}</div>
-                      <div class="text-xs text-yellow-500 mt-1">{iLang() === "zh-CN" ? "⚠ 缺少 Node.js 时会自动安装（可能需要管理员密码）" : "⚠ Node.js will be auto-installed if missing (may need admin password)"}</div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "本地 - 在线安装" : "Native - Online Install"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "直接安装在本机 — 无需虚拟机" : "Install directly on this machine — no VM"}</div>
+                      {hasNative() && <div class="text-xs text-red-400 mt-1">{iLang() === "zh-CN" ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
+                    </div>
+                  </label>
+                  <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
+                    <input type="radio" name="im" checked={installMethod() === "native-import"} disabled={hasNative()}
+                      onChange={() => { setInstallMethod("native-import"); setLocalFilePath(""); setFileValidation(null); }} class="w-4 h-4 shrink-0" />
+                    <div>
+                      <div class="font-medium text-sm">{iLang() === "zh-CN" ? "本地 - 导入 Bundle" : "Native - Import Bundle"}</div>
+                      <div class="text-xs text-gray-400">{iLang() === "zh-CN" ? "从导出的离线包导入" : "Import from exported offline bundle"}</div>
+                      {hasNative() && <div class="text-xs text-red-400 mt-1">{iLang() === "zh-CN" ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
                     </div>
                   </label>
                 </div>
-                <Show when={installMethod() === "local"}>
-                  <input type="text" placeholder="/path/to/image.tar.gz" value={localFilePath()} onInput={e => setLocalFilePath(e.currentTarget.value)}
-                    class="mt-3 bg-gray-800 border border-gray-600 rounded px-3 py-2 w-full text-sm" />
+                <Show when={installMethod() === "local" || installMethod() === "native-import"}>
+                  <div class="mt-3 flex gap-2">
+                    <input type="text" placeholder={installMethod() === "local" ? "sandbox-image.tar.gz" : "native-bundle.tar.gz"}
+                      value={localFilePath()} onInput={e => { setLocalFilePath(e.currentTarget.value); setFileValidation(null); }}
+                      class="bg-gray-800 border border-gray-600 rounded px-3 py-2 flex-1 text-sm" />
+                    <button class="px-3 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-sm shrink-0"
+                      onClick={pickFile}>Browse</button>
+                  </div>
+                  <Show when={fileValidation()}>
+                    {fileValidation()!.valid
+                      ? <div class="text-xs text-green-400 mt-1">✓ File validated — compatible with this platform</div>
+                      : <div class="text-xs text-red-400 mt-1">✗ {fileValidation()!.error}</div>
+                    }
+                  </Show>
                 </Show>
               </fieldset>
 
