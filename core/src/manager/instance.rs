@@ -119,13 +119,15 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if instance.sandbox_type == SandboxType::Native {
-            // Windows native: launch gateway as detached process.
-            // NativeBackend::exec uses cmd.exe, so use `start /b` for background launch.
+            // Windows native: launch gateway as a truly detached process.
+            // Use PowerShell Start-Process via cmd.exe to create a persistent process
+            // that survives after the parent cmd.exe exits.
             let log_path = dirs::home_dir().unwrap_or_default()
                 .join(".clawenv").join("native").join("gateway.log");
-            let log = log_path.display().to_string();
+            let log = log_path.display().to_string().replace('\\', "\\\\").replace('"', "\\\"");
+            let gw = gateway_cmd.replace('"', "\\\"");
             backend.exec(&format!(
-                "start /b {gateway_cmd} > \"{log}\" 2>&1"
+                "powershell -ExecutionPolicy Bypass -Command \"Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {gw} > \\\"{log}\\\" 2>&1'\""
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux

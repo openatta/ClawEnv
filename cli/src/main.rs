@@ -749,19 +749,26 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
                     #[cfg(target_os = "windows")]
                     {
-                        // Check if WSL is installed first (avoid parsing error messages as VMs)
-                        let wsl_ok = clawenv_core::platform::process::silent_cmd("wsl")
-                            .args(["--status"])
+                        // WSL outputs UTF-16LE on Windows. Use --list --quiet first to check
+                        // if any distros exist (returns just names, one per line).
+                        let has_distros = clawenv_core::platform::process::silent_cmd("wsl")
+                            .args(["--list", "--quiet"])
                             .output().await
-                            .map(|o| o.status.success()).unwrap_or(false);
+                            .map(|o| {
+                                // Decode UTF-16LE, check if any non-empty line exists
+                                let u16s: Vec<u16> = o.stdout.chunks_exact(2)
+                                    .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                                    .collect();
+                                let text = String::from_utf16_lossy(&u16s);
+                                o.status.success() && text.lines().any(|l| !l.trim().is_empty() && l.trim().chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+                            }).unwrap_or(false);
 
-                        if wsl_ok {
-                            // Use --quiet and English output to avoid UTF-16 locale issues
-                            let output = clawenv_core::platform::process::silent_cmd("cmd")
-                                .args(["/c", "chcp 65001 >nul && wsl --list --verbose"])
+                        if has_distros {
+                            let output = clawenv_core::platform::process::silent_cmd("wsl")
+                                .args(["--list", "--verbose"])
                                 .output().await;
                             if let Ok(o) = output {
-                                // WSL may output UTF-16LE; try both decodings
+                                // WSL outputs UTF-16LE; decode it
                                 let text = String::from_utf8(o.stdout.clone())
                                     .or_else(|_| {
                                         // Decode UTF-16LE
