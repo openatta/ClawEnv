@@ -306,7 +306,7 @@ export default function ClawPage(props: {
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                   onClick={() => doAction("restart")}>Restart</button>
               </Show>
-              <Show when={activeInstance()?.sandbox_type === "native"}>
+              <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                   onClick={doExportBundle}>Export Bundle</button>
               </Show>
@@ -398,8 +398,12 @@ export default function ClawPage(props: {
               <div>
                 <label class="block text-xs text-gray-400 mb-1">Terminal (ttyd) Port</label>
                 <input ref={ttydPortRef} type="number"
+                  disabled={activeInstance()?.sandbox_type?.toLowerCase() === "native"}
                   onInput={(e) => setCfgTtydPort(parseInt(e.currentTarget.value) || 7681)}
-                  class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
+                  class={`bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm ${activeInstance()?.sandbox_type?.toLowerCase() === "native" ? "opacity-40 cursor-not-allowed" : ""}`} />
+                <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
+                  <span class="text-[10px] text-gray-500">N/A for native mode</span>
+                </Show>
               </div>
             </div>
             <Show when={!caps().port_edit}>
