@@ -8,32 +8,36 @@
 
 ClawEnv creates a secure, isolated Alpine Linux sandbox on your system — powered by **Lima** (macOS), **WSL2** (Windows), or **Podman** (Linux) — so AI agents run safely without affecting your host OS.
 
+## Why ClawEnv?
+
+- **Secure by default** — AI agents run inside an isolated sandbox (Alpine Linux VM/container), never touching your host files or system unless you explicitly allow it
+- **Zero dependencies** — ClawEnv downloads and manages its own Node.js and Git; no Homebrew, no system installers, no admin privileges needed
+- **Import / Export** — Package your entire environment (sandbox image or native bundle) as a single `.tar.gz` file; move it between machines with one click
+- **Permission-controlled bridge** — Agents access host files and commands only through a configurable allowlist/denylist with user approval popups
+- **Human-in-the-Loop** — When an agent hits a CAPTCHA or 2FA, the browser switches to interactive mode (noVNC) so you can step in and continue
+- **Multi-instance** — Run multiple OpenClaw instances side by side, each with its own 20-port block, configuration, and lifecycle
+
+## Download
+
+| Platform | Download |
+|----------|----------|
+| macOS (Apple Silicon) | [ClawEnv_0.2.0_aarch64.dmg](https://github.com/openatta/ClawEnv/releases/tag/v0.2.0) |
+| Windows (ARM64) | [ClawEnv_0.2.0_arm64-setup.exe](https://github.com/openatta/ClawEnv/releases/tag/v0.2.0) |
+
 ## Features
 
-- **One-Click Install**: GUI wizard with system checks, proxy detection, and progress tracking
-- **Sandbox Isolation**: Each instance runs in its own Alpine Linux VM/container
-- **Native Mode**: Optional host-native install (no sandbox) for developers
-- **Multi-Instance**: Run multiple OpenClaw instances with automatic port allocation
-- **System Tray**: Background health monitoring, notifications, quick start/stop
-- **In-Browser Terminal**: ttyd + xterm.js terminal per sandbox VM
-- **Browser HIL**: Human-in-the-Loop via noVNC when agents need manual help (CAPTCHA, 2FA)
-- **MCP Bridge**: Agents can access host files/commands through permission-controlled bridge
-- **Exec Approval**: Agent exec commands popup for user confirmation
-- **Auto-Update**: Periodic version checks with upgrade prompts
-- **Autostart**: Optional launch-at-login (default off)
-
-## Quick Start
-
-```bash
-# macOS / Linux
-cargo tauri build
-open target/release/bundle/macos/ClawEnv.app   # macOS
-# or run the binary directly
-
-# Windows (requires Rust + Node.js)
-cargo tauri build
-# Run target\release\bundle\nsis\ClawEnv_*-setup.exe
-```
+- **One-Click Install** — GUI wizard with system checks, proxy detection, progress tracking
+- **Sandbox Isolation** — Each instance in its own Alpine Linux VM/container
+- **Native Mode** — Optional host-native install for developers (no VM overhead)
+- **Import / Export** — Sandbox images and native bundles, with file validation
+- **System Tray** — Background health monitoring, notifications, quit options
+- **In-Browser Terminal** — ttyd + xterm.js per sandbox VM
+- **Browser HIL** — Human-in-the-Loop via noVNC for CAPTCHA/2FA
+- **MCP Bridge** — Host file/command access with permission control
+- **Exec Approval** — Agent commands require user confirmation
+- **Diagnostics** — Check instance/config consistency and auto-repair
+- **Autostart** — Optional launch-at-login
+- **Bilingual UI** — Chinese and English
 
 ## Architecture
 
@@ -52,34 +56,16 @@ GUI (SolidJS + Tauri) ──IPC──► clawenv-cli --json <command>
 
 **CLI-first**: All business logic in `clawenv-cli`. GUI is a thin presentation shell.
 
-## Port Allocation (per instance)
-
-| Offset | Service | Instance 1 | Instance 2 |
-|--------|---------|-----------|-----------|
-| +0 | Gateway | 3000 | 3020 |
-| +1 | Terminal (ttyd) | 3001 | 3021 |
-| +2 | MCP Bridge | 3002 | 3022 |
-| +3 | CDP (browser) | 3003 | 3023 |
-| +4 | VNC (noVNC) | 3004 | 3024 |
-
 ## Tech Stack
 
-- **Backend**: Rust 2021, Tokio async
-- **GUI**: Tauri v2 (native WebView)
-- **Frontend**: SolidJS + TailwindCSS v4
-- **CLI**: clap v4 (derive)
-- **Config**: TOML
-- **Bridge**: Axum HTTP server
-- **Sandbox**: Alpine Linux 3.23
-
-## Development
-
-```bash
-npm install              # Frontend deps
-cargo tauri dev          # Dev mode (hot reload)
-cargo test --workspace   # 83 tests
-cargo clippy --workspace # Lint
-```
+| Layer | Technology |
+|-------|-----------|
+| Backend | Rust 2021, Tokio async |
+| GUI | Tauri v2 (native WebView) |
+| Frontend | SolidJS + TailwindCSS v4 |
+| CLI | clap v4 |
+| Bridge | Axum HTTP server |
+| Sandbox | Alpine Linux 3.23 |
 
 ## Docs
 
