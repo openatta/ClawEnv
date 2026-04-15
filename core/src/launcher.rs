@@ -37,21 +37,9 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
         return Ok(LaunchState::NotInstalled);
     }
 
-    // 3. 检查升级（超时 3 秒，失败则忽略）
-    let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
-    let has_upgrade = tokio::time::timeout(
-        Duration::from_secs(3),
-        check_upgrade_available(&instances[0], &npm_registry),
-    )
-    .await
-    .unwrap_or(Ok(false))
-    .unwrap_or(false);
-
-    if has_upgrade {
-        Ok(LaunchState::UpgradeAvailable { instances })
-    } else {
-        Ok(LaunchState::Ready { instances })
-    }
+    // Skip upgrade check at launch — user can check from ClawPage.
+    // This avoids 3s network delay on every startup.
+    Ok(LaunchState::Ready { instances })
 }
 
 async fn check_upgrade_available(instance: &InstanceConfig, npm_registry: &str) -> Result<bool> {

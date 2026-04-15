@@ -130,7 +130,7 @@ impl ManagedShell {
     }
 
     /// Spawn a truly detached background process.
-    /// Windows: direct node.exe spawn with DETACHED_PROCESS + CREATE_NO_WINDOW
+    /// Windows: PowerShell Start-Process (creates process outside job object)
     /// Unix: nohup via sh
     pub async fn spawn_detached(
         &self,
@@ -140,41 +140,39 @@ impl ManagedShell {
     ) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            use std::os::windows::process::CommandExt;
-            const DETACHED_PROCESS: u32 = 0x00000008;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            let log_str = log_path.to_string_lossy().replace('\'', "''");
+            let path_str = self.path().replace('\'', "''");
 
-            let log_file = std::fs::File::create(log_path)
-                .map_err(|e| anyhow::anyhow!("Cannot create log: {e}"))?;
-            let log_err = log_file.try_clone()?;
-
-            // Try to find the JS entry point for direct node.exe execution
-            if let Some(entry) = self.find_claw_entry(cli_binary) {
+            // Find JS entry point for direct node.exe execution (bypasses .ps1/.cmd)
+            let ps_cmd = if let Some(entry) = self.find_claw_entry(cli_binary) {
                 let node = self.node_bin();
-                let mut child = std::process::Command::new(&node);
-                child.arg("--disable-warning=ExperimentalWarning")
-                    .arg(&entry)
-                    .args(args)
-                    .current_dir(&self.install_dir)
-                    .env("PATH", self.path())
-                    .stdout(log_file)
-                    .stderr(log_err)
-                    .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-                child.spawn()
-                    .map_err(|e| anyhow::anyhow!("Failed to spawn {cli_binary}: {e}"))?;
+                let node_str = node.to_string_lossy().replace('\'', "''");
+                let entry_str = entry.to_string_lossy().replace('\'', "''");
+                let args_str = args.join(" ");
+                format!(
+                    "$env:PATH = '{path_str}'; \
+                     Start-Process -WindowStyle Hidden -FilePath '{node_str}' \
+                     -ArgumentList '--disable-warning=ExperimentalWarning \"{entry_str}\" {args_str}' \
+                     -RedirectStandardOutput '{log_str}' -RedirectStandardError '{log_str}.err'"
+                )
             } else {
-                // Fallback: cmd.exe /c (less reliable but works if .cmd exists)
+                // Fallback: Start-Process cmd.exe /c
                 let full_cmd = format!("{} {}", cli_binary, args.join(" "));
-                let mut child = std::process::Command::new("cmd.exe");
-                child.args(["/c", &full_cmd])
-                    .current_dir(&self.install_dir)
-                    .env("PATH", self.path())
-                    .stdout(log_file)
-                    .stderr(log_err)
-                    .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-                child.spawn()
-                    .map_err(|e| anyhow::anyhow!("Failed to spawn {cli_binary}: {e}"))?;
+                format!(
+                    "$env:PATH = '{path_str}'; \
+                     Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
+                     -ArgumentList '/c {full_cmd} > \"{log_str}\" 2>&1'"
+                )
+            };
+
+            let status = super::process::silent_cmd("powershell")
+                .args(["-Command", &ps_cmd])
+                .current_dir(&self.install_dir)
+                .status()
+                .await?;
+
+            if !status.success() {
+                anyhow::bail!("Failed to spawn {cli_binary} via Start-Process");
             }
         }
         #[cfg(not(target_os = "windows"))]
