@@ -1,4 +1,5 @@
 mod detector;
+pub mod managed_shell;
 pub mod network;
 pub mod process;
 

@@ -1,102 +1,37 @@
-//! Native 模式——直接在宿主机运行，无沙盒隔离（开发者专用）
+//! Native mode — runs directly on host, no sandbox isolation.
 //!
-//! Platform-specific shell execution:
-//!   macOS/Linux: sh -c "..."
-//!   Windows:     powershell -WindowStyle Hidden -Command "..."
+//! All command execution goes through ManagedShell to ensure
+//! ClawEnv's own Node.js and Git are used, never system ones.
 
 use anyhow::Result;
 use async_trait::async_trait;
-use std::path::{Path, PathBuf};
-use tokio::process::Command;
+use std::path::PathBuf;
 use tokio::sync::mpsc;
 
 use super::{SandboxBackend, SandboxOpts, ResourceStats};
+use crate::platform::managed_shell::ManagedShell;
 
 pub struct NativeBackend {
+    shell: ManagedShell,
     install_dir: PathBuf,
 }
 
 impl NativeBackend {
-    /// Create backend. `_dir_hint` is ignored — native always uses ~/.clawenv/native/.
     pub fn new(_dir_hint: &str) -> Self {
+        let shell = ManagedShell::new();
+        let install_dir = shell.inst_bin_dir().parent()
+            .unwrap_or(&shell.inst_bin_dir())
+            .to_path_buf();
+        // On Windows inst_bin_dir() == install_dir, on Unix inst_bin_dir() == install_dir/bin
         let install_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".clawenv").join("native");
-        Self { install_dir }
+        Self { shell, install_dir }
     }
 
-    /// Build PATH with ClawEnv's own Node.js, Git, and instance bin dir prepended.
-    fn clawenv_path(&self) -> String {
-        let home = dirs::home_dir().unwrap_or_default();
-        let clawenv = home.join(".clawenv");
-
-        #[cfg(target_os = "windows")]
-        let node_bin = clawenv.join("node");
-        #[cfg(not(target_os = "windows"))]
-        let node_bin = clawenv.join("node").join("bin");
-
-        #[cfg(target_os = "windows")]
-        let git_bin = clawenv.join("git").join("cmd");
-        #[cfg(not(target_os = "windows"))]
-        let git_bin = clawenv.join("git").join("bin");
-
-        #[cfg(target_os = "windows")]
-        let inst_bin = self.install_dir.clone();
-        #[cfg(not(target_os = "windows"))]
-        let inst_bin = self.install_dir.join("bin");
-
-        let mut current = std::env::var("PATH").unwrap_or_default();
-
-        // Also include system Git paths as fallback (Windows)
-        #[cfg(target_os = "windows")]
-        {
-            for p in [r"C:\Program Files\Git\cmd", r"C:\Program Files\LLVM\bin"] {
-                if std::path::Path::new(p).exists() && !current.contains(p) {
-                    current = format!("{};{}", current, p);
-                }
-            }
-        }
-
-        #[cfg(target_os = "windows")]
-        { format!("{};{};{};{}", node_bin.display(), git_bin.display(), inst_bin.display(), current) }
-        #[cfg(not(target_os = "windows"))]
-        { format!("{}:{}:{}:{}", node_bin.display(), git_bin.display(), inst_bin.display(), current) }
-    }
-
-    /// Create a platform-appropriate shell command with ClawEnv node in PATH.
-    /// Windows: PowerShell with -ExecutionPolicy Bypass (needed for node -e, health checks).
-    /// Gateway startup does NOT go through exec() — it uses Rust direct spawn.
-    pub fn shell_cmd_with_path(&self, cmd: &str) -> Command {
-        let path = self.clawenv_path();
-        #[cfg(target_os = "windows")]
-        {
-            let mut c = crate::platform::process::silent_cmd("powershell");
-            let full = format!("$env:PATH = '{}'; {}", path.replace('\'', "''"), cmd);
-            c.args(["-Command", &full]);
-            c
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let mut c = Command::new("sh");
-            c.args(["-c", &format!("export PATH='{}'; {}", path, cmd)]);
-            c
-        }
-    }
-
-    /// Legacy static method for compatibility (does NOT inject PATH).
-    pub fn shell_cmd(cmd: &str) -> Command {
-        #[cfg(target_os = "windows")]
-        {
-            let mut c = crate::platform::process::silent_cmd("powershell");
-            c.args(["-Command", cmd]);
-            c
-        }
-        #[cfg(not(target_os = "windows"))]
-        {
-            let mut c = Command::new("sh");
-            c.args(["-c", cmd]);
-            c
-        }
+    /// Access the managed shell (for external callers like instance.rs)
+    pub fn shell(&self) -> &ManagedShell {
+        &self.shell
     }
 }
 
@@ -107,8 +42,7 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        // Check ClawEnv's own node/npm, not system ones
-        let check = self.shell_cmd_with_path("node --version")
+        let check = self.shell.cmd("node --version")
             .output().await
             .map(|o| o.status.success()).unwrap_or(false);
         Ok(check)
@@ -126,8 +60,7 @@ impl SandboxBackend for NativeBackend {
         let registry = crate::claw::ClawRegistry::load();
         let desc = registry.get(&opts.claw_type);
         let install_cmd = desc.npm_install_cmd(&opts.claw_version);
-        // Use shell_cmd_with_path to ensure ClawEnv's own node/npm/git
-        let status = self.shell_cmd_with_path(&install_cmd)
+        let status = self.shell.cmd(&install_cmd)
             .current_dir(&self.install_dir)
             .status()
             .await?;
@@ -148,7 +81,7 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        let out = self.shell_cmd_with_path(cmd)
+        let out = self.shell.cmd(cmd)
             .current_dir(&self.install_dir)
             .output()
             .await?;
@@ -158,7 +91,7 @@ impl SandboxBackend for NativeBackend {
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         use tokio::io::{AsyncBufReadExt, BufReader};
 
-        let mut child = self.shell_cmd_with_path(cmd)
+        let mut child = self.shell.cmd(cmd)
             .current_dir(&self.install_dir)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
@@ -167,47 +100,53 @@ impl SandboxBackend for NativeBackend {
 
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
+        let mut output = String::new();
 
-        let tx2 = tx.clone();
-        let stderr_task = tokio::spawn(async move {
-            if let Some(se) = stderr {
-                let mut reader = BufReader::new(se).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx2.send(line).await;
-                }
-            }
-        });
+        if let Some(out) = stdout {
+            let mut reader = BufReader::new(out).lines();
+            let stderr_tx = tx.clone();
+            let stderr_task = if let Some(err) = stderr {
+                Some(tokio::spawn(async move {
+                    let mut reader = BufReader::new(err).lines();
+                    while let Ok(Some(line)) = reader.next_line().await {
+                        let _ = stderr_tx.send(line).await;
+                    }
+                }))
+            } else { None };
 
-        let tx3 = tx.clone();
-        let stdout_task = tokio::spawn(async move {
-            let mut output = String::new();
-            if let Some(so) = stdout {
-                let mut reader = BufReader::new(so).lines();
-                while let Ok(Some(line)) = reader.next_line().await {
-                    let _ = tx3.send(line.clone()).await;
-                    output.push_str(&line);
-                    output.push('\n');
-                }
+            while let Ok(Some(line)) = reader.next_line().await {
+                output.push_str(&line);
+                output.push('\n');
+                let _ = tx.send(line).await;
             }
-            output
-        });
+
+            if let Some(t) = stderr_task { t.await.ok(); }
+        }
 
         let status = child.wait().await?;
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        stderr_task.abort();
-        let output = stdout_task.await.unwrap_or_default();
-
         if !status.success() {
             anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
         }
         Ok(output)
     }
 
+    async fn edit_resources(&self, _cpus: Option<u32>, _memory_mb: Option<u32>, _disk_gb: Option<u32>) -> Result<()> {
+        Ok(()) // Native has no resource limits to edit
+    }
+
+    async fn edit_port_forwards(&self, _forwards: &[(u16, u16)]) -> Result<()> {
+        Ok(()) // Native doesn't need port forwarding
+    }
+
     async fn stats(&self) -> Result<ResourceStats> {
         Ok(ResourceStats::default())
     }
 
-    async fn import_image(&self, _path: &Path) -> Result<()> {
+    async fn import_image(&self, _path: &std::path::Path) -> Result<()> {
         anyhow::bail!("Native mode does not support image import")
     }
+
+    fn supports_rename(&self) -> bool { false }
+    fn supports_resource_edit(&self) -> bool { false }
+    fn supports_port_edit(&self) -> bool { true }
 }

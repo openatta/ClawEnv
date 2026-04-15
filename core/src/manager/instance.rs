@@ -25,12 +25,7 @@ pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn Sandbox
 
 /// Start an OpenClaw instance
 pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
-    // For native mode, ensure Node.js and claw binaries are in PATH
-    if instance.sandbox_type == SandboxType::Native {
-        // Ensure ClawEnv's own Node.js is in PATH (also done inside NativeBackend::exec)
-        crate::manager::install_native::ensure_node_in_path();
-    }
-
+    // PATH management is handled by ManagedShell inside NativeBackend
     let backend = backend_for_instance(instance)?;
 
     // Only call backend.start() if VM/container is not already running
@@ -126,50 +121,24 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     }
 
     let gateway_cmd = desc.gateway_start_cmd(port);
-    #[cfg(not(target_os = "windows"))]
-    backend.exec(&format!(
-        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-    )).await?;
-    #[cfg(target_os = "windows")]
-    {
-        if instance.sandbox_type == SandboxType::Native {
-            // Windows native: spawn detached process directly via Rust.
-            // No cmd.exe/PowerShell — avoids ExecutionPolicy and session lifetime issues.
-            use std::os::windows::process::CommandExt;
-            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
-            const CREATE_NO_WINDOW: u32 = 0x08000000;
 
-            let log_path = dirs::home_dir().unwrap_or_default()
-                .join(".clawenv").join("native").join("gateway.log");
-            let log_file = std::fs::File::create(&log_path)
-                .map_err(|e| anyhow::anyhow!("Cannot create gateway log: {e}"))?;
-            let log_err = log_file.try_clone()?;
+    if instance.sandbox_type == SandboxType::Native {
+        // Native: use ManagedShell::spawn_detached for a truly independent process
+        // with correct PATH (our own node/git, not system)
+        let shell = crate::platform::managed_shell::ManagedShell::new();
+        let log_path = dirs::home_dir().unwrap_or_default()
+            .join(".clawenv").join("native").join("gateway.log");
 
-            // Build PATH with ClawEnv node + native instance dir
-            let home = dirs::home_dir().unwrap_or_default();
-            let node_dir = home.join(".clawenv").join("node");
-            let native_dir = home.join(".clawenv").join("native");
-            let git_dir = home.join(".clawenv").join("git").join("cmd");
-            let sys_path = std::env::var("PATH").unwrap_or_default();
-            let full_path = format!("{};{};{};{}",
-                node_dir.display(), native_dir.display(), git_dir.display(), sys_path);
+        // Parse gateway_cmd into binary + args: "openclaw gateway --port 3000 --allow-unconfigured"
+        let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
+        let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
 
-            // openclaw.cmd is a cmd wrapper — launch via cmd.exe /c
-            let mut child = std::process::Command::new("cmd.exe");
-            child.args(["/c", &gateway_cmd])
-                .current_dir(&native_dir)
-                .env("PATH", &full_path)
-                .stdout(log_file)
-                .stderr(log_err)
-                .creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
-            child.spawn()
-                .map_err(|e| anyhow::anyhow!("Failed to spawn gateway: {e}"))?;
-        } else {
-            // Windows sandbox (WSL2): nohup works inside Linux
-            backend.exec(&format!(
-                "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-            )).await?;
-        }
+        shell.spawn_detached(bin, args, &log_path).await?;
+    } else {
+        // Sandbox: nohup inside VM/container
+        backend.exec(&format!(
+            "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+        )).await?;
     }
 
     // Wait for gateway to become responsive (up to 15s)
