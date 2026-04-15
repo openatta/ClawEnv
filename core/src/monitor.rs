@@ -50,7 +50,7 @@ impl InstanceMonitor {
         // Primary: HTTP probe the gateway
         let probe_cmd = if is_native_windows {
             format!(
-                "powershell -Command \"try {{ $r = Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing; $r.StatusCode }} catch {{ '000' }}\""
+                "powershell -ExecutionPolicy Bypass -Command \"try {{ $r = Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing; $r.StatusCode }} catch {{ '000' }}\""
             )
         } else {
             format!(
@@ -74,7 +74,7 @@ impl InstanceMonitor {
         }
         // Fallback: check if gateway-like process exists
         let pgrep_cmd = if is_native_windows {
-            "powershell -Command \"if (Get-Process | Where-Object {$_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*gateway*'}) { echo 'running' } else { echo '' }\"".to_string()
+            "powershell -ExecutionPolicy Bypass -Command \"if (Get-Process | Where-Object {$_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*gateway*'}) { echo 'running' } else { echo '' }\"".to_string()
         } else {
             "pgrep -f 'gateway' 2>/dev/null || echo ''".to_string()
         };

@@ -61,12 +61,13 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     // Helper: check if a port is listening (cross-platform)
     async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16, is_native_windows: bool) -> bool {
         let cmd = if is_native_windows {
-            format!("powershell -Command \"if (Test-NetConnection -ComputerName 127.0.0.1 -Port {port} -InformationLevel Quiet -WarningAction SilentlyContinue) {{ echo yes }} else {{ echo no }}\"")
+            // Use PowerShell TcpClient for fast port check (faster than Test-NetConnection)
+            format!("powershell -ExecutionPolicy Bypass -Command \"try {{ $c = New-Object Net.Sockets.TcpClient('127.0.0.1',{port}); $c.Close(); echo yes }} catch {{ echo no }}\"")
         } else {
             format!("netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no")
         };
         let check = backend.exec(&cmd).await.unwrap_or_default();
-        check.trim().contains("yes") || check.trim() == "True"
+        check.trim().contains("yes")
     }
 
     // Start ttyd (sandbox only) — check by port, not by pgrep
@@ -118,16 +119,13 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         if instance.sandbox_type == SandboxType::Native {
-            // Windows native: launch gateway as a hidden detached process via cmd.exe.
-            // NativeBackend::exec already injects ClawEnv node PATH.
+            // Windows native: launch gateway as detached process.
+            // NativeBackend::exec uses cmd.exe, so use `start /b` for background launch.
             let log_path = dirs::home_dir().unwrap_or_default()
                 .join(".clawenv").join("native").join("gateway.log");
-            let log = log_path.display().to_string().replace('\'', "''");
-            let full_cmd = format!("{} > \"{}\" 2>&1",
-                gateway_cmd.replace('\'', "''"), log);
+            let log = log_path.display().to_string();
             backend.exec(&format!(
-                "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
-                 -ArgumentList '/c {full_cmd}'"
+                "start /b {gateway_cmd} > \"{log}\" 2>&1"
             )).await?;
         } else {
             // Windows sandbox (WSL2): nohup works inside Linux
@@ -149,7 +147,7 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         #[cfg(target_os = "windows")]
         let check_cmd = if instance.sandbox_type == SandboxType::Native {
             format!(
-                "powershell -Command \"try {{ (Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing).StatusCode }} catch {{ '000' }}\""
+                "powershell -ExecutionPolicy Bypass -Command \"try {{ (Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing).StatusCode }} catch {{ '000' }}\""
             )
         } else {
             format!(
