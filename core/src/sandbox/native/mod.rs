@@ -107,16 +107,16 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        use crate::platform::process::silent_cmd;
-        let node = silent_cmd("node").args(["--version"]).output().await;
-        let npm = silent_cmd("npm").args(["--version"]).output().await;
-        Ok(node.map(|o| o.status.success()).unwrap_or(false)
-            && npm.map(|o| o.status.success()).unwrap_or(false))
+        // Check ClawEnv's own node/npm, not system ones
+        let check = self.shell_cmd_with_path("node --version")
+            .output().await
+            .map(|o| o.status.success()).unwrap_or(false);
+        Ok(check)
     }
 
     async fn ensure_prerequisites(&self) -> Result<()> {
         if !self.is_available().await? {
-            anyhow::bail!("Native mode requires Node.js and npm installed on the host");
+            anyhow::bail!("Native mode requires Node.js. Please run the installer first.");
         }
         Ok(())
     }
@@ -126,7 +126,9 @@ impl SandboxBackend for NativeBackend {
         let registry = crate::claw::ClawRegistry::load();
         let desc = registry.get(&opts.claw_type);
         let install_cmd = desc.npm_install_cmd(&opts.claw_version);
-        let status = Self::shell_cmd(&install_cmd)
+        // Use shell_cmd_with_path to ensure ClawEnv's own node/npm/git
+        let status = self.shell_cmd_with_path(&install_cmd)
+            .current_dir(&self.install_dir)
             .status()
             .await?;
         if !status.success() {

@@ -86,12 +86,8 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         }
     }
 
-    // Check if gateway is already responding on this port — skip restart if already running
+    // Always kill stale gateway before starting — ensures clean state
     let is_win_native = cfg!(target_os = "windows") && instance.sandbox_type == SandboxType::Native;
-    if is_port_listening(backend.as_ref(), port, is_win_native).await {
-        tracing::info!("Gateway already running on port {port}, skipping restart");
-        return Ok(());
-    }
 
     // Kill stale gateway on this port — match port AND process name to avoid killing unrelated processes
     #[cfg(target_os = "windows")]

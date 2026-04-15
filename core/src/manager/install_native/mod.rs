@@ -187,12 +187,11 @@ pub async fn has_node() -> bool {
 }
 
 async fn node_version() -> String {
-    ensure_node_in_path();
-    crate::platform::process::silent_cmd("node")
-        .args(["--version"])
-        .output()
+    // Use NativeBackend to ensure our own node is used
+    let backend = crate::sandbox::native_backend("native");
+    backend.exec("node --version")
         .await
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .map(|o| o.trim().to_string())
         .unwrap_or_else(|_| "unknown".into())
 }
 
@@ -251,12 +250,11 @@ pub async fn install_native(
         send(tx, &format!("Node.js {ver} ready"), 25, InstallStage::EnsurePrerequisites).await;
     }
 
-    // Configure npm registry mirror
+    // Configure npm registry mirror — use our managed node/npm via backend.exec()
     let npm_registry = mirrors.npm_registry_url();
     if npm_registry != "https://registry.npmjs.org" {
-        let _ = crate::platform::process::silent_cmd("npm")
-            .args(["config", "set", "registry", npm_registry])
-            .status().await;
+        let backend = crate::sandbox::native_backend("native");
+        backend.exec(&format!("npm config set registry {npm_registry}")).await.ok();
     }
 
     // Step 2: Install claw product

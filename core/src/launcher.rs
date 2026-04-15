@@ -55,6 +55,10 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
 }
 
 async fn check_upgrade_available(instance: &InstanceConfig, npm_registry: &str) -> Result<bool> {
+    // Skip if version is unknown/empty (freshly installed, version not yet recorded)
+    if instance.version.is_empty() {
+        return Ok(false);
+    }
     let registry = crate::claw::ClawRegistry::load();
     let desc = registry.get(&instance.claw_type);
     let info = crate::update::checker::check_latest_version(&instance.version, npm_registry, &desc.npm_package).await?;
