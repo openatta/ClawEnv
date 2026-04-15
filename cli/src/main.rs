@@ -749,24 +749,46 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
                     #[cfg(target_os = "windows")]
                     {
-                        let output = clawenv_core::platform::process::silent_cmd("wsl")
-                            .args(["--list", "--verbose"])
-                            .output().await;
-                        if let Ok(o) = output {
-                            for line in String::from_utf8_lossy(&o.stdout).lines().skip(1) {
-                                let p: Vec<&str> = line.split_whitespace().collect();
-                                if p.len() >= 3 {
-                                    let name = p[0].trim_start_matches('*').trim();
-                                    vms.push(SandboxVmInfo {
-                                        name: name.into(), status: p[1].into(),
-                                        cpus: "-".into(), memory: "-".into(),
-                                        disk: "-".into(), dir_size: "-".into(),
-                                        managed: name.starts_with("ClawEnv"),
-                                        ttyd_port: None,
-                                    });
+                        // Check if WSL is installed first (avoid parsing error messages as VMs)
+                        let wsl_ok = clawenv_core::platform::process::silent_cmd("wsl")
+                            .args(["--status"])
+                            .output().await
+                            .map(|o| o.status.success()).unwrap_or(false);
+
+                        if wsl_ok {
+                            // Use --quiet and English output to avoid UTF-16 locale issues
+                            let output = clawenv_core::platform::process::silent_cmd("cmd")
+                                .args(["/c", "chcp 65001 >nul && wsl --list --verbose"])
+                                .output().await;
+                            if let Ok(o) = output {
+                                // WSL may output UTF-16LE; try both decodings
+                                let text = String::from_utf8(o.stdout.clone())
+                                    .or_else(|_| {
+                                        // Decode UTF-16LE
+                                        let u16s: Vec<u16> = o.stdout.chunks_exact(2)
+                                            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                                            .collect();
+                                        Ok::<String, std::string::FromUtf8Error>(String::from_utf16_lossy(&u16s))
+                                    })
+                                    .unwrap_or_default();
+
+                                for line in text.lines().skip(1) {
+                                    let p: Vec<&str> = line.split_whitespace().collect();
+                                    if p.len() >= 3 {
+                                        let name = p[0].trim_start_matches('*').trim();
+                                        if name.is_empty() { continue; }
+                                        vms.push(SandboxVmInfo {
+                                            name: name.into(), status: p[1].into(),
+                                            cpus: "-".into(), memory: "-".into(),
+                                            disk: "-".into(), dir_size: "-".into(),
+                                            managed: name.starts_with("ClawEnv") || name.starts_with("clawenv"),
+                                            ttyd_port: None,
+                                        });
+                                    }
                                 }
                             }
                         }
+                        // If WSL not installed, vms stays empty — no phantom entries
                     }
 
                     // Fill ttyd_port for managed instances from config
