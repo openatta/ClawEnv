@@ -292,8 +292,8 @@ export default function ClawPage(props: {
                 : `Instance "${activeTab()}" is ${activeHealth()}`}
             </p>
 
-            {/* Action buttons */}
-            <div class="flex items-center justify-center gap-2 mb-2">
+            {/* Action buttons — two rows */}
+            <div class="flex items-center justify-center gap-2 mb-1">
               <Show when={!isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
                   onClick={() => doAction("start")}>Start</button>
@@ -306,13 +306,15 @@ export default function ClawPage(props: {
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                   onClick={() => doAction("restart")}>Restart</button>
               </Show>
+            </div>
+            <div class="flex items-center justify-center gap-2 mb-2">
+              <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
+                onClick={openConfig}>Configure</button>
               <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
-                <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
+                <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
                   onClick={doExportBundle}>Export Bundle</button>
               </Show>
-              <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
-                onClick={openConfig}>Configure</button>
-              <button class="px-3 py-2 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-sm disabled:opacity-50 ml-2"
+              <button class="px-3 py-1.5 bg-red-900/60 hover:bg-red-800 text-red-300 rounded text-xs disabled:opacity-50"
                 disabled={anyLoading()} onClick={() => setShowDeleteConfirm(true)}>
                 {loading("delete") ? "Deleting..." : "Delete"}
               </button>
