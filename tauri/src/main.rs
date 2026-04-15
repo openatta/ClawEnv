@@ -196,6 +196,7 @@ fn main() {
             ipc::install_openclaw,
             ipc::start_instance,
             ipc::stop_instance,
+            ipc::stop_all_instances,
             ipc::delete_instance,
             ipc::rename_instance,
             ipc::edit_instance_resources,

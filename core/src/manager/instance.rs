@@ -53,16 +53,19 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let desc = registry.get(&instance.claw_type);
     let port = instance.gateway.gateway_port;
 
-    // Helper: check if a port is listening (cross-platform)
-    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16, is_native_windows: bool) -> bool {
-        let cmd = if is_native_windows {
-            // Use PowerShell TcpClient for fast port check (faster than Test-NetConnection)
-            format!("powershell -ExecutionPolicy Bypass -Command \"try {{ $c = New-Object Net.Sockets.TcpClient('127.0.0.1',{port}); $c.Close(); echo yes }} catch {{ echo no }}\"")
+    // Helper: check if a port is listening
+    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16, is_native: bool) -> bool {
+        if is_native {
+            // Native: direct Rust TCP connect (no shell, no PowerShell)
+            std::net::TcpStream::connect_timeout(
+                &format!("127.0.0.1:{port}").parse().unwrap(),
+                std::time::Duration::from_secs(1),
+            ).is_ok()
         } else {
-            format!("netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no")
-        };
-        let check = backend.exec(&cmd).await.unwrap_or_default();
-        check.trim().contains("yes")
+            // Sandbox: netstat inside VM
+            let cmd = format!("netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no");
+            backend.exec(&cmd).await.unwrap_or_default().trim().contains("yes")
+        }
     }
 
     // Start ttyd (sandbox only) — check by port, not by pgrep
@@ -145,27 +148,24 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     for i in 0..6 {
         tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 3 } else { 2 }).into()).await;
 
-        // Platform-appropriate HTTP probe
-        #[cfg(not(target_os = "windows"))]
-        let check_cmd = format!(
-            "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-        );
-        #[cfg(target_os = "windows")]
-        let check_cmd = if instance.sandbox_type == SandboxType::Native {
-            format!(
-                "powershell -ExecutionPolicy Bypass -Command \"try {{ (Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing).StatusCode }} catch {{ '000' }}\""
-            )
+        if instance.sandbox_type == SandboxType::Native {
+            // Native: pure Rust HTTP probe (no shell)
+            let health = InstanceMonitor::check_health_native(port).await;
+            if health == InstanceHealth::Running {
+                tracing::info!("Instance '{}' gateway ready on port {port}", instance.name);
+                return Ok(());
+            }
         } else {
-            format!(
+            // Sandbox: curl inside VM
+            let check_cmd = format!(
                 "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-            )
-        };
-
-        let check = backend.exec(&check_cmd).await.unwrap_or_default();
-        let code = check.trim().trim_matches('\'');
-        if code != "000" && !code.is_empty() {
-            tracing::info!("Instance '{}' gateway ready on port {port} (HTTP {code})", instance.name);
-            return Ok(());
+            );
+            let check = backend.exec(&check_cmd).await.unwrap_or_default();
+            let code = check.trim().trim_matches('\'');
+            if code != "000" && !code.is_empty() {
+                tracing::info!("Instance '{}' gateway ready on port {port} (HTTP {code})", instance.name);
+                return Ok(());
+            }
         }
     }
 
@@ -248,12 +248,17 @@ pub async fn restart_instance(instance: &InstanceConfig) -> Result<()> {
 
 /// Get the health status of an instance
 pub async fn instance_health(instance: &InstanceConfig) -> InstanceHealth {
-    let backend = match backend_for_instance(instance) {
-        Ok(b) => b,
-        Err(_) => return InstanceHealth::Unreachable,
-    };
-    let is_win_native = cfg!(target_os = "windows") && instance.sandbox_type == SandboxType::Native;
-    InstanceMonitor::check_health_with_port_platform(backend.as_ref(), instance.gateway.gateway_port, is_win_native).await
+    let is_native = instance.sandbox_type == SandboxType::Native;
+    if is_native {
+        // Native: pure Rust HTTP check (no shell needed)
+        InstanceMonitor::check_health_native(instance.gateway.gateway_port).await
+    } else {
+        let backend = match backend_for_instance(instance) {
+            Ok(b) => b,
+            Err(_) => return InstanceHealth::Unreachable,
+        };
+        InstanceMonitor::check_health_with_port(backend.as_ref(), instance.gateway.gateway_port).await
+    }
 }
 
 /// Get instance by name from config

@@ -91,6 +91,16 @@ pub async fn stop_instance(name: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Stop all instances — used by quit dialog
+#[tauri::command]
+pub async fn stop_all_instances() -> Result<(), String> {
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    for inst in config.instances() {
+        let _ = clawenv_core::manager::instance::stop_instance(inst).await;
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn delete_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["uninstall", "--name", &name]).await.map_err(|e| e.to_string())?;

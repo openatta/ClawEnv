@@ -205,9 +205,7 @@ export default function App() {
             </button>
             <button class="px-3 py-2 text-sm bg-red-700 hover:bg-red-600 rounded w-full"
               onClick={async () => {
-                try { const list = await invoke<Instance[]>("list_instances");
-                  for (const inst of list) { await invoke("stop_instance", { name: inst.name }).catch(() => {}); }
-                } catch {}
+                try { await invoke("stop_all_instances"); } catch {}
                 invoke("exit_app");
               }}>
               Stop all instances and quit

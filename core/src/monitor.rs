@@ -39,48 +39,55 @@ impl InstanceMonitor {
         }
     }
 
-    /// Check the health of a single instance
-    /// Uses HTTP probe on the gateway port — most reliable method.
+    /// Check the health of a single instance.
+    /// For native mode: pure Rust HTTP request (no shell, works on all platforms).
+    /// For sandbox mode: curl inside the VM via backend.exec().
     pub async fn check_health_with_port(backend: &dyn SandboxBackend, port: u16) -> InstanceHealth {
         Self::check_health_with_port_platform(backend, port, false).await
     }
 
-    /// Check health — `is_native_windows` uses PowerShell instead of curl.
-    pub async fn check_health_with_port_platform(backend: &dyn SandboxBackend, port: u16, is_native_windows: bool) -> InstanceHealth {
-        // Primary: HTTP probe the gateway
-        let probe_cmd = if is_native_windows {
-            format!(
-                "powershell -ExecutionPolicy Bypass -Command \"try {{ $r = Invoke-WebRequest -Uri http://127.0.0.1:{port}/ -TimeoutSec 2 -UseBasicParsing; $r.StatusCode }} catch {{ '000' }}\""
-            )
+    pub async fn check_health_with_port_platform(_backend: &dyn SandboxBackend, port: u16, is_native: bool) -> InstanceHealth {
+        if is_native {
+            // Native: direct Rust HTTP — no shell, no PowerShell, no quoting issues
+            Self::check_health_native(port).await
         } else {
-            format!(
+            // Sandbox: curl inside VM
+            let probe_cmd = format!(
                 "curl -s -o /dev/null -w '%{{http_code}}' --connect-timeout 2 http://127.0.0.1:{port}/ 2>/dev/null || echo '000'"
-            )
-        };
-        let result = backend.exec(&probe_cmd).await;
-        match &result {
-            Ok(out) => {
-                let raw = out.trim();
-                let code = raw.trim_matches('\'').trim();
-                tracing::debug!("Health check port {port}: raw='{}' code='{}'", raw, code);
-                if code != "000" && !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()) {
-                    return InstanceHealth::Running;
+            );
+            let result = _backend.exec(&probe_cmd).await;
+            match &result {
+                Ok(out) => {
+                    let code = out.trim().trim_matches('\'').trim();
+                    if code != "000" && !code.is_empty() && code.chars().all(|c| c.is_ascii_digit()) {
+                        return InstanceHealth::Running;
+                    }
                 }
+                Err(_) => return InstanceHealth::Unreachable,
             }
-            Err(e) => {
-                tracing::warn!("Health check exec failed for port {port}: {e}");
-                return InstanceHealth::Unreachable;
+            // Fallback: pgrep inside VM
+            match _backend.exec("pgrep -f 'gateway' 2>/dev/null || echo ''").await {
+                Ok(out) if !out.trim().is_empty() => InstanceHealth::Running,
+                _ => InstanceHealth::Stopped,
             }
         }
-        // Fallback: check if gateway-like process exists
-        let pgrep_cmd = if is_native_windows {
-            "powershell -ExecutionPolicy Bypass -Command \"if (Get-Process | Where-Object {$_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*gateway*'}) { echo 'running' } else { echo '' }\"".to_string()
-        } else {
-            "pgrep -f 'gateway' 2>/dev/null || echo ''".to_string()
-        };
-        match backend.exec(&pgrep_cmd).await {
-            Ok(out) if !out.trim().is_empty() && out.trim() != "" => InstanceHealth::Running,
-            _ => InstanceHealth::Stopped,
+    }
+
+    /// Pure Rust HTTP health check for native instances — no shell dependency.
+    pub async fn check_health_native(port: u16) -> InstanceHealth {
+        let url = format!("http://127.0.0.1:{port}/");
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build();
+        match client {
+            Ok(c) => match c.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() || resp.status().is_redirection() || resp.status().as_u16() == 401 => {
+                    InstanceHealth::Running
+                }
+                Ok(_) => InstanceHealth::Running, // Any HTTP response = process alive
+                Err(_) => InstanceHealth::Stopped,
+            },
+            Err(_) => InstanceHealth::Unreachable,
         }
     }
 
