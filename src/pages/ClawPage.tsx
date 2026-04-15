@@ -78,7 +78,7 @@ export default function ClawPage(props: {
       setUpgradeError(String(ev.payload));
     });
     onCleanup(() => { unUpdate(); unProgress(); unComplete(); unFailed(); });
-    checkUpdate();
+    // Don't auto-check update on mount — user can check manually
   });
 
   async function checkUpdate() {
