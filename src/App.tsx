@@ -193,16 +193,29 @@ export default function App() {
     {/* Quit confirmation dialog */}
     <Show when={showQuitDialog()}>
       <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-[100]">
-        <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-80 shadow-2xl text-white">
+        <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl text-white">
           <h3 class="text-base font-bold mb-2">Quit ClawEnv</h3>
           <p class="text-sm text-gray-300 mb-4">
-            {runningCount()} instance(s) still running. They will continue running in the background.
+            Instances may still be running. Choose how to exit:
           </p>
-          <div class="flex gap-2 justify-end">
-            <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-              onClick={() => setShowQuitDialog(false)}>Cancel</button>
-            <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-              onClick={() => invoke("exit_app")}>Quit</button>
+          <div class="flex flex-col gap-2">
+            <button class="px-3 py-2 text-sm bg-indigo-600 hover:bg-indigo-500 rounded w-full"
+              onClick={() => invoke("exit_app")}>
+              Quit (keep instances running)
+            </button>
+            <button class="px-3 py-2 text-sm bg-red-700 hover:bg-red-600 rounded w-full"
+              onClick={async () => {
+                try { const list = await invoke<Instance[]>("list_instances");
+                  for (const inst of list) { await invoke("stop_instance", { name: inst.name }).catch(() => {}); }
+                } catch {}
+                invoke("exit_app");
+              }}>
+              Stop all instances and quit
+            </button>
+            <button class="px-3 py-2 text-sm bg-gray-700 hover:bg-gray-600 rounded w-full"
+              onClick={() => setShowQuitDialog(false)}>
+              Cancel
+            </button>
           </div>
         </div>
       </div>

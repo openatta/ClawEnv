@@ -104,6 +104,28 @@ mkdir -p "$BUILD_DIR/node_modules"
 [ -d "$BUILD_DIR/lib/node_modules" ] && mv "$BUILD_DIR/lib/node_modules"/* "$BUILD_DIR/node_modules/" 2>/dev/null && rm -rf "$BUILD_DIR/lib"
 [ -d "$BUILD_DIR/bin" ] && { mkdir -p "$BUILD_DIR/node_modules/.bin"; cp -a "$BUILD_DIR/bin"/* "$BUILD_DIR/node_modules/.bin/" 2>/dev/null; rm -rf "$BUILD_DIR/bin"; }
 
+# Step 2b: Download portable Git
+echo "=== Step 2b: Download portable Git ==="
+mkdir -p "$BUILD_DIR/git"
+GIT_VERSION="2.49.0"
+case "$PLATFORM" in
+    macos)
+        GIT_ARCH=$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "x86_64")
+        curl -fSL -o "$BUILD_DIR/git.tar.gz" "https://github.com/nicknisi/git-for-mac/releases/latest/download/git-macos-${GIT_ARCH}.tar.gz" 2>/dev/null && \
+            tar xzf "$BUILD_DIR/git.tar.gz" --strip-components=1 -C "$BUILD_DIR/git" && \
+            rm -f "$BUILD_DIR/git.tar.gz" || echo "WARNING: portable git download failed (will use system git)"
+        ;;
+    windows)
+        GIT_ARCH=$([ "$ARCH" = "arm64" ] && echo "arm64" || echo "64-bit")
+        curl -fSL -o "$BUILD_DIR/git.zip" "https://github.com/git-for-windows/git/releases/download/v${GIT_VERSION}.windows.1/MinGit-${GIT_VERSION}-${GIT_ARCH}.zip" && \
+            unzip -qo "$BUILD_DIR/git.zip" -d "$BUILD_DIR/git" && \
+            rm -f "$BUILD_DIR/git.zip" || echo "WARNING: MinGit download failed"
+        ;;
+    linux)
+        echo "Linux: git should be installed via package manager"
+        ;;
+esac
+
 # Step 3: Package
 echo "=== Step 3: Packaging ==="
 rm -f "$BUILD_DIR/$NODE_FILENAME"
@@ -125,7 +147,10 @@ version = "$ACTUAL_VERSION"
 min_version = "0.2.0"
 EOF
 
-tar czf "$OUTFILE" -C "$BUILD_DIR" node node_modules manifest.toml
+# Include node + git + native modules
+TAR_ITEMS="node node_modules manifest.toml"
+[ -d "$BUILD_DIR/git" ] && [ "$(ls -A $BUILD_DIR/git 2>/dev/null)" ] && TAR_ITEMS="$TAR_ITEMS git"
+tar czf "$OUTFILE" -C "$BUILD_DIR" $TAR_ITEMS
 
 SHA256=$(shasum -a 256 "$OUTFILE" 2>/dev/null | awk '{print $1}' || sha256sum "$OUTFILE" 2>/dev/null | awk '{print $1}' || echo "unknown")
 

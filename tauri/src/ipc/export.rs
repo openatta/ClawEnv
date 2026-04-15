@@ -218,30 +218,26 @@ pub async fn export_native_bundle(app: tauri::AppHandle, name: String) -> Result
     Ok(path)
 }
 
-async fn do_native_export(app: &tauri::AppHandle, name: &str, output: &str) -> Result<(), String> {
+async fn do_native_export(app: &tauri::AppHandle, _name: &str, output: &str) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_default();
-    let install_dir = home.join(".clawenv/native").join(name);
+    let clawenv = home.join(".clawenv");
+    let install_dir = clawenv.join("native");
 
     if !install_dir.exists() {
         return Err(format!("Native install dir not found: {}", install_dir.display()));
     }
 
-    emit_progress(app, 10, "Preparing native bundle...");
-
-    // Include node runtime + node_modules
-    let node_dir = home.join(".clawenv/node");
+    emit_progress(app, 10, "Preparing native bundle (node + git + openclaw)...");
 
     emit_progress(app, 20, "Compressing bundle (this may take several minutes)...");
 
     let mut cmd = tokio::process::Command::new("tar");
-    cmd.arg("-czf").arg(output).arg("-C").arg(home.join(".clawenv"));
+    cmd.arg("-czf").arg(output).arg("-C").arg(&clawenv);
 
-    // Include node/ if it exists (ClawEnv managed Node.js)
-    if node_dir.exists() {
-        cmd.arg("node");
-    }
-    // Include the instance directory
-    cmd.arg(format!("native/{name}"));
+    // Include node/, git/, and native/ — everything needed for offline import
+    if clawenv.join("node").exists() { cmd.arg("node"); }
+    if clawenv.join("git").exists() { cmd.arg("git"); }
+    cmd.arg("native");
 
     let status = cmd.status().await.map_err(|e| e.to_string())?;
     if !status.success() {
