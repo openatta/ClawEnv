@@ -2,6 +2,7 @@ import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Instance, ClawType, UpgradeInfo, UpgradeProgress } from "../types";
+import ExportProgress from "../components/ExportProgress";
 
 export default function ClawPage(props: {
   clawType: ClawType;
@@ -29,24 +30,13 @@ export default function ClawPage(props: {
   const [gatewayToken, setGatewayToken] = createSignal("");
 
   // Export state
-  const [exportProgress, setExportProgress] = createSignal<{ percent: number; message: string } | null>(null);
+  const [showExport, setShowExport] = createSignal(false);
 
   async function doExportBundle() {
-    setExportProgress({ percent: 0, message: "Starting export..." });
-    const unP = await listen<{ percent: number; message: string }>("export-progress", (ev) => setExportProgress(ev.payload));
-    const unC = await listen<string>("export-complete", (ev) => {
-      setExportProgress({ percent: 100, message: `Exported to ${ev.payload}` });
-      setTimeout(() => setExportProgress(null), 3000);
-      unP(); unC(); unF();
-    });
-    const unF = await listen<string>("export-failed", (ev) => {
-      setExportProgress({ percent: -1, message: `Export failed: ${ev.payload}` });
-      setTimeout(() => setExportProgress(null), 5000);
-      unP(); unC(); unF();
-    });
     try {
       await invoke("export_native_bundle", { name: activeTab() });
-    } catch { setExportProgress(null); unP(); unC(); unF(); }
+      setShowExport(true);
+    } catch { /* cancelled */ }
   }
 
   // Upgrade state
@@ -497,24 +487,9 @@ export default function ClawPage(props: {
           </div>
         </div>
       </Show>
-      {/* Export progress overlay */}
-      <Show when={exportProgress()}>
-        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
-            <h3 class="text-base font-bold mb-3">Exporting Bundle</h3>
-            <div class="mb-3">
-              <div class="w-full bg-gray-700 rounded-full h-2">
-                <div class="bg-indigo-500 h-2 rounded-full transition-all"
-                  style={{ width: `${Math.max(0, exportProgress()!.percent)}%` }} />
-              </div>
-              <p class="text-xs text-gray-400 mt-2">{exportProgress()!.message}</p>
-            </div>
-            <Show when={exportProgress()!.percent === 100 || exportProgress()!.percent === -1}>
-              <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded w-full"
-                onClick={() => setExportProgress(null)}>Close</button>
-            </Show>
-          </div>
-        </div>
+      {/* Export progress */}
+      <Show when={showExport()}>
+        <ExportProgress isNative={true} onClose={() => setShowExport(false)} />
       </Show>
     </div>
   );

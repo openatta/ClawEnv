@@ -234,6 +234,7 @@ fn main() {
             ipc::restart_computer,
             ipc::export_sandbox,
             ipc::export_native_bundle,
+            ipc::export_cancel,
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {
