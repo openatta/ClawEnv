@@ -101,8 +101,9 @@ pub async fn open_url(url: &str) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
+        // "start" needs empty title ("") before URL, otherwise URL is treated as window title
         silent_cmd("cmd")
-            .args(["/c", "start", url])
+            .args(["/c", "start", "", url])
             .status()
             .await?;
     }

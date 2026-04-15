@@ -64,19 +64,15 @@ impl NativeBackend {
     }
 
     /// Create a platform-appropriate shell command with ClawEnv node in PATH.
-    /// Windows uses cmd.exe (not PowerShell) to avoid ExecutionPolicy issues
-    /// with .ps1 wrapper scripts created by npm.
+    /// Windows: PowerShell with -ExecutionPolicy Bypass (needed for node -e, health checks).
+    /// Gateway startup does NOT go through exec() — it uses Rust direct spawn.
     pub fn shell_cmd_with_path(&self, cmd: &str) -> Command {
         let path = self.clawenv_path();
         #[cfg(target_os = "windows")]
         {
-            let mut c = Command::new("cmd");
-            // Set PATH then run the command via cmd.exe /c
-            // This uses .cmd wrappers (not .ps1) which avoids ExecutionPolicy
-            c.args(["/c", &format!("set PATH={}&& {}", path, cmd)]);
-            // CREATE_NO_WINDOW
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x08000000);
+            let mut c = crate::platform::process::silent_cmd("powershell");
+            let full = format!("$env:PATH = '{}'; {}", path.replace('\'', "''"), cmd);
+            c.args(["-Command", &full]);
             c
         }
         #[cfg(not(target_os = "windows"))]
@@ -91,10 +87,8 @@ impl NativeBackend {
     pub fn shell_cmd(cmd: &str) -> Command {
         #[cfg(target_os = "windows")]
         {
-            let mut c = Command::new("cmd");
-            c.args(["/c", cmd]);
-            use std::os::windows::process::CommandExt;
-            c.creation_flags(0x08000000);
+            let mut c = crate::platform::process::silent_cmd("powershell");
+            c.args(["-Command", cmd]);
             c
         }
         #[cfg(not(target_os = "windows"))]

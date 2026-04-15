@@ -19,7 +19,8 @@ pub async fn get_gateway_token(name: String) -> Result<String, String> {
 const fs = require('fs'), path = require('path'), id = '{id}';
 let homes = [];
 try {{ homes = fs.readdirSync('/home').map(u => '/home/'+u+'/.'+id+'/'+id+'.json'); }} catch {{}}
-const candidates = [path.join(process.env.HOME || '~', '.'+id, id+'.json'), ...homes.filter(f => {{ try {{ return fs.existsSync(f); }} catch {{ return false; }} }})];
+const home = process.env.HOME || process.env.USERPROFILE || '~';
+const candidates = [path.join(home, '.'+id, id+'.json'), ...homes.filter(f => {{ try {{ return fs.existsSync(f); }} catch {{ return false; }} }})];
 for (const f of candidates) {{
   try {{
     const j = JSON.parse(fs.readFileSync(f,'utf8'));
