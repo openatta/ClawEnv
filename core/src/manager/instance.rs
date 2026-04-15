@@ -8,6 +8,29 @@ use crate::sandbox::{
     native_backend, LimaBackend, PodmanBackend, WslBackend, SandboxBackend, SandboxType,
 };
 
+/// Kill native gateway process — pure Rust, no shell dependency.
+/// Uses taskkill on Windows, kill on Unix. Kills by process name "node".
+async fn kill_native_gateway(_port: u16) {
+    #[cfg(target_os = "windows")]
+    {
+        // taskkill /f /im node.exe kills all node processes — acceptable for native mode
+        // (only one native instance allowed, all node.exe are ours)
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/f", "/im", "node.exe"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await;
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-9", "-f", "openclaw.*gateway"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await;
+    }
+}
+
 /// Get the appropriate sandbox backend for an instance
 pub fn backend_for_instance(instance: &InstanceConfig) -> Result<Box<dyn SandboxBackend>> {
     // Use sandbox_id as the actual VM/container/directory name (ASCII-safe)
@@ -87,24 +110,10 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     // Always kill stale gateway before starting — ensures clean state
     let is_win_native = cfg!(target_os = "windows") && instance.sandbox_type == SandboxType::Native;
 
-    // Kill stale gateway on this port — match port AND process name to avoid killing unrelated processes
-    #[cfg(target_os = "windows")]
+    // Kill stale gateway
     if instance.sandbox_type == SandboxType::Native {
-        // Find PID listening on this port, verify it's openclaw/node, then kill
-        backend.exec(&format!(
-            "powershell -ExecutionPolicy Bypass -Command \"\
-            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
-            if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
-            if ($p -and ($p.ProcessName -like '*node*' -or $p.ProcessName -like '*openclaw*')) {{ \
-            Stop-Process -Id $c.OwningProcess -Force }} }}\""
-        )).await.ok();
+        kill_native_gateway(port).await;
     } else {
-        for pn in &desc.process_names() {
-            backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
-        }
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
         for pn in &desc.process_names() {
             backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
         }
@@ -214,26 +223,16 @@ pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
     let backend = backend_for_instance(instance)?;
     let port = instance.gateway.gateway_port;
 
-    // Kill gateway: by port+process on Windows native, by name elsewhere
-    #[cfg(target_os = "windows")]
+    // Kill gateway
     if instance.sandbox_type == SandboxType::Native {
-        backend.exec(&format!(
-            "powershell -ExecutionPolicy Bypass -Command \"\
-            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
-            if ($c) {{ $p = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue; \
-            if ($p -and ($p.ProcessName -like '*node*' -or $p.ProcessName -like '*openclaw*')) {{ \
-            Stop-Process -Id $c.OwningProcess -Force }} }}\""
-        )).await.ok();
+        // Native: kill all node processes directly (pure Rust, no shell)
+        kill_native_gateway(port).await;
     } else {
         for pn in &desc.process_names() {
             backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
         }
+        backend.exec(&process::kill_by_name_cmd("ttyd")).await.ok();
     }
-    #[cfg(not(target_os = "windows"))]
-    for pn in &desc.process_names() {
-        backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
-    }
-    backend.exec(&process::kill_by_name_cmd("ttyd")).await.ok();
     backend.stop().await?;
     tracing::info!("Instance '{}' stopped", instance.name);
     Ok(())
@@ -285,15 +284,9 @@ pub async fn remove_instance(config: &mut ConfigManager, name: &str) -> Result<(
     // Wait for processes to fully exit before destroying files
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-    // On Windows native, force kill any remaining node processes on the gateway port
-    #[cfg(target_os = "windows")]
+    // Force kill any remaining native gateway
     if instance.sandbox_type == SandboxType::Native {
-        let port = instance.gateway.gateway_port;
-        let _ = backend.exec(&format!(
-            "powershell -ExecutionPolicy Bypass -Command \"\
-            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
-            if ($c) {{ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }}\""
-        )).await;
+        kill_native_gateway(instance.gateway.gateway_port).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 
