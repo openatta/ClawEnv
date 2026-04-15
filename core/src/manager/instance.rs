@@ -281,7 +281,30 @@ pub async fn remove_instance(config: &mut ConfigManager, name: &str) -> Result<(
 
     let backend = backend_for_instance(&instance)?;
     stop_instance(&instance).await.ok();
-    backend.destroy().await?;
+
+    // Wait for processes to fully exit before destroying files
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    // On Windows native, force kill any remaining node processes on the gateway port
+    #[cfg(target_os = "windows")]
+    if instance.sandbox_type == SandboxType::Native {
+        let port = instance.gateway.gateway_port;
+        let _ = backend.exec(&format!(
+            "powershell -ExecutionPolicy Bypass -Command \"\
+            $c = Get-NetTCPConnection -LocalPort {port} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; \
+            if ($c) {{ Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue }}\""
+        )).await;
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    // Destroy backend (delete VM/files) — retry on Windows if files are locked
+    let mut destroy_result = backend.destroy().await;
+    #[cfg(target_os = "windows")]
+    if destroy_result.is_err() {
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        destroy_result = backend.destroy().await;
+    }
+    destroy_result?;
 
     config.config_mut().instances.retain(|i| i.name != name);
     config.save()?;
