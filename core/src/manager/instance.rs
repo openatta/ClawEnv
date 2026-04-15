@@ -19,7 +19,7 @@ pub async fn kill_native_gateway_public(_port: u16) {
     {
         // taskkill /f /im node.exe kills all node processes — acceptable for native mode
         // (only one native instance allowed, all node.exe are ours)
-        let _ = tokio::process::Command::new("taskkill")
+        let _ = crate::platform::process::silent_cmd("taskkill")
             .args(["/f", "/im", "node.exe"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())

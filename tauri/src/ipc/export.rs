@@ -65,17 +65,10 @@ async fn tar_with_progress(
     stage_name: &str,
     cancelled: &AtomicBool,
 ) -> Result<(), String> {
-    let mut cmd = tokio::process::Command::new("tar");
+    let mut cmd = clawenv_core::platform::process::silent_cmd("tar");
     cmd.arg("-czvf").arg(output).arg("-C").arg(base_dir);
     for item in items {
         cmd.arg(item);
-    }
-
-    // Hide window on Windows
-    #[cfg(target_os = "windows")]
-    {
-        use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
 
     cmd.stdout(std::process::Stdio::null())
@@ -192,14 +185,12 @@ async fn do_sandbox_export(app: &tauri::AppHandle, name: &str, output: &str) -> 
         SandboxType::LimaAlpine => {
             let lima_dir = format!("{}/.lima", std::env::var("HOME").unwrap_or_default());
             let excludes = ["*.sock", "*.pid", "*.log", "cidata.iso"];
-            let mut cmd = tokio::process::Command::new("tar");
+            let mut cmd = clawenv_core::platform::process::silent_cmd("tar");
             cmd.arg("-czvf").arg(output).arg("-C").arg(&lima_dir);
             for ex in &excludes {
                 cmd.arg("--exclude").arg(&format!("{vm_name}/{ex}"));
             }
             cmd.arg(vm_name);
-            #[cfg(target_os = "windows")]
-            { use std::os::windows::process::CommandExt; cmd.creation_flags(0x08000000); }
             cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
 
             let mut child = cmd.spawn().map_err(|e| format!("tar failed: {e}"))?;
