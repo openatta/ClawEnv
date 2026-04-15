@@ -447,17 +447,16 @@ async fn install_from_bundle(
         }
     }
 
-    // Start gateway
+    // Start gateway via ManagedShell::spawn_detached (works on all platforms)
     let gateway_cmd = desc.gateway_start_cmd(opts.gateway_port);
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
-    #[cfg(not(target_os = "windows"))]
-    backend.exec(&format!("nohup {gateway_cmd} > /tmp/clawenv-gateway-{}.log 2>&1 &", opts.instance_name)).await?;
-    #[cfg(target_os = "windows")]
     {
-        let full_cmd = gateway_cmd.replace('\'', "''");
-        backend.exec(&format!(
-            "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
-        )).await?;
+        let shell = crate::platform::managed_shell::ManagedShell::new();
+        let log_path = dirs::home_dir().unwrap_or_default()
+            .join(".clawenv").join("native").join("gateway.log");
+        let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
+        let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
+        shell.spawn_detached(bin, args, &log_path).await?;
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
