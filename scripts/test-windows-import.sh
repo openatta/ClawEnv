@@ -18,9 +18,9 @@ fi
 WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
 WIN_PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
-WIN_CLI="$WIN_PROJECT\\target\\debug\\clawenv-cli.exe"
+WIN_CLI="$WIN_PROJECT\\target\\debug\\clawcli.exe"
 # Try target2 if target is locked
-WIN_CLI2="$WIN_PROJECT\\target2\\debug\\clawenv-cli.exe"
+WIN_CLI2="$WIN_PROJECT\\target2\\debug\\clawcli.exe"
 WIN_ENV="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
 INSTANCE="win-import-$$"
@@ -44,7 +44,7 @@ if echo "$CLI_CHECK" | grep -q "clawenv"; then
     echo "  CLI: $CLI_CHECK"
 else
     echo "  Building CLI..."
-    ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawenv-cli --target-dir target2" 2>&1 | tail -2
+    ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawcli --target-dir target2" 2>&1 | tail -2
     WIN_CLI="$WIN_CLI2"
 fi
 

@@ -39,16 +39,16 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Check (core + cli)
-        run: cargo check -p clawenv-core -p clawenv-cli
+        run: cargo check -p clawenv-core -p clawcli
 
       - name: Test (core)
         run: cargo test -p clawenv-core
 
       - name: Test (cli e2e)
-        run: cargo test -p clawenv-cli
+        run: cargo test -p clawcli
 
       - name: Clippy
-        run: cargo clippy -p clawenv-core -p clawenv-cli -- -D warnings
+        run: cargo clippy -p clawenv-core -p clawcli -- -D warnings
         continue-on-error: true
 
   # ============================================================
@@ -79,34 +79,34 @@ jobs:
           restore-keys: ${{ runner.os }}-cargo-
 
       - name: Build CLI
-        run: cargo build -p clawenv-cli
+        run: cargo build -p clawcli
 
       - name: CLI version
-        run: ./target/debug/clawenv-cli --version
+        run: ./target/debug/clawcli --version
         shell: bash
 
       - name: CLI doctor
-        run: ./target/debug/clawenv-cli --json doctor
+        run: ./target/debug/clawcli --json doctor
         shell: bash
 
       - name: CLI system-check
-        run: ./target/debug/clawenv-cli --json system-check
+        run: ./target/debug/clawcli --json system-check
         shell: bash
 
       - name: CLI claw-types
-        run: ./target/debug/clawenv-cli --json claw-types
+        run: ./target/debug/clawcli --json claw-types
         shell: bash
 
       - name: CLI config show
-        run: ./target/debug/clawenv-cli --json config show || true
+        run: ./target/debug/clawcli --json config show || true
         shell: bash
 
       - name: CLI sandbox list
-        run: ./target/debug/clawenv-cli --json sandbox list
+        run: ./target/debug/clawcli --json sandbox list
         shell: bash
 
       - name: CLI sandbox info
-        run: ./target/debug/clawenv-cli --json sandbox info
+        run: ./target/debug/clawcli --json sandbox info
         shell: bash
 
   # ============================================================
@@ -130,10 +130,10 @@ jobs:
       - name: Cross-compile
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: aarch64-linux-musl-gcc
-        run: cargo build -p clawenv-cli --target aarch64-unknown-linux-musl --release
+        run: cargo build -p clawcli --target aarch64-unknown-linux-musl --release
 
       - name: Verify binary
-        run: file target/aarch64-unknown-linux-musl/release/clawenv-cli
+        run: file target/aarch64-unknown-linux-musl/release/clawcli
 
   # ============================================================
   # Tauri check (GUI compilation, not full build)
@@ -169,4 +169,4 @@ jobs:
           restore-keys: ${{ runner.os }}-tauri-
 
       - name: Check Tauri
-        run: cargo check -p clawenv-gui
+        run: cargo check -p clawgui

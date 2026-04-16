@@ -32,7 +32,7 @@ docs/            # 规格文档（SSOT，共 11 个文件）
 6. **System Tray 生命周期**：托盘在 Tauri `setup` 阶段初始化，不依赖主窗口。主窗口关闭时继续在托盘运行。
 7. **Claw 管理页是 WebView**：不自己实现管理 UI，内嵌加载各 Claw 产品自带的 Web 管理面板。ClawPage 组件通过 ClawDescriptor 动态适配不同产品。
 
-8. **CLI 是核心**：所有业务逻辑通过 CLI（`clawenv-cli --json`）暴露，Tauri GUI 是薄壳，通过 `cli_bridge` spawn CLI 子进程。
+8. **CLI 是核心**：所有业务逻辑通过 CLI（`clawcli --json`）暴露，Tauri GUI 是薄壳，通过 `cli_bridge` spawn CLI 子进程。
 9. **Shell 安全**：所有拼入 shell 的动态变量必须用 `shell_quote()` / `powershell_quote()` 转义（`core/src/platform/mod.rs`）。
 
 ## Rust 版本

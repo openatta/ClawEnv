@@ -1,13 +1,13 @@
 //! End-to-end CLI integration tests.
 //!
-//! These tests run the actual `clawenv-cli` binary and verify its output
+//! These tests run the actual `clawcli` binary and verify its output
 //! in both human and JSON modes.
 
 use std::process::Command;
 
 fn cli_bin() -> Command {
     // Use cargo to find the binary
-    let bin = env!("CARGO_BIN_EXE_clawenv-cli");
+    let bin = env!("CARGO_BIN_EXE_clawcli");
     Command::new(bin)
 }
 
@@ -15,7 +15,7 @@ fn run_json(args: &[&str]) -> (i32, serde_json::Value) {
     let mut cmd = cli_bin();
     cmd.arg("--json");
     cmd.args(args);
-    let output = cmd.output().expect("failed to run clawenv-cli");
+    let output = cmd.output().expect("failed to run clawcli");
     let code = output.status.code().unwrap_or(-1);
     let stdout = String::from_utf8_lossy(&output.stdout);
 
@@ -36,7 +36,7 @@ fn test_help() {
     let output = cli_bin().arg("--help").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("clawenv"));
+    assert!(stdout.contains("claw"));
     assert!(stdout.contains("install"));
     assert!(stdout.contains("list"));
     assert!(stdout.contains("doctor"));
@@ -47,7 +47,7 @@ fn test_version() {
     let output = cli_bin().arg("--version").output().unwrap();
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("clawenv"));
+    assert!(stdout.contains("claw"));
 }
 
 #[test]

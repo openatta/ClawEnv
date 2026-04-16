@@ -52,12 +52,12 @@ SKIP=0
 TOTAL=0
 
 # Find the CLI binary
-if [[ -f ./target/debug/clawenv-cli ]]; then
-    CLI=./target/debug/clawenv-cli
-elif command -v clawenv-cli &>/dev/null; then
-    CLI=clawenv-cli
+if [[ -f ./target/debug/clawcli ]]; then
+    CLI=./target/debug/clawcli
+elif command -v clawcli &>/dev/null; then
+    CLI=clawcli
 else
-    echo "ERROR: clawenv-cli not found. Run 'cargo build -p clawenv-cli' first."
+    echo "ERROR: clawcli not found. Run 'cargo build -p clawcli' first."
     exit 1
 fi
 

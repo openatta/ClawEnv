@@ -25,12 +25,12 @@ Host OS
 
 ## 2.2 CLI-First Design (Architecture Law #8)
 
-All business logic runs through `clawenv-cli --json`. The Tauri GUI is a thin
+All business logic runs through `clawcli --json`. The Tauri GUI is a thin
 presentation shell that spawns CLI subprocesses via `cli_bridge`.
 
 ```
 Frontend (SolidJS) → invoke() → Tauri IPC → cli_bridge::run_cli()
-                                              → spawn clawenv-cli --json <cmd>
+                                              → spawn clawcli --json <cmd>
                                               → parse JSON stdout (CliEvent)
                                               → return to frontend
 ```

@@ -21,7 +21,7 @@ fi
 WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
 WIN_PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
-WIN_CLI="$WIN_PROJECT\\target\\debug\\clawenv-cli.exe"
+WIN_CLI="$WIN_PROJECT\\target\\debug\\clawcli.exe"
 WIN_ENV="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
 echo "========================================"
@@ -40,7 +40,7 @@ fi
 echo "  Syncing code..."
 ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && \"C:\\Program Files\\Git\\cmd\\git.exe\" pull" 2>&1 | tail -2
 echo "  Building CLI..."
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawenv-cli" 2>&1 | tail -2
+ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawcli" 2>&1 | tail -2
 
 # ================================================================
 section "A. System Exploration"

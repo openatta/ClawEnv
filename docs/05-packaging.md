@@ -121,7 +121,7 @@ Output:
 ### Build Notes
 
 - `beforeBuildCommand` in `tauri.conf.json` automatically:
-  1. Builds `clawenv-cli` (release)
+  1. Builds `clawcli` (release)
   2. Copies CLI as Tauri sidecar (`scripts/copy-cli-sidecar.cjs`)
   3. Builds frontend (`npm run build`)
 - Rust version: tauri crate needs 1.88+ (`~/.cargo/bin/rustc`)

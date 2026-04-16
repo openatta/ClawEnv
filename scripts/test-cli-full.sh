@@ -12,7 +12,7 @@
 #   bash scripts/test-cli-full.sh --mode sandbox     # Test sandbox mode
 #
 # Requirements:
-#   macOS: cargo build -p clawenv-cli
+#   macOS: cargo build -p clawcli
 #   Windows: SSH access configured in .env, Rust toolchain on remote
 
 set -uo pipefail
@@ -43,7 +43,7 @@ fi
 WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
 WIN_PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
-WIN_CLI="$WIN_PROJECT\\target\\debug\\clawenv-cli.exe"
+WIN_CLI="$WIN_PROJECT\\target\\debug\\clawcli.exe"
 WIN_ENV="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
 # ---- Counters ----
@@ -62,7 +62,7 @@ run_test() {
 
     RC=0
     if [[ "$platform" == "mac" ]]; then
-        OUT=$("$ROOT/target/debug/clawenv-cli" --json "$@" 2>&1) || RC=$?
+        OUT=$("$ROOT/target/debug/clawcli" --json "$@" 2>&1) || RC=$?
     else
         OUT=$(ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
             "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json $*" 2>&1) || RC=$?
@@ -180,7 +180,7 @@ run_platform_tests() {
     TOTAL=$((TOTAL+1))
     RC=0
     if [[ "$P" == "mac" ]]; then
-        OUT=$("$ROOT/target/debug/clawenv-cli" --json exec "echo hello-test" "$INSTANCE" 2>&1) || RC=$?
+        OUT=$("$ROOT/target/debug/clawcli" --json exec "echo hello-test" "$INSTANCE" 2>&1) || RC=$?
     else
         OUT=$(ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
             "${WIN_ENV} cd $WIN_PROJECT && $WIN_CLI --json exec \"echo hello-test\" $INSTANCE" 2>&1) || RC=$?
@@ -240,7 +240,7 @@ run_platform_tests() {
 # ================================================================
 echo "=== Building CLI ==="
 cd "$ROOT"
-cargo build -p clawenv-cli 2>&1 | tail -1
+cargo build -p clawcli 2>&1 | tail -1
 
 # ================================================================
 # macOS Tests
@@ -265,7 +265,7 @@ if $TEST_WINDOWS; then
 
     echo "=== Building CLI on Windows ==="
     ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
-        "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawenv-cli" 2>&1 | tail -3
+        "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawcli" 2>&1 | tail -3
 
     run_platform_tests "win"
 fi

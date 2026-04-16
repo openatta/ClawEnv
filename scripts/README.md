@@ -11,7 +11,7 @@
 | Layer | Command | Duration | Scope |
 |-------|---------|----------|-------|
 | L1 Unit | `cargo test -p clawenv-core` | <1s | Config, registry, version parsing |
-| L2 CLI E2E | `cargo test -p clawenv-cli` | <2s | CLI binary output format, commands |
+| L2 CLI E2E | `cargo test -p clawcli` | <2s | CLI binary output format, commands |
 | L3 Real Install | `bash scripts/test-cli.sh` | 5-30min | Full install/lifecycle in real environment |
 
 ### L3 Test Usage

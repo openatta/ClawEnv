@@ -26,7 +26,7 @@ directly on the host via Node.js).
 - **GUI Install Wizard**: 7-step guided installation with system checks
 - **Sandbox Isolation**: Alpine Linux VM per instance (Lima / WSL2 / Podman)
 - **Multi-Instance**: Multiple OpenClaw instances with 20-port block allocation
-- **CLI-First Architecture**: All business logic via `clawenv-cli`, GUI is thin shell
+- **CLI-First Architecture**: All business logic via `clawcli`, GUI is thin shell
 - **System Tray**: Background monitoring, health notifications, quick actions
 - **Terminal**: In-browser terminal (ttyd + xterm.js) per sandbox VM
 - **Browser HIL**: Human-in-the-Loop via noVNC when agent needs manual help
@@ -40,7 +40,7 @@ directly on the host via Node.js).
 ```
 core/            # Core logic (platform-agnostic, no UI deps)
 tauri/           # Tauri v2 GUI app (System Tray)
-cli/             # Pure CLI (clawenv-cli)
+cli/             # Pure CLI (clawcli)
 src/             # Frontend SolidJS + TailwindCSS
 assets/          # Lima templates, icons, MCP plugin bundles
 plugins/         # MCP Bridge + HIL Skill source (TypeScript)

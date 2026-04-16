@@ -28,7 +28,7 @@ echo "  macOS Import Test"
 echo "========================================"
 
 cd "$SCRIPT_DIR/.."
-cargo build -p clawenv-cli 2>&1 | tail -1
+cargo build -p clawcli 2>&1 | tail -1
 find_cli
 
 # ================================================================

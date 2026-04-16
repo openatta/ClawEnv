@@ -42,7 +42,7 @@ ClawEnv creates a secure, isolated Alpine Linux sandbox on your system — power
 ## Architecture
 
 ```
-GUI (SolidJS + Tauri) ──IPC──► clawenv-cli --json <command>
+GUI (SolidJS + Tauri) ──IPC──► clawcli --json <command>
                                     │
                           ┌─────────┼─────────┐
                           ▼         ▼         ▼
@@ -54,7 +54,7 @@ GUI (SolidJS + Tauri) ──IPC──► clawenv-cli --json <command>
                               OpenClaw Agent
 ```
 
-**CLI-first**: All business logic in `clawenv-cli`. GUI is a thin presentation shell.
+**CLI-first**: All business logic in `clawcli`. GUI is a thin presentation shell.
 
 ## Tech Stack
 

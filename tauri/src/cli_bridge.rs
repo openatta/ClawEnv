@@ -1,6 +1,6 @@
 //! Bridge between Tauri GUI and the CLI binary.
 //!
-//! Spawns `clawenv-cli --json <command>` and parses JSON-lines output.
+//! Spawns `clawcli --json <command>` and parses JSON-lines output.
 //! CLI is the single source of truth; GUI is a thin presentation shell.
 //!
 //! **Idle timeout**: activity-based — any stdout/stderr line resets the timer.
@@ -32,9 +32,9 @@ pub enum CliEvent {
 
 fn cli_binary_path() -> String {
     #[cfg(target_os = "windows")]
-    let cli_name = "clawenv-cli.exe";
+    let cli_name = "clawcli.exe";
     #[cfg(not(target_os = "windows"))]
-    let cli_name = "clawenv-cli";
+    let cli_name = "clawcli";
 
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent().unwrap_or(std::path::Path::new("."));
@@ -47,7 +47,7 @@ fn cli_binary_path() -> String {
 
         // 2. Tauri sidecar: <cli_name>-<target-triple>[.exe] in same directory
         if let Ok(entries) = std::fs::read_dir(dir) {
-            let prefix = "clawenv-cli-";
+            let prefix = "clawcli-";
             for entry in entries.flatten() {
                 let name = entry.file_name();
                 let name = name.to_string_lossy();

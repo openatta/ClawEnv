@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "cargo build -p clawenv-cli --release && node scripts/copy-cli-sidecar.cjs release && npm run build",
-    "beforeDevCommand": "cargo build -p clawenv-cli && node scripts/copy-cli-sidecar.cjs debug && npm run dev"
+    "beforeBuildCommand": "cargo build -p clawcli --release && node scripts/copy-cli-sidecar.cjs release && npm run build",
+    "beforeDevCommand": "cargo build -p clawcli && node scripts/copy-cli-sidecar.cjs debug && npm run dev"
   },
   "app": {
     "withGlobalTauri": true,
@@ -30,7 +30,7 @@
     "active": true,
     "targets": "all",
     "externalBin": [
-      "binaries/clawenv-cli"
+      "binaries/clawcli"
     ],
     "icon": [
       "icons/32x32.png",
