@@ -18,6 +18,8 @@ Flow:
 Register with Hermes Agent:
   hermes mcp add clawenv-hil --config '{"command":"python3","args":["/workspace/hil-skill/skill.py"]}'
 """
+from __future__ import annotations
+
 import sys
 import os
 import json
@@ -27,6 +29,7 @@ import asyncio
 import httpx
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
+from mcp.types import TextContent
 
 # Parse CLI args
 parser = argparse.ArgumentParser()
@@ -55,11 +58,17 @@ print(f"[clawenv-hil] Bridge URL: {bridge_url}", file=sys.stderr)
 # HTTP client with 10-min timeout for HIL blocking requests
 client = httpx.AsyncClient(base_url=bridge_url, timeout=600)
 
+
+def text(s: str) -> list:
+    """Wrap a string in MCP TextContent list for tool responses."""
+    return [TextContent(type="text", text=s)]
+
+
 server = Server("clawenv-hil")
 
 
 @server.tool()
-async def hil_request(reason: str, url: str = "") -> str:
+async def hil_request(reason: str, url: str = "") -> list:
     """Request human intervention for a browser task.
 
     Use this when the browser encounters a CAPTCHA, 2FA prompt, login wall,
@@ -76,7 +85,7 @@ async def hil_request(reason: str, url: str = "") -> str:
         )
 
         if resp.status_code != 200:
-            return f"HIL request failed: {resp.text}"
+            return text(f"HIL request failed: {resp.text}")
 
         data = resp.json()
         print(f"[clawenv-hil] HIL completed: {json.dumps(data)}", file=sys.stderr)
@@ -84,21 +93,21 @@ async def hil_request(reason: str, url: str = "") -> str:
         result = f"Human intervention completed. {data.get('message', 'User finished the task.')}"
         if data.get("notes"):
             result += f"\nUser notes: {data['notes']}"
-        return result
+        return text(result)
 
     except Exception as e:
-        return f"HIL request error: {e}"
+        return text(f"HIL request error: {e}")
 
 
 @server.tool()
-async def hil_status() -> str:
+async def hil_status() -> list:
     """Check if a human intervention session is currently active."""
     try:
         resp = await client.get("/api/hil/status", timeout=5)
         data = resp.json()
-        return json.dumps(data, indent=2)
+        return text(json.dumps(data, indent=2))
     except Exception as e:
-        return f"Cannot check HIL status: {e}"
+        return text(f"Cannot check HIL status: {e}")
 
 
 async def main():

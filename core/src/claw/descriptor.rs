@@ -180,18 +180,17 @@ impl ClawDescriptor {
     /// Process name patterns for kill commands.
     /// Returns both "binary gateway" and "binary-gateway" to match
     /// different process naming conventions.
+    /// Does NOT include the bare binary name to avoid killing unrelated processes.
     pub fn process_names(&self) -> Vec<String> {
         vec![
             format!("{} gateway", self.cli_binary),
             format!("{}-gateway", self.cli_binary),
-            // Also match standalone binary (e.g., "hermes" for non-gateway agents)
-            self.cli_binary.clone(),
         ]
     }
 
     /// Whether MCP bridge scripts should use Python runtime (vs Node.js).
     pub fn uses_python_mcp(&self) -> bool {
-        self.mcp_runtime == "python"
+        self.mcp_runtime.eq_ignore_ascii_case("python")
     }
 }
 

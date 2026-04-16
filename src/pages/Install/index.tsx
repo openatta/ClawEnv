@@ -137,26 +137,34 @@ export default function InstallWizard(props: {
           {step() === 0 && (
             <div>
               <h2 class="text-xl font-bold mb-4">{iLang() === "zh-CN" ? "选择要安装的产品" : "Choose Product to Install"}</h2>
-              <div class="grid grid-cols-2 gap-4 max-w-lg">
-                <For each={allClawTypes()}>
-                  {(ct) => (
-                    <button
-                      class={`flex flex-col items-center gap-3 p-6 rounded-xl border-2 transition-all ${
-                        selectedClawType() === ct.id
-                          ? "border-indigo-500 bg-indigo-900/20"
-                          : "border-gray-700 bg-gray-800/50 hover:border-gray-500"
-                      }`}
-                      onClick={() => setSelectedClawType(ct.id)}
-                    >
-                      <span class="text-3xl">{ct.logo || "📦"}</span>
-                      <span class="text-sm font-medium">{ct.display_name}</span>
-                      <span class="text-[10px] text-gray-500">
-                        {ct.package_manager === "pip" ? ct.pip_package : ct.npm_package}
-                      </span>
-                    </button>
-                  )}
-                </For>
-              </div>
+              <Show when={allClawTypes().length === 0}>
+                <div class="flex items-center gap-2 text-sm text-gray-400 py-8">
+                  <span class="animate-pulse">...</span>
+                  {iLang() === "zh-CN" ? "加载产品列表..." : "Loading products..."}
+                </div>
+              </Show>
+              <Show when={allClawTypes().length > 0}>
+                <div class="grid grid-cols-2 gap-4 max-w-lg">
+                  <For each={allClawTypes()}>
+                    {(ct) => (
+                      <button
+                        class={`flex flex-col items-center gap-3 p-6 rounded-xl border-2 transition-all ${
+                          selectedClawType() === ct.id
+                            ? "border-indigo-500 bg-indigo-900/20"
+                            : "border-gray-700 bg-gray-800/50 hover:border-gray-500"
+                        }`}
+                        onClick={() => setSelectedClawType(ct.id)}
+                      >
+                        <span class="text-3xl">{ct.logo || "📦"}</span>
+                        <span class="text-sm font-medium">{ct.display_name}</span>
+                        <span class="text-[10px] text-gray-500">
+                          {ct.package_manager === "pip" ? ct.pip_package : ct.npm_package}
+                        </span>
+                      </button>
+                    )}
+                  </For>
+                </div>
+              </Show>
               <Show when={isClawTypeLocked()}>
                 <p class="text-xs text-gray-500 mt-3">{iLang() === "zh-CN" ? "产品类型已锁定" : "Product type is locked"}</p>
               </Show>

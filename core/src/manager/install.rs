@@ -163,6 +163,16 @@ pub async fn install(
     // Dispatch: Native vs Sandbox
     // NativeBundle always goes through native path regardless of use_native flag
     if opts.use_native || matches!(opts.install_mode, InstallMode::NativeBundle { .. }) {
+        // Validate: some claw types (e.g., Hermes) only support sandbox installation
+        let registry = ClawRegistry::load();
+        if let Ok(desc) = registry.get_strict(&opts.claw_type) {
+            if !desc.supports_native {
+                anyhow::bail!(
+                    "{} does not support native installation. Use sandbox mode instead.",
+                    desc.display_name
+                );
+            }
+        }
         return super::install_native::install_native(&opts, config, &tx).await;
     }
 
@@ -376,8 +386,17 @@ pub async fn install(
             backend.exec(&format!("mkdir -p {hil_dir}")).await?;
             backend.exec(&format!("cat > {hil_dir}/skill.py << 'HILEOF'\n{hil_py}\nHILEOF")).await?;
 
-            // Install Python MCP SDK
-            backend.exec("pip install --break-system-packages mcp httpx 2>/dev/null || true").await?;
+            // Install Python MCP SDK (mcp + httpx)
+            let pip_result = backend.exec("pip install --break-system-packages mcp httpx 2>&1").await;
+            match &pip_result {
+                Ok(output) if output.contains("ERROR") || output.contains("error:") => {
+                    tracing::warn!("MCP SDK pip install may have failed: {}", output.lines().last().unwrap_or(""));
+                }
+                Err(e) => {
+                    tracing::warn!("MCP SDK pip install failed: {e} — MCP Bridge may not work");
+                }
+                _ => {}
+            }
         } else {
             // Node.js runtime: deploy .mjs bridge scripts
             let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
