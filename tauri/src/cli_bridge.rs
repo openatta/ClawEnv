@@ -10,14 +10,52 @@
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Mutex};
 
 /// Idle timeout — 10 minutes matches core's idle detection.
 const IDLE_TIMEOUT_SECS: u64 = 600;
+
+/// Per-instance mutex to prevent duplicate concurrent operations (e.g., double-click start).
+/// Key is the instance name extracted from CLI args; value is a mutex guarding that instance.
+static INSTANCE_LOCKS: LazyLock<Mutex<HashMap<String, std::sync::Arc<Mutex<()>>>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Extract the instance name from CLI args for locking purposes.
+/// Matches patterns like: ["start", "--name", "default"] or ["install", "--name", "my-instance"]
+fn extract_instance_name(args: &[&str]) -> Option<String> {
+    for (i, arg) in args.iter().enumerate() {
+        if (*arg == "--name" || *arg == "-n") && i + 1 < args.len() {
+            return Some(args[i + 1].to_string());
+        }
+    }
+    // For subcommands that take name as first positional arg after verb
+    if args.len() >= 2 {
+        let verb = args[0];
+        if ["start", "stop", "restart", "uninstall", "upgrade", "export"].contains(&verb) {
+            // Check if second arg looks like a name (not a flag)
+            if !args[1].starts_with('-') {
+                return Some(args[1].to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Acquire a per-instance lock. Returns the guard that must be held for the operation's duration.
+async fn acquire_instance_lock(args: &[&str]) -> Option<tokio::sync::OwnedMutexGuard<()>> {
+    let name = extract_instance_name(args)?;
+    let lock = {
+        let mut locks = INSTANCE_LOCKS.lock().await;
+        locks.entry(name).or_insert_with(|| std::sync::Arc::new(Mutex::new(()))).clone()
+    };
+    Some(lock.lock_owned().await)
+}
 
 /// A parsed CLI event (mirrors cli/src/output.rs CliEvent).
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
@@ -96,7 +134,9 @@ fn spawn_stderr_reader(
 
 /// Run a CLI command and return the final result.
 /// Reads both stdout (JSON events) and stderr (tracing logs).
+/// Acquires per-instance mutex to prevent duplicate concurrent operations.
 pub async fn run_cli(args: &[&str]) -> Result<Value> {
+    let _instance_guard = acquire_instance_lock(args).await;
     let binary = cli_binary_path();
     let mut cmd = new_cli_command(&binary);
     cmd.arg("--json").args(args);
@@ -185,10 +225,12 @@ pub async fn run_cli(args: &[&str]) -> Result<Value> {
 /// Run a CLI command with streaming events forwarded via a channel.
 /// All event types (Progress, Info, Complete, Error, Data) are forwarded.
 /// stderr is captured and logged.
+/// Acquires per-instance mutex to prevent duplicate concurrent operations.
 pub async fn run_cli_streaming(
     args: &[&str],
     tx: mpsc::Sender<CliEvent>,
 ) -> Result<Value> {
+    let _instance_guard = acquire_instance_lock(args).await;
     let binary = cli_binary_path();
     let mut cmd = new_cli_command(&binary);
     cmd.arg("--json").args(args);

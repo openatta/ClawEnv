@@ -419,10 +419,10 @@ echo "0" > "$DONE"
                 )).await?;
                 self.exec("chmod +x /tmp/clawenv-provision.sh").await?;
 
-                // Run in background (decoupled from pipe)
-                self.exec("nohup sh /tmp/clawenv-provision.sh > /dev/null 2>&1 &").await?;
+                // Run in background and capture PID for tracking
+                self.exec("nohup sh /tmp/clawenv-provision.sh > /dev/null 2>&1 & echo $! > /tmp/clawenv-provision.pid").await?;
 
-                // Poll for completion
+                // Poll for completion using both PID tracking (new) and done-file (legacy compatible)
                 let mut elapsed = 0u64;
                 let mut last_lines = 0usize;
                 let mut idle = 0u64;
@@ -430,6 +430,7 @@ echo "0" > "$DONE"
                     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     elapsed += 5;
 
+                    // Check done-file first (works with both old and new scripts)
                     let done = self.exec("cat /tmp/clawenv-provision.done 2>/dev/null || echo ''").await.unwrap_or_default();
                     let log = self.exec(&format!(
                         "tail -n +{} /tmp/clawenv-provision.log 2>/dev/null | head -30 || echo ''",
@@ -445,8 +446,9 @@ echo "0" > "$DONE"
                         idle += 5;
                     }
 
+                    // Done-file written — script completed (success or failure)
                     if !done.trim().is_empty() {
-                        self.exec("rm -f /tmp/clawenv-provision.sh /tmp/clawenv-provision.log /tmp/clawenv-provision.done").await.ok();
+                        self.exec("rm -f /tmp/clawenv-provision.sh /tmp/clawenv-provision.log /tmp/clawenv-provision.done /tmp/clawenv-provision.pid").await.ok();
                         let rc: i32 = done.trim().parse().unwrap_or(-1);
                         if rc != 0 {
                             anyhow::bail!("WSL provision failed (exit {rc})");
@@ -454,7 +456,28 @@ echo "0" > "$DONE"
                         break;
                     }
 
+                    // PID-based crash detection: if process exited but done-file was never written,
+                    // the script crashed. This catches the case that previously hung for 10 minutes.
+                    if idle >= 30 {
+                        let pid_check = self.exec(
+                            "PID=$(cat /tmp/clawenv-provision.pid 2>/dev/null); \
+                             if [ -n \"$PID\" ] && ! kill -0 $PID 2>/dev/null; then echo 'dead'; else echo 'alive'; fi"
+                        ).await.unwrap_or_default();
+                        if pid_check.trim() == "dead" {
+                            // Process crashed without writing done-file — extract last error from log
+                            let tail = self.exec("tail -5 /tmp/clawenv-provision.log 2>/dev/null || echo 'no log'").await.unwrap_or_default();
+                            self.exec("rm -f /tmp/clawenv-provision.sh /tmp/clawenv-provision.log /tmp/clawenv-provision.done /tmp/clawenv-provision.pid").await.ok();
+                            anyhow::bail!(
+                                "WSL provision script crashed (process exited without completion).\n\
+                                 Last log output:\n{tail}"
+                            );
+                        }
+                    }
+
                     if idle >= 600 {
+                        // Kill the stalled process before bailing
+                        self.exec("PID=$(cat /tmp/clawenv-provision.pid 2>/dev/null); [ -n \"$PID\" ] && kill $PID 2>/dev/null").await.ok();
+                        self.exec("rm -f /tmp/clawenv-provision.sh /tmp/clawenv-provision.log /tmp/clawenv-provision.done /tmp/clawenv-provision.pid").await.ok();
                         anyhow::bail!("WSL provision stalled — no output for 10 min");
                     }
                 }

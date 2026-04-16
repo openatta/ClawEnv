@@ -2,6 +2,7 @@ import { createSignal, For, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import type { Instance, ClawType } from "../types";
 import OperationModal from "../components/OperationModal";
+import { t } from "../i18n";
 
 function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) => void; onClose: () => void }) {
   return (
@@ -29,27 +30,7 @@ function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) =
     </div>
   );
 }
-type Lang = "zh-CN" | "en";
 type StatusDetail = { gateway_log: string };
-
-const t: Record<Lang, Record<string, string>> = {
-  "zh-CN": {
-    home: "首页", instances: "实例", security: "安全状态",
-    stop: "停止", start: "启动", restart: "重启", status: "状态",
-    running: "运行中", stopped: "已停止", unreachable: "不可达",
-    allUpToDate: "所有组件版本最新", noCve: "无已知 CVE",
-    noInstances: "暂无实例", close: "关闭", refresh: "刷新",
-    logs: "终端日志",
-  },
-  en: {
-    home: "Home", instances: "Instances", security: "Security",
-    stop: "Stop", start: "Start", restart: "Restart", status: "Status",
-    running: "running", stopped: "stopped", unreachable: "unreachable",
-    allUpToDate: "All components up to date", noCve: "No known CVEs",
-    noInstances: "No instances configured", close: "Close", refresh: "Refresh",
-    logs: "Logs",
-  },
-};
 
 const healthColor: Record<string, string> = {
   running: "bg-green-500", stopped: "bg-gray-500", unreachable: "bg-red-500",
@@ -62,8 +43,6 @@ export default function Home(props: {
   clawTypes?: ClawType[];
   onAddInstance?: (clawType?: string) => void;
 }) {
-  const [lang, setLang] = createSignal<Lang>("zh-CN");
-  const l = () => t[lang()];
   const [actionLoading, setActionLoading] = createSignal<string | null>(null);
   const [actionError, setActionError] = createSignal("");
   const [actionHint, setActionHint] = createSignal("");
@@ -117,13 +96,7 @@ export default function Home(props: {
   return (
     <div class="h-full overflow-y-auto p-6 relative">
       <div class="flex items-center justify-between mb-6">
-        <h1 class="text-xl font-bold">{l().home}</h1>
-        <div class="flex gap-1">
-          <button class={`px-2 py-0.5 text-xs rounded ${lang() === "zh-CN" ? "bg-indigo-600" : "bg-gray-700 hover:bg-gray-600"}`}
-            onClick={() => setLang("zh-CN")}>中文</button>
-          <button class={`px-2 py-0.5 text-xs rounded ${lang() === "en" ? "bg-indigo-600" : "bg-gray-700 hover:bg-gray-600"}`}
-            onClick={() => setLang("en")}>EN</button>
-        </div>
+        <h1 class="text-xl font-bold">{t("首页", "Home")}</h1>
       </div>
 
       {/* Operation modal */}
@@ -146,7 +119,7 @@ export default function Home(props: {
 
       <section class="mb-6">
         <div class="flex items-center justify-between mb-3">
-          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">{l().instances}</h2>
+          <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide">{t("实例", "Instances")}</h2>
           <Show when={props.onAddInstance}>
             <button
               class="px-3 py-1 text-xs bg-indigo-600 hover:bg-indigo-500 rounded text-white"
@@ -169,7 +142,7 @@ export default function Home(props: {
                       <span class="font-medium">{inst.name}</span>
                       <span class="text-xs text-gray-400">{inst.display_name}</span>
                       <span class="text-xs text-gray-500">
-                        {health() === "running" ? l().running : health() === "stopped" ? l().stopped : l().unreachable}
+                        {health() === "running" ? t("运行中", "running") : health() === "stopped" ? t("已停止", "stopped") : t("不可达", "unreachable")}
                       </span>
                     </div>
                     <span class="text-sm text-gray-400">v{inst.version}</span>
@@ -179,21 +152,21 @@ export default function Home(props: {
                     {isRunning() ? (
                       <button class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
                         disabled={loading()} onClick={() => handleStop(inst.name)}>
-                        {actionLoading() === `stop-${inst.name}` ? `${l().stop}...` : l().stop}
+                        {actionLoading() === `stop-${inst.name}` ? `${t("停止", "Stop")}...` : t("停止", "Stop")}
                       </button>
                     ) : (
                       <button class="px-3 py-1 text-xs bg-indigo-700 hover:bg-indigo-600 rounded disabled:opacity-50"
                         disabled={loading()} onClick={() => handleStart(inst.name)}>
-                        {actionLoading() === `start-${inst.name}` ? `${l().start}...` : l().start}
+                        {actionLoading() === `start-${inst.name}` ? `${t("启动", "Start")}...` : t("启动", "Start")}
                       </button>
                     )}
                     <button class="px-3 py-1 text-xs bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
                       disabled={loading()} onClick={() => handleRestart(inst.name)}>
-                      {actionLoading() === `restart-${inst.name}` ? `${l().restart}...` : l().restart}
+                      {actionLoading() === `restart-${inst.name}` ? `${t("重启", "Restart")}...` : t("重启", "Restart")}
                     </button>
                     <button class="px-3 py-1 text-xs bg-gray-600 hover:bg-gray-500 rounded ml-auto"
                       onClick={() => openStatus(inst.name)}>
-                      {l().status}
+                      {t("状态", "Status")}
                     </button>
                   </div>
                 </div>
@@ -201,19 +174,19 @@ export default function Home(props: {
             }}
           </For>
           {props.instances.length === 0 && (
-            <div class="text-gray-500 text-sm">{l().noInstances}</div>
+            <div class="text-gray-500 text-sm">{t("暂无实例", "No instances configured")}</div>
           )}
         </div>
       </section>
 
       <section class="mb-6">
-        <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">{l().security}</h2>
+        <h2 class="text-sm font-medium text-gray-400 uppercase tracking-wide mb-3">{t("安全状态", "Security")}</h2>
         <div class="bg-gray-800 rounded-lg p-4 border border-gray-700">
           <div class="flex items-center gap-2 text-sm text-green-400">
-            <span>&#10003;</span><span>{l().allUpToDate}</span>
+            <span>&#10003;</span><span>{t("所有组件版本最新", "All components up to date")}</span>
           </div>
           <div class="flex items-center gap-2 text-sm text-green-400">
-            <span>&#10003;</span><span>{l().noCve}</span>
+            <span>&#10003;</span><span>{t("无已知 CVE", "No known CVEs")}</span>
           </div>
         </div>
       </section>
@@ -223,17 +196,17 @@ export default function Home(props: {
         <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
           <div class="bg-gray-800 border border-gray-700 rounded-xl w-[700px] h-[70vh] flex flex-col shadow-2xl">
             <div class="flex items-center justify-between px-4 py-3 border-b border-gray-700 shrink-0">
-              <span class="font-medium">{l().logs}: {statusFor()}</span>
+              <span class="font-medium">{t("终端日志", "Logs")}: {statusFor()}</span>
               <div class="flex gap-2">
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
-                  onClick={() => refreshStatus(statusFor()!)}>{l().refresh}</button>
+                  onClick={() => refreshStatus(statusFor()!)}>{t("刷新", "Refresh")}</button>
                 <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
                   onClick={() => {
                     const content = statusData()?.gateway_log;
                     if (content) navigator.clipboard.writeText(content);
                   }}>Copy</button>
                 <button class="px-3 py-0.5 text-xs bg-red-700 hover:bg-red-600 rounded font-medium"
-                  onClick={closeStatus}>✕ {l().close}</button>
+                  onClick={closeStatus}>{t("关闭", "Close")}</button>
               </div>
             </div>
             <div class="flex-1 overflow-y-auto p-4 min-h-0">

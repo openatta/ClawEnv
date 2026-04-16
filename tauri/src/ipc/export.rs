@@ -2,7 +2,6 @@ use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 use clawenv_core::sandbox::SandboxType;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 use tokio::io::{AsyncBufReadExt, BufReader};

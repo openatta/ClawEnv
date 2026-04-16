@@ -26,8 +26,10 @@ pub enum ErrorCode {
     SandboxNotAvailable,
     /// Sandbox VM failed to start or is unreachable
     SandboxUnreachable,
-    /// Network request timed out or failed
+    /// Network request timed out or failed (DNS, connection refused, proxy error)
     NetworkError,
+    /// Network timeout specifically during npm/apk package download
+    NetworkTimeout,
     /// Operation stalled — no output for idle timeout period
     OperationStalled,
     /// npm install or claw installation failed
@@ -42,6 +44,22 @@ pub enum ErrorCode {
     InvalidApiKey,
     /// Keychain access failed
     KeychainError,
+    /// Provision script crashed (process exited without writing done-file)
+    ProvisionCrashed,
+    /// Port conflict — requested port already in use by another instance
+    PortConflict,
+    /// Export/import operation failed (tar, file I/O)
+    ExportFailed,
+    /// Import file validation failed (wrong platform, corrupt archive)
+    ImportInvalid,
+    /// Sandbox resource edit failed (CPU/memory/disk)
+    ResourceEditFailed,
+    /// Bridge server failed to start or is not reachable
+    BridgeFailed,
+    /// Permission denied by bridge permission rules or user
+    PermissionDenied,
+    /// Upgrade check or upgrade operation failed
+    UpgradeFailed,
     /// Generic / uncategorized error
     Internal,
 }

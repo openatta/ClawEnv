@@ -166,3 +166,68 @@ pub async fn exec_with_progress(
 
     Ok((output, code))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_exec_success() {
+        let (stdout, _stderr, code) = exec("echo", &["hello"]).await.unwrap();
+        assert_eq!(code, 0);
+        assert!(stdout.trim().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_exit_code() {
+        let (_stdout, _stderr, code) = exec("sh", &["-c", "exit 42"]).await.unwrap();
+        assert_eq!(code, 42);
+    }
+
+    #[tokio::test]
+    async fn test_exec_stderr() {
+        let (_stdout, stderr, code) = exec("sh", &["-c", "echo err >&2"]).await.unwrap();
+        assert_eq!(code, 0);
+        assert!(stderr.contains("err"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_with_progress_success() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let (output, code) = exec_with_progress("echo", &["progress-test"], &tx).await.unwrap();
+        assert_eq!(code, 0);
+        assert!(output.contains("progress-test"));
+
+        // Channel should have received the line
+        let line = rx.try_recv();
+        assert!(line.is_ok());
+        assert!(line.unwrap().contains("progress-test"));
+    }
+
+    #[tokio::test]
+    async fn test_exec_with_progress_multiline() {
+        let (tx, mut rx) = mpsc::channel(32);
+        let (output, code) = exec_with_progress(
+            "sh",
+            &["-c", "echo line1; echo line2; echo line3"],
+            &tx,
+        ).await.unwrap();
+        assert_eq!(code, 0);
+        assert!(output.contains("line1"));
+        assert!(output.contains("line3"));
+
+        // All lines forwarded
+        let mut lines = Vec::new();
+        while let Ok(l) = rx.try_recv() {
+            lines.push(l);
+        }
+        assert!(lines.len() >= 3);
+    }
+
+    #[tokio::test]
+    async fn test_exec_with_progress_exit_code() {
+        let (tx, _rx) = mpsc::channel(32);
+        let (_output, code) = exec_with_progress("sh", &["-c", "echo ok; exit 7"], &tx).await.unwrap();
+        assert_eq!(code, 7);
+    }
+}

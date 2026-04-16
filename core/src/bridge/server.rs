@@ -57,7 +57,16 @@ struct OkRes {
 #[derive(Deserialize)]
 struct FileListReq {
     path: String,
+    /// Maximum number of entries to return (default: 1000, max: 10000).
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Number of entries to skip before returning results.
+    #[serde(default)]
+    offset: Option<usize>,
 }
+
+const FILE_LIST_DEFAULT_LIMIT: usize = 1000;
+const FILE_LIST_MAX_LIMIT: usize = 10000;
 
 #[derive(Serialize)]
 struct DirEntry {
@@ -69,6 +78,8 @@ struct DirEntry {
 #[derive(Serialize)]
 struct FileListRes {
     entries: Vec<DirEntry>,
+    /// Total number of entries in the directory (before pagination).
+    total: usize,
 }
 
 #[derive(Deserialize)]
@@ -199,7 +210,10 @@ async fn file_list_handler(
         PermissionResult::RequiresApproval(reason) => return Err(forbidden_json(reason)),
     }
 
-    let mut entries = Vec::new();
+    let limit = req.limit.unwrap_or(FILE_LIST_DEFAULT_LIMIT).min(FILE_LIST_MAX_LIMIT);
+    let offset = req.offset.unwrap_or(0);
+
+    let mut all_entries = Vec::new();
     let mut dir = tokio::fs::read_dir(&path)
         .await
         .map_err(|e| err_json(format!("Failed to list directory: {e}")))?;
@@ -209,14 +223,17 @@ async fn file_list_handler(
             Ok(m) => m,
             Err(_) => continue, // Skip entries with unreadable metadata (broken symlinks)
         };
-        entries.push(DirEntry {
+        all_entries.push(DirEntry {
             name: entry.file_name().to_string_lossy().into_owned(),
             is_dir: meta.is_dir(),
             size: meta.len(),
         });
     }
 
-    Ok(Json(FileListRes { entries }))
+    let total = all_entries.len();
+    let entries: Vec<DirEntry> = all_entries.into_iter().skip(offset).take(limit).collect();
+
+    Ok(Json(FileListRes { entries, total }))
 }
 
 async fn exec_handler(

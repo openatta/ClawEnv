@@ -1,10 +1,12 @@
 import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import type { Instance, ClawType, UpgradeInfo, UpgradeProgress } from "../types";
-import ExportProgress from "../components/ExportProgress";
-import DeleteProgress from "../components/DeleteProgress";
-import { t } from "../i18n";
+import type { Instance, ClawType, UpgradeInfo } from "../../types";
+import ExportProgress from "../../components/ExportProgress";
+import DeleteProgress from "../../components/DeleteProgress";
+import ConfigModal from "./ConfigModal";
+import UpgradeModal from "./UpgradeModal";
+import { t } from "../../i18n";
 
 export default function ClawPage(props: {
   clawType: ClawType;
@@ -44,10 +46,6 @@ export default function ClawPage(props: {
   // Upgrade state
   const [updateInfo, setUpdateInfo] = createSignal<UpgradeInfo | null>(null);
   const [showUpgrade, setShowUpgrade] = createSignal(false);
-  const [upgrading, setUpgrading] = createSignal(false);
-  const [upgradeProgress, setUpgradeProgress] = createSignal(0);
-  const [upgradeMessage, setUpgradeMessage] = createSignal("");
-  const [upgradeError, setUpgradeError] = createSignal("");
 
   onMount(async () => {
     const unUpdate = await listen<UpgradeInfo>("update-available", (ev) => {
@@ -55,22 +53,7 @@ export default function ClawPage(props: {
         setUpdateInfo(ev.payload);
       }
     });
-    const unProgress = await listen<UpgradeProgress>("upgrade-progress", (ev) => {
-      setUpgradeProgress(ev.payload.percent);
-      setUpgradeMessage(ev.payload.message);
-    });
-    const unComplete = await listen<string>("upgrade-complete", () => {
-      setUpgrading(false);
-      setShowUpgrade(false);
-      setUpdateInfo(null);
-      props.onInstancesChanged?.();
-    });
-    const unFailed = await listen<string>("upgrade-failed", (ev) => {
-      setUpgrading(false);
-      setUpgradeError(String(ev.payload));
-    });
-    onCleanup(() => { unUpdate(); unProgress(); unComplete(); unFailed(); });
-    // Don't auto-check update on mount — user can check manually
+    onCleanup(() => { unUpdate(); });
   });
 
   async function checkUpdate() {
@@ -84,19 +67,6 @@ export default function ClawPage(props: {
         setUpdateInfo({ instance: name, current: info.current, latest: info.latest, security: info.is_security_release });
       }
     } catch { /* ignore */ }
-  }
-
-  async function startUpgrade() {
-    setUpgrading(true);
-    setUpgradeError("");
-    setUpgradeProgress(0);
-    setUpgradeMessage("Starting...");
-    try {
-      await invoke("upgrade_instance", { name: activeTab(), targetVersion: null });
-    } catch (e) {
-      setUpgrading(false);
-      setUpgradeError(String(e));
-    }
   }
 
   async function fetchToken(name?: string) {
@@ -149,7 +119,6 @@ export default function ClawPage(props: {
   async function openInBrowser() {
     const inst = activeInstance();
     const port = inst?.gateway_port ?? props.clawType.default_port;
-    // Always fetch fresh token before opening
     await fetchToken();
     const token = gatewayToken();
     const url = token ? `http://127.0.0.1:${port}/?token=${token}` : `http://127.0.0.1:${port}`;
@@ -162,63 +131,22 @@ export default function ClawPage(props: {
 
   // Config panel
   const [showConfig, setShowConfig] = createSignal(false);
-  const [cfgGatewayPort, setCfgGatewayPort] = createSignal(props.clawType.default_port);
-  const [cfgTtydPort, setCfgTtydPort] = createSignal(7681);
-  const [cfgSaving, setCfgSaving] = createSignal(false);
-  const [cfgError, setCfgError] = createSignal("");
-  const [caps, setCaps] = createSignal<Record<string,boolean>>({});
-  let gatewayPortRef: HTMLInputElement | undefined;
-  let ttydPortRef: HTMLInputElement | undefined;
 
-  async function openConfig() {
+  function openConfig() {
     const inst = activeInstance();
     if (!inst) return;
-    setCfgGatewayPort(inst.gateway_port);
-    setCfgTtydPort(inst.ttyd_port);
-    setCfgError("");
-    try {
-      const c = await invoke<Record<string,boolean>>("get_instance_capabilities", { name: inst.name });
-      setCaps(c);
-    } catch { setCaps({}); }
     setShowConfig(true);
-    setTimeout(() => {
-      if (gatewayPortRef) gatewayPortRef.value = String(inst.gateway_port);
-      if (ttydPortRef) ttydPortRef.value = String(inst.ttyd_port);
-    }, 0);
   }
 
-  const portConflict = () => {
-    const gp = cfgGatewayPort();
-    const tp = cfgTtydPort();
-    const current = activeTab();
-    if (gp === tp) return "Gateway and terminal ports cannot be the same";
-    for (const inst of props.instances) {
-      if (inst.name === current) continue;
-      if (inst.gateway_port === gp || inst.ttyd_port === gp) return `Port ${gp} already used by "${inst.name}"`;
-      if (inst.gateway_port === tp || inst.ttyd_port === tp) return `Port ${tp} already used by "${inst.name}"`;
-    }
-    if (gp < 1024 || gp > 65535) return "Gateway port must be 1024-65535";
-    if (tp < 1024 || tp > 65535) return "Terminal port must be 1024-65535";
-    return "";
-  };
+  function onConfigSave() {
+    setShowConfig(false);
+    props.onInstancesChanged?.();
+  }
 
-  async function saveConfig(restart: boolean) {
-    const conflict = portConflict();
-    if (conflict) { setCfgError(conflict); return; }
-    setCfgSaving(true); setCfgError("");
-    try {
-      await invoke("edit_instance_ports", {
-        name: activeTab(),
-        gatewayPort: cfgGatewayPort(),
-        ttydPort: cfgTtydPort(),
-      });
-      if (restart) {
-        await invoke("start_instance", { name: activeTab() });
-      }
-      setShowConfig(false);
-      props.onInstancesChanged?.();
-    } catch (e) { setCfgError(String(e)); }
-    finally { setCfgSaving(false); }
+  function onUpgradeComplete() {
+    setShowUpgrade(false);
+    setUpdateInfo(null);
+    props.onInstancesChanged?.();
   }
 
   // Shorthand for display name and logo
@@ -284,7 +212,7 @@ export default function ClawPage(props: {
                 : `Instance "${activeTab()}" is ${activeHealth()}`}
             </p>
 
-            {/* Action buttons — two rows */}
+            {/* Action buttons -- two rows */}
             <div class="flex items-center justify-center gap-2 mb-1">
               <Show when={!isRunning() && !anyLoading()}>
                 <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
@@ -373,53 +301,17 @@ export default function ClawPage(props: {
       </div>
 
       {/* Config dialog */}
-      <Show when={showConfig()}>
-        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-96 shadow-2xl">
-            <h3 class="text-base font-bold mb-4">Configure — {activeTab()}</h3>
-            <div class="space-y-3">
-              <div>
-                <label class="block text-xs text-gray-400 mb-1">Gateway Port</label>
-                <input ref={gatewayPortRef} type="number"
-                  onInput={(e) => {
-                    const v = parseInt(e.currentTarget.value) || props.clawType.default_port;
-                    setCfgGatewayPort(v);
-                    setCfgTtydPort(v + 4681);
-                    if (ttydPortRef) ttydPortRef.value = String(v + 4681);
-                  }}
-                  class="bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm" />
-              </div>
-              <div>
-                <label class="block text-xs text-gray-400 mb-1">Terminal (ttyd) Port</label>
-                <input ref={ttydPortRef} type="number"
-                  disabled={activeInstance()?.sandbox_type?.toLowerCase() === "native"}
-                  onInput={(e) => setCfgTtydPort(parseInt(e.currentTarget.value) || 7681)}
-                  class={`bg-gray-900 border border-gray-600 rounded px-3 py-1.5 w-full text-sm ${activeInstance()?.sandbox_type?.toLowerCase() === "native" ? "opacity-40 cursor-not-allowed" : ""}`} />
-                <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
-                  <span class="text-[10px] text-gray-500">N/A for native mode</span>
-                </Show>
-              </div>
-            </div>
-            <Show when={!caps().port_edit}>
-              <p class="text-xs text-gray-500 mt-2">Port forwarding not supported by this backend.</p>
-            </Show>
-            {portConflict() && <p class="text-xs text-red-400 mt-2">{portConflict()}</p>}
-            {cfgError() && !portConflict() && <p class="text-xs text-red-400 mt-2">{cfgError()}</p>}
-            <p class="text-xs text-yellow-500 mt-2">Port changes require instance restart.</p>
-            <div class="flex gap-2 justify-end mt-4">
-              <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                onClick={() => setShowConfig(false)}>Cancel</button>
-              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
-                disabled={cfgSaving() || !!portConflict()} onClick={() => saveConfig(false)}>
-                {cfgSaving() ? "..." : "Save"}
-              </button>
-              <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
-                disabled={cfgSaving() || !!portConflict()} onClick={() => saveConfig(true)}>
-                {cfgSaving() ? "..." : "Save & Restart"}
-              </button>
-            </div>
-          </div>
-        </div>
+      <Show when={showConfig() && activeInstance()}>
+        <ConfigModal
+          instanceName={activeTab()}
+          instances={props.instances}
+          clawType={props.clawType}
+          sandboxType={activeInstance()!.sandbox_type}
+          gatewayPort={activeInstance()!.gateway_port}
+          ttydPort={activeInstance()!.ttyd_port}
+          onSave={onConfigSave}
+          onClose={() => setShowConfig(false)}
+        />
       </Show>
 
       {/* Delete confirmation */}
@@ -444,51 +336,16 @@ export default function ClawPage(props: {
       </Show>
 
       {/* Upgrade modal */}
-      <Show when={showUpgrade()}>
-        <div class="fixed inset-0 bg-black/60 flex items-center justify-center z-50">
-          <div class="bg-gray-800 border border-gray-700 rounded-xl p-5 w-[420px] shadow-2xl">
-            <h3 class="text-base font-bold mb-3">
-              {upgrading() ? "Upgrading..." : `Upgrade ${dn()}`}
-            </h3>
-            <Show when={!upgrading()}>
-              <div class="text-sm text-gray-300 mb-2">
-                <span class="text-gray-400">Current:</span> {updateInfo()?.current}
-              </div>
-              <div class="text-sm text-gray-300 mb-4">
-                <span class="text-gray-400">Latest:</span> <span class="text-green-400">{updateInfo()?.latest}</span>
-                {updateInfo()?.security && <span class="text-red-400 ml-2">Security</span>}
-                {/[-](beta|alpha|rc|pre|dev)/i.test(updateInfo()?.latest || "") && <span class="text-yellow-400 ml-2">(beta)</span>}
-              </div>
-              <p class="text-xs text-gray-500 mb-4">
-                The upgrade will stop the gateway, update {dn()}, and restart.
-              </p>
-              <div class="flex gap-2 justify-end">
-                <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                  onClick={() => setShowUpgrade(false)}>Cancel</button>
-                <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-                  onClick={startUpgrade}>Upgrade Now</button>
-              </div>
-            </Show>
-            <Show when={upgrading()}>
-              <div class="w-full bg-gray-700 rounded-full h-2 mb-2">
-                <div class="h-2 rounded-full bg-indigo-600 transition-all" style={{ width: `${upgradeProgress()}%` }} />
-              </div>
-              <p class="text-xs text-gray-400 mb-2">{upgradeMessage()}</p>
-              {upgradeError() && (
-                <div>
-                  <p class="text-xs text-red-400 mb-3">{upgradeError()}</p>
-                  <div class="flex gap-2 justify-end">
-                    <button class="px-3 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                      onClick={() => { setShowUpgrade(false); setUpgrading(false); }}>Close</button>
-                    <button class="px-3 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-                      onClick={startUpgrade}>Retry</button>
-                  </div>
-                </div>
-              )}
-            </Show>
-          </div>
-        </div>
+      <Show when={showUpgrade() && updateInfo()}>
+        <UpgradeModal
+          clawDisplayName={dn()}
+          instanceName={activeTab()}
+          updateInfo={updateInfo()!}
+          onClose={() => setShowUpgrade(false)}
+          onComplete={onUpgradeComplete}
+        />
       </Show>
+
       {/* Export progress */}
       <Show when={showExport()}>
         <ExportProgress isNative={true} onClose={() => setShowExport(false)} />

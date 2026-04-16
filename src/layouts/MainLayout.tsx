@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import IconBar from "../components/IconBar";
 import Home from "../pages/Home";
-import ClawPage from "../pages/ClawPage";
+import ClawPage from "../pages/ClawPage/index";
 import SandboxPage from "../pages/SandboxPage";
 import Settings from "../pages/Settings";
 import type { Instance, ClawType } from "../types";
