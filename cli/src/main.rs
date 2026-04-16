@@ -481,8 +481,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let mut config = ConfigManager::load()
                 .or_else(|_| ConfigManager::create_default(UserMode::General))?;
             let sandbox_type = SandboxType::from_os();
-            config.config_mut().instances.retain(|i| i.name != name);
-            config.config_mut().instances.push(InstanceConfig {
+            config.save_instance(InstanceConfig {
                 name: name.clone(),
                 claw_type,
                 version: claw_version,
@@ -495,8 +494,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 browser: Default::default(),
                 cached_latest_version: String::new(),
                 cached_version_check_at: String::new(),
-            });
-            config.save()?;
+            })?;
 
             out.emit(CliEvent::Complete { message: format!("Imported '{name}'. Use 'clawenv start {name}' to start.") });
         }
@@ -641,11 +639,11 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 format!("{:?}-{}", inst.sandbox_type, new_name).to_lowercase()
             };
 
-            if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == old_name) {
-                entry.name = new_name.clone();
+            let nn = new_name.clone();
+            config.update_instance(&old_name, move |entry| {
+                entry.name = nn;
                 entry.sandbox_id = new_sandbox_id;
-            }
-            config.save()?;
+            })?;
 
             let home = dirs::home_dir().unwrap_or_default();
             let old_ws = home.join(format!(".clawenv/workspaces/{old_name}"));
@@ -694,11 +692,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     backend.edit_port_forwards(&[(gp, gp), (tp, tp)]).await?;
                 }
 
-                if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == name) {
+                config.update_instance(&name, |entry| {
                     entry.gateway.gateway_port = gp;
                     entry.gateway.ttyd_port = tp;
-                }
-                config.save()?;
+                })?;
                 out.emit(CliEvent::Info { message: format!("Ports updated: gateway={gp}, ttyd={tp}") });
             }
 
@@ -1187,8 +1184,7 @@ async fn run_install_step(
             let sandbox_id = if use_native { format!("native-{name}") } else { format!("clawenv-{name}") };
             let ttyd_port = if use_native { 0 } else { port + 4681 };
 
-            config.config_mut().instances.retain(|i| i.name != name);
-            config.config_mut().instances.push(InstanceConfig {
+            config.save_instance(InstanceConfig {
                 name: name.to_string(),
                 claw_type: claw_type.to_string(),
                 version: claw_version.trim().to_string(),
@@ -1207,8 +1203,7 @@ async fn run_install_step(
                 browser: Default::default(),
                 cached_latest_version: String::new(),
                 cached_version_check_at: String::new(),
-            });
-            config.save()?;
+            })?;
             out.emit(CliEvent::Complete { message: format!("Instance '{}' config saved (port {})", name, port) });
         }
 

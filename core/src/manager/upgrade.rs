@@ -137,13 +137,11 @@ pub async fn upgrade_instance(
 
     // 5. Update config
     send(tx, "Saving configuration...", 95, "config").await;
-    for inst in config.config_mut().instances.iter_mut() {
-        if inst.name == instance_name {
-            inst.version = new_ver.clone();
-            inst.last_upgraded_at = chrono::Utc::now().to_rfc3339();
-        }
-    }
-    config.save()?;
+    let ver = new_ver.clone();
+    config.update_instance(instance_name, move |inst| {
+        inst.version = ver;
+        inst.last_upgraded_at = chrono::Utc::now().to_rfc3339();
+    })?;
 
     send(tx, &format!("Upgraded to {new_ver}"), 100, "done").await;
     Ok(new_ver)

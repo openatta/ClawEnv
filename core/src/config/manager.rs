@@ -88,11 +88,17 @@ impl ConfigManager {
     /// Save config atomically: write to temp file, then rename.
     /// Uses exclusive file lock to prevent concurrent writes.
     pub fn save(&self) -> Result<()> {
+        self.write_config(&self.config)
+    }
+
+    /// Atomic write: serialize config → write to tmp → rename.
+    /// Holds exclusive lock for the entire write operation.
+    fn write_config(&self, config: &AppConfig) -> Result<()> {
         if let Some(parent) = self.config_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
 
-        let content = toml::to_string_pretty(&self.config)?;
+        let content = toml::to_string_pretty(config)?;
 
         // Write to temp file in same directory (same filesystem for atomic rename)
         let tmp_path = self.config_path.with_extension("toml.tmp");
@@ -108,6 +114,90 @@ impl ConfigManager {
         // Atomic rename (same filesystem guarantees atomicity on all platforms)
         std::fs::rename(&tmp_path, &self.config_path)?;
 
+        Ok(())
+    }
+
+    /// Add or update an instance in config with load-merge-write to avoid race conditions.
+    ///
+    /// Instead of using the in-memory config (which may be stale after a long install),
+    /// re-reads the latest config from disk, merges the new instance, and writes atomically.
+    /// Safe for concurrent processes installing different instances simultaneously.
+    pub fn save_instance(&mut self, instance: super::models::InstanceConfig) -> Result<()> {
+        let lock_path = self.config_path.with_extension("toml.lock");
+        let lock_file = File::create(&lock_path)?;
+        lock_file.lock_exclusive().map_err(|e| anyhow!("Cannot acquire config lock: {e}"))?;
+
+        // Re-read latest config from disk (another process may have written since our load)
+        let fresh_config = if self.config_path.exists() {
+            let content = std::fs::read_to_string(&self.config_path)?;
+            toml::from_str::<AppConfig>(&content).unwrap_or_else(|_| self.config.clone())
+        } else {
+            self.config.clone()
+        };
+
+        // Merge: remove old entry with same name, add new one
+        let mut merged = fresh_config;
+        merged.instances.retain(|i| i.name != instance.name);
+        merged.instances.push(instance);
+
+        // Write merged config
+        self.write_config(&merged)?;
+
+        // Update in-memory config to match what we wrote
+        self.config = merged;
+
+        lock_file.unlock().ok();
+        let _ = std::fs::remove_file(&lock_path);
+        Ok(())
+    }
+
+    /// Remove an instance from config with load-merge-write to avoid race conditions.
+    pub fn remove_instance(&mut self, name: &str) -> Result<()> {
+        let lock_path = self.config_path.with_extension("toml.lock");
+        let lock_file = File::create(&lock_path)?;
+        lock_file.lock_exclusive().map_err(|e| anyhow!("Cannot acquire config lock: {e}"))?;
+
+        let fresh_config = if self.config_path.exists() {
+            let content = std::fs::read_to_string(&self.config_path)?;
+            toml::from_str::<AppConfig>(&content).unwrap_or_else(|_| self.config.clone())
+        } else {
+            self.config.clone()
+        };
+
+        let mut merged = fresh_config;
+        merged.instances.retain(|i| i.name != name);
+
+        self.write_config(&merged)?;
+        self.config = merged;
+
+        lock_file.unlock().ok();
+        let _ = std::fs::remove_file(&lock_path);
+        Ok(())
+    }
+
+    /// Update fields of an existing instance with load-merge-write.
+    pub fn update_instance(&mut self, name: &str, mutate: impl FnOnce(&mut super::models::InstanceConfig)) -> Result<()> {
+        let lock_path = self.config_path.with_extension("toml.lock");
+        let lock_file = File::create(&lock_path)?;
+        lock_file.lock_exclusive().map_err(|e| anyhow!("Cannot acquire config lock: {e}"))?;
+
+        let fresh_config = if self.config_path.exists() {
+            let content = std::fs::read_to_string(&self.config_path)?;
+            toml::from_str::<AppConfig>(&content).unwrap_or_else(|_| self.config.clone())
+        } else {
+            self.config.clone()
+        };
+
+        let mut merged = fresh_config;
+        if let Some(inst) = merged.instances.iter_mut().find(|i| i.name == name) {
+            mutate(inst);
+        }
+
+        self.write_config(&merged)?;
+        self.config = merged;
+
+        lock_file.unlock().ok();
+        let _ = std::fs::remove_file(&lock_path);
         Ok(())
     }
 

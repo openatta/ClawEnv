@@ -331,8 +331,7 @@ pub async fn install_native(
 
     // Step 5: Save config
     send(tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
-    config.config_mut().instances.retain(|i| i.name != opts.instance_name);
-    config.config_mut().instances.push(InstanceConfig {
+    config.save_instance(InstanceConfig {
         name: opts.instance_name.clone(),
         claw_type: opts.claw_type.clone(),
         version: claw_version.trim().to_string(),
@@ -351,8 +350,7 @@ pub async fn install_native(
         browser: Default::default(),
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
-    });
-    config.save()?;
+    })?;
 
     send(tx, "Installation complete!", 100, InstallStage::Complete).await;
     Ok(())
@@ -463,8 +461,7 @@ async fn install_from_bundle(
 
     // Save config
     send(tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
-    config.config_mut().instances.retain(|i| i.name != opts.instance_name);
-    config.config_mut().instances.push(InstanceConfig {
+    config.save_instance(InstanceConfig {
         name: opts.instance_name.clone(),
         claw_type: opts.claw_type.clone(),
         version: oc_version,
@@ -477,8 +474,7 @@ async fn install_from_bundle(
         browser: Default::default(),
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
-    });
-    config.save()?;
+    })?;
 
     send(tx, "Installation complete! (from bundle)", 100, InstallStage::Complete).await;
     Ok(())

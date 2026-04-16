@@ -512,10 +512,9 @@ if p.exists():
         );
     }
 
-    // ---- Step 5: Save config ----
+    // ---- Step 5: Save config (load-merge-write to avoid race with concurrent installs) ----
     send(&tx, "Saving configuration...", 92, InstallStage::SaveConfig).await;
-    config.config_mut().instances.retain(|i| i.name != opts.instance_name);
-    config.config_mut().instances.push(InstanceConfig {
+    config.save_instance(InstanceConfig {
         name: opts.instance_name.clone(),
         claw_type: opts.claw_type.clone(),
         version: claw_version.trim().to_string(),
@@ -538,8 +537,7 @@ if p.exists():
         },
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
-    });
-    config.save()?;
+    })?;
 
     send(&tx, "Installation complete!", 100, InstallStage::Complete).await;
     Ok(())

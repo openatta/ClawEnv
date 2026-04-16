@@ -303,8 +303,7 @@ pub async fn remove_instance(config: &mut ConfigManager, name: &str) -> Result<(
     }
     destroy_result?;
 
-    config.config_mut().instances.retain(|i| i.name != name);
-    config.save()?;
+    config.remove_instance(name)?;
 
     tracing::info!("Instance '{}' removed", name);
     Ok(())
