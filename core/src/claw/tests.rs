@@ -80,9 +80,18 @@ mod descriptor_tests {
     fn hermes_sandbox_install() {
         let registry = crate::claw::ClawRegistry::load();
         let d = registry.get("hermes");
-        assert_eq!(d.package_manager, PackageManager::Pip);
-        assert_eq!(d.sandbox_install_cmd("latest"), "pip install --break-system-packages hermes-agent");
-        assert_eq!(d.sandbox_install_cmd("0.3.0"), "pip install --break-system-packages hermes-agent==0.3.0");
+        assert_eq!(d.package_manager, PackageManager::GitPip);
+        let cmd = d.sandbox_install_cmd("latest");
+        assert!(cmd.contains("git clone"), "should git clone: {cmd}");
+        assert!(cmd.contains("NousResearch/hermes-agent"), "should clone hermes repo: {cmd}");
+        assert!(cmd.contains("uv venv"), "should create venv: {cmd}");
+        assert!(cmd.contains("uv pip install"), "should uv pip install: {cmd}");
+        assert!(cmd.contains("[termux,messaging,web]"), "should install with musl-safe extras: {cmd}");
+        assert!(cmd.contains("ln -sf"), "should symlink binary: {cmd}");
+        assert!(cmd.contains("/usr/local/bin/hermes"), "should symlink to /usr/local/bin: {cmd}");
+        // Specific version → branch tag
+        let cmd_ver = d.sandbox_install_cmd("0.3.0");
+        assert!(cmd_ver.contains("v0.3.0"), "should checkout version tag: {cmd_ver}");
     }
 
     #[test]
@@ -165,6 +174,10 @@ mod descriptor_tests {
             }
             PackageManager::Pip => {
                 assert!(install.contains(&d.pip_package), "sandbox install missing pip package for {id}: {install}");
+            }
+            PackageManager::GitPip => {
+                assert!(install.contains("git clone"), "sandbox install missing git clone for {id}: {install}");
+                assert!(install.contains(&d.git_repo), "sandbox install missing git_repo for {id}: {install}");
             }
         }
 
@@ -291,6 +304,8 @@ mod registry_tests {
             package_manager: crate::claw::descriptor::PackageManager::Npm,
             npm_package: "test-custom-claw".into(),
             pip_package: String::new(),
+            git_repo: String::new(),
+            pip_extras: String::new(),
             sandbox_provision: vec![],
             cli_binary: "testclaw".into(),
             gateway_cmd: "serve --port {port}".into(),

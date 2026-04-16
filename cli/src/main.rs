@@ -548,7 +548,11 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 id: d.id.clone(),
                 display_name: d.display_name.clone(),
                 logo: d.logo.clone(),
-                package_manager: format!("{:?}", d.package_manager).to_lowercase(),
+                package_manager: match d.package_manager {
+                    clawenv_core::claw::descriptor::PackageManager::Npm => "npm",
+                    clawenv_core::claw::descriptor::PackageManager::Pip => "pip",
+                    clawenv_core::claw::descriptor::PackageManager::GitPip => "git_pip",
+                }.to_string(),
                 npm_package: d.npm_package.clone(),
                 pip_package: d.pip_package.clone(),
                 default_port: d.default_port,

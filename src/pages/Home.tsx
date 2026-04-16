@@ -20,7 +20,7 @@ function ClawTypePicker(props: { clawTypes: ClawType[]; onSelect: (id: string) =
                 <span class="text-lg">{claw.logo || "📦"}</span>
                 <div class="flex-1">
                   <div class="text-sm text-white">{claw.display_name}</div>
-                  <div class="text-[10px] text-gray-500">{claw.package_manager === "pip" ? claw.pip_package : claw.npm_package}</div>
+                  <div class="text-[10px] text-gray-500">{claw.package_manager !== "npm" ? claw.pip_package : claw.npm_package}</div>
                 </div>
               </button>
             )}

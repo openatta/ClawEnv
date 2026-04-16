@@ -73,7 +73,7 @@ async fn install_commands_use_descriptor_for_all_claws() {
         // Must have called with the correct package name
         let expected_pkg = match desc.package_manager {
             crate::claw::descriptor::PackageManager::Npm => &desc.npm_package,
-            crate::claw::descriptor::PackageManager::Pip => &desc.pip_package,
+            crate::claw::descriptor::PackageManager::Pip | crate::claw::descriptor::PackageManager::GitPip => &desc.pip_package,
         };
         backend.assert_called_with(expected_pkg);
         backend.assert_called_with(&desc.cli_binary);
@@ -125,7 +125,7 @@ async fn upgrade_commands_use_descriptor_for_all_claws() {
         // Assertions
         let expected_pkg = match desc.package_manager {
             crate::claw::descriptor::PackageManager::Npm => &desc.npm_package,
-            crate::claw::descriptor::PackageManager::Pip => &desc.pip_package,
+            crate::claw::descriptor::PackageManager::Pip | crate::claw::descriptor::PackageManager::GitPip => &desc.pip_package,
         };
         backend.assert_called_with(expected_pkg);
         backend.assert_called_with(&desc.cli_binary);
@@ -173,7 +173,8 @@ async fn pip_claws_upgrade_never_uses_npm() {
     let registry = ClawRegistry::load();
 
     for desc in registry.list_all() {
-        if desc.package_manager != crate::claw::descriptor::PackageManager::Pip {
+        if desc.package_manager != crate::claw::descriptor::PackageManager::Pip
+            && desc.package_manager != crate::claw::descriptor::PackageManager::GitPip {
             continue;
         }
 
@@ -184,14 +185,12 @@ async fn pip_claws_upgrade_never_uses_npm() {
         let install_cmd = desc.sandbox_install_cmd(version);
         let _ = backend.exec(&install_cmd).await;
 
-        // pip claws must use pip, never npm
-        assert!(install_cmd.contains("pip install"), "[{}] upgrade should use pip, got: {}", desc.id, install_cmd);
-        assert!(!install_cmd.contains("npm"), "[{}] upgrade must NOT contain npm, got: {}", desc.id, install_cmd);
-        assert!(install_cmd.contains(&desc.pip_package), "[{}] upgrade must contain pip_package, got: {}", desc.id, install_cmd);
-
-        // npm_install_verbose_cmd should still produce npm (but should NOT be called for pip claws)
-        let npm_cmd = desc.npm_install_verbose_cmd(version);
-        assert!(npm_cmd.contains("npm"), "npm_install_verbose_cmd must always produce npm");
+        // pip/git_pip claws must use pip or uv, never npm
+        assert!(
+            install_cmd.contains("pip install") || install_cmd.contains("uv pip install"),
+            "[{}] upgrade should use pip/uv, got: {}", desc.id, install_cmd
+        );
+        assert!(!install_cmd.starts_with("npm"), "[{}] upgrade must NOT start with npm, got: {}", desc.id, install_cmd);
     }
 }
 

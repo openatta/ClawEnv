@@ -158,7 +158,7 @@ export default function InstallWizard(props: {
                         <span class="text-3xl">{ct.logo || "📦"}</span>
                         <span class="text-sm font-medium">{ct.display_name}</span>
                         <span class="text-[10px] text-gray-500">
-                          {ct.package_manager === "pip" ? ct.pip_package : ct.npm_package}
+                          {ct.package_manager !== "npm" ? ct.pip_package : ct.npm_package}
                         </span>
                       </button>
                     )}

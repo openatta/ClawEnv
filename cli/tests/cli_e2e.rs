@@ -203,7 +203,7 @@ fn test_claw_types_includes_hermes() {
     let hermes = types.iter().find(|t| t["id"] == "hermes");
     assert!(hermes.is_some(), "hermes should be in claw types");
     let h = hermes.unwrap();
-    assert_eq!(h["package_manager"], "pip");
+    assert_eq!(h["package_manager"], "git_pip");
     assert_eq!(h["pip_package"], "hermes-agent");
     assert_eq!(h["has_gateway_ui"], false);
     assert_eq!(h["supports_native"], false);

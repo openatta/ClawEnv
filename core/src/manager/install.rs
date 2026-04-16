@@ -199,7 +199,7 @@ pub async fn install(
     // Check if VM exists AND has basic packages. A VM that exists but
     // wasn't fully provisioned (e.g., interrupted install) is treated as non-existent.
     let readiness_cmd = match desc.package_manager {
-        crate::claw::descriptor::PackageManager::Pip => "python3 --version 2>/dev/null",
+        crate::claw::descriptor::PackageManager::Pip | crate::claw::descriptor::PackageManager::GitPip => "python3 --version 2>/dev/null",
         crate::claw::descriptor::PackageManager::Npm => "node --version 2>/dev/null",
     };
     let vm_ready = match backend.exec(readiness_cmd).await {
@@ -300,14 +300,14 @@ pub async fn install(
         send(&tx, "VM already provisioned", 38, InstallStage::CreateVm).await;
     }
 
-    // Ensure VM is running and reachable
+    // Ensure VM is running and reachable (may take longer on first boot)
     send(&tx, "Ensuring VM is running...", 39, InstallStage::BootVm).await;
     let mut vm_ok = false;
-    for attempt in 1..=10 {
+    for attempt in 1..=20 {
         match backend.exec("echo ok").await {
             Ok(o) if o.contains("ok") => { vm_ok = true; break; }
             _ => {
-                if attempt == 1 || attempt == 5 {
+                if attempt == 1 || attempt == 5 || attempt == 10 {
                     backend.start().await.ok();
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
@@ -315,7 +315,7 @@ pub async fn install(
         }
     }
     if !vm_ok {
-        anyhow::bail!("VM is not reachable after 10 attempts. Check sandbox status.");
+        anyhow::bail!("VM is not reachable after 20 attempts. Check sandbox status.");
     }
 
     // Apply mirrors inside the running VM (more reliable than provision-time)
@@ -560,18 +560,22 @@ async fn vm_background_install(
     // Clean up any previous attempt
     backend.exec(&format!("rm -f {log} {done}")).await?;
 
-    // Write install script — runs independently in VM
+    // Write install script — runs independently in VM.
+    // The install_cmd may contain && chains (e.g., git clone && uv venv && uv pip install).
+    // We write it as the script body and redirect stdout+stderr to the log file.
     backend.exec(&format!(
         r#"cat > /tmp/clawenv-npm.sh << 'SCRIPTEOF'
 #!/bin/sh
-sudo {install_cmd} > {log} 2>&1
-echo $? > {done}
+set -e
+{install_cmd}
 SCRIPTEOF
 chmod +x /tmp/clawenv-npm.sh"#
     )).await?;
 
-    // Launch in background
-    backend.exec("nohup sh /tmp/clawenv-npm.sh > /dev/null 2>&1 &").await?;
+    // Launch in background: sudo runs the entire script, output goes to log, exit code to done marker
+    backend.exec(&format!(
+        "nohup sh -c 'sudo sh /tmp/clawenv-npm.sh > {log} 2>&1; echo $? > {done}' > /dev/null 2>&1 &"
+    )).await?;
 
     // Poll for completion
     let mut last_lines = 0usize;

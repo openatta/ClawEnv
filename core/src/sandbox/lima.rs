@@ -293,8 +293,8 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
-        // Plan C: spawn with pipes, join!(wait, read, read) with timeout
-        let args = ["shell", &self.vm_name, "--", "sh", "-c", cmd];
+        // --workdir /tmp prevents Lima from trying to cd to host CWD (which may not exist in VM)
+        let args = ["shell", "--workdir", "/tmp", &self.vm_name, "--", "sh", "-c", cmd];
         let (stdout, stderr, rc) = super::exec_helper::exec("limactl", &args).await?;
         if rc != 0 {
             anyhow::bail!("exec failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
@@ -305,7 +305,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        let args = ["shell", &self.vm_name, "--", "sh", "-c", cmd];
+        let args = ["shell", "--workdir", "/tmp", &self.vm_name, "--", "sh", "-c", cmd];
         let (output, rc) = super::exec_helper::exec_with_progress("limactl", &args, tx).await?;
         if rc != 0 {
             anyhow::bail!("command failed (exit {rc}): {cmd}");

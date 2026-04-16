@@ -52,14 +52,18 @@ supports_native = true
 mcp_runtime = "node"
 
 # Hermes Agent — self-improving AI agent by Nous Research
-# Python-based, pip install, sandbox-only (no native install)
+# Python-based, git clone + uv install, sandbox-only (no native install)
 [[claw]]
 id = "hermes"
 display_name = "Hermes Agent"
 logo = "☤"
-package_manager = "pip"
+package_manager = "git_pip"
+git_repo = "https://github.com/NousResearch/hermes-agent.git"
+# "all" extras contain voice→ctranslate2 which requires glibc (no musl/Alpine wheels).
+# Use termux extras (designed for non-glibc) + messaging + web as Alpine-safe baseline.
+pip_extras = "termux,messaging,web"
 pip_package = "hermes-agent"
-sandbox_provision = ["py3-pip", "py3-uv"]
+sandbox_provision = ["py3-pip", "py3-uv", "nodejs", "npm"]
 cli_binary = "hermes"
 gateway_cmd = ""
 version_cmd = "--version"

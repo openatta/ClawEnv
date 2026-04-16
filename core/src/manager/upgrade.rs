@@ -19,6 +19,21 @@ pub async fn check_upgrade(instance: &InstanceConfig, registry_url: &str) -> Res
         crate::claw::descriptor::PackageManager::Pip => {
             checker::check_latest_pypi(&instance.version, &desc.pip_package).await
         }
+        crate::claw::descriptor::PackageManager::GitPip => {
+            // Git-based packages: check PyPI if pip_package set, otherwise check GitHub tags
+            if !desc.pip_package.is_empty() {
+                checker::check_latest_pypi(&instance.version, &desc.pip_package).await
+            } else {
+                // Fallback: report no upgrade info for git-only packages
+                Ok(checker::VersionInfo {
+                    current: instance.version.clone(),
+                    latest: instance.version.clone(),
+                    has_upgrade: false,
+                    is_security_release: false,
+                    changelog: String::new(),
+                })
+            }
+        }
     }
 }
 
@@ -60,7 +75,7 @@ pub async fn upgrade_instance(
     let install_cmd = desc.sandbox_install_cmd(version);
     let pm_label = match desc.package_manager {
         crate::claw::descriptor::PackageManager::Npm => "npm",
-        crate::claw::descriptor::PackageManager::Pip => "pip",
+        crate::claw::descriptor::PackageManager::Pip | crate::claw::descriptor::PackageManager::GitPip => "pip",
     };
     send(tx, &format!("Upgrading {} to {version}...", desc.display_name), 25, "install").await;
 

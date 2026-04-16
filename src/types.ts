@@ -13,7 +13,7 @@ export type ClawType = {
   id: string;
   display_name: string;
   logo: string;
-  package_manager: "npm" | "pip";
+  package_manager: "npm" | "pip" | "git_pip";
   npm_package: string;
   pip_package: string;
   default_port: number;

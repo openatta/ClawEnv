@@ -17,8 +17,12 @@ use serde::{Deserialize, Serialize};
 pub enum PackageManager {
     /// Node.js / npm: `npm install -g <package>@<version>`
     Npm,
-    /// Python / pip: `pip install <package>==<version>`
+    /// Python / pip: `pip install <package>==<version>` (PyPI package)
     Pip,
+    /// Python / git clone + uv pip install -e: for packages not on PyPI
+    /// Uses `git_repo` field for the repository URL.
+    #[serde(alias = "git_pip", alias = "git-pip")]
+    GitPip,
 }
 
 impl Default for PackageManager {
@@ -46,6 +50,14 @@ pub struct ClawDescriptor {
     /// pip package name (e.g., "hermes-agent") — used when package_manager = pip
     #[serde(default)]
     pub pip_package: String,
+    /// Git repository URL — used when package_manager = git_pip
+    /// e.g., "https://github.com/NousResearch/hermes-agent.git"
+    #[serde(default)]
+    pub git_repo: String,
+    /// pip extras to install from git repo (e.g., "all", "termux")
+    /// Translates to: `uv pip install -e ".[<extras>]"`
+    #[serde(default)]
+    pub pip_extras: String,
     /// Extra Alpine packages to install before the claw itself (e.g., ["python3", "py3-pip"])
     #[serde(default)]
     pub sandbox_provision: Vec<String>,
@@ -159,7 +171,29 @@ impl ClawDescriptor {
                     format!("pip install --break-system-packages {}=={}", self.pip_package, version)
                 }
             }
+            PackageManager::GitPip => {
+                // git clone → uv venv → uv pip install -e ".[extras]" → symlink binary
+                let dir = format!("/opt/{}", self.id);
+                let branch = if version == "latest" { "main".to_string() } else { format!("v{version}") };
+                let extras = if self.pip_extras.is_empty() { ".".to_string() } else { format!(".[{}]", self.pip_extras) };
+                let bin = &self.cli_binary;
+                // Chain: clone, create venv, install into venv, symlink binary to /usr/local/bin
+                format!(
+                    "git clone --depth 1 --branch {branch} {repo} {dir} \
+                     && cd {dir} \
+                     && uv venv {dir}/venv --python python3 \
+                     && VIRTUAL_ENV={dir}/venv uv pip install -e '{extras}' \
+                     && ln -sf {dir}/venv/bin/{bin} /usr/local/bin/{bin}",
+                    branch = branch, repo = self.git_repo, dir = dir,
+                    extras = extras, bin = bin,
+                )
+            }
         }
+    }
+
+    /// The install directory for git-cloned packages.
+    pub fn git_install_dir(&self) -> String {
+        format!("/opt/{}", self.id)
     }
 
     /// The npm install command string (kept for backwards compatibility with native mode).
@@ -203,6 +237,8 @@ pub fn openclaw_descriptor() -> ClawDescriptor {
         package_manager: PackageManager::Npm,
         npm_package: "openclaw".into(),
         pip_package: String::new(),
+        git_repo: String::new(),
+        pip_extras: String::new(),
         sandbox_provision: vec![],
         cli_binary: "openclaw".into(),
         gateway_cmd: "gateway --port {port} --allow-unconfigured".into(),
