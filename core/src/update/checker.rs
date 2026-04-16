@@ -128,6 +128,52 @@ pub async fn check_latest_pypi(current_version: &str, pip_package: &str) -> Resu
     })
 }
 
+// ---- GitHub releases ----
+
+/// Check GitHub releases for the latest version of a git-based package.
+/// Uses the GitHub API: https://api.github.com/repos/<owner>/<repo>/releases/latest
+/// `git_repo` should be a full HTTPS URL like "https://github.com/NousResearch/hermes-agent.git"
+pub async fn check_latest_github(current_version: &str, git_repo: &str) -> Result<VersionInfo> {
+    // Extract owner/repo from URL: "https://github.com/NousResearch/hermes-agent.git" → "NousResearch/hermes-agent"
+    let repo_path = git_repo
+        .trim_end_matches(".git")
+        .trim_end_matches('/')
+        .rsplit("github.com/")
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("Cannot parse GitHub repo from: {git_repo}"))?;
+
+    let url = format!("https://api.github.com/repos/{repo_path}/releases/latest");
+
+    let client = http_client()?;
+    let resp = client.get(&url).send().await?;
+
+    if !resp.status().is_success() {
+        anyhow::bail!("GitHub API returned {} for '{repo_path}'", resp.status());
+    }
+
+    #[derive(Deserialize)]
+    struct GhRelease {
+        tag_name: String,
+        #[serde(default)]
+        body: String,
+    }
+
+    let release: GhRelease = resp.json().await?;
+    let latest = release.tag_name.trim().trim_start_matches('v').to_string();
+    let current_clean = clean_version(current_version);
+
+    let is_security = release.body.to_lowercase().contains("cve")
+        || release.body.to_lowercase().contains("security");
+
+    Ok(VersionInfo {
+        has_upgrade: has_upgrade(&current_clean, &latest),
+        current: current_clean,
+        latest,
+        changelog: release.body.lines().take(5).collect::<Vec<_>>().join("\n"),
+        is_security_release: is_security,
+    })
+}
+
 /// Backwards-compatible alias: dispatches to npm by default.
 /// Prefer `check_latest_npm()` or `check_latest_pypi()` directly.
 pub async fn check_latest_version(current_version: &str, npm_registry: &str, npm_package: &str) -> Result<VersionInfo> {

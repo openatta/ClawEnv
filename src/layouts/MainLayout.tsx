@@ -6,6 +6,7 @@ import Home from "../pages/Home";
 import ClawPage from "../pages/ClawPage/index";
 import SandboxPage from "../pages/SandboxPage";
 import Settings from "../pages/Settings";
+import { AppContext } from "../context";
 import type { Instance, ClawType } from "../types";
 
 export type Page = "home" | "sandbox" | "settings" | `claw:${string}`;
@@ -37,7 +38,6 @@ export default function MainLayout(props: { instances: Instance[] }) {
   }
 
   onMount(async () => {
-    // Load claw type registry
     try {
       const types = await invoke<ClawType[]>("list_claw_types");
       setClawTypes(types);
@@ -82,14 +82,12 @@ export default function MainLayout(props: { instances: Instance[] }) {
     return null;
   };
 
-  // Filter instances for the active claw type
   const activeClawInstances = () => {
     const ct = activeClawType();
     if (!ct) return [];
     return instances().filter((i) => i.claw_type === ct);
   };
 
-  // Get the ClawType descriptor for the active page
   const activeClawDesc = () => {
     const ct = activeClawType();
     if (!ct) return null;
@@ -97,35 +95,37 @@ export default function MainLayout(props: { instances: Instance[] }) {
   };
 
   return (
-    <div class="flex h-screen bg-gray-900 text-white">
-      <IconBar
-        activePage={activePage()}
-        onNavigate={setActivePage}
-        clawTypes={clawTypes()}
-        instances={instances()}
-      />
-      <main class="flex-1 overflow-hidden">
-        {activePage() === "home" && (
-          <Home
-            instances={instances()}
-            healths={healths()}
-            onHealthChange={refreshInstances}
-            clawTypes={clawTypes()}
-            onAddInstance={openInstallWindow}
-          />
-        )}
-        {activeClawType() && activeClawDesc() && (
-          <ClawPage
-            clawType={activeClawDesc()!}
-            instances={activeClawInstances()}
-            healths={healths()}
-            onInstancesChanged={refreshInstances}
-            onAddInstance={() => openInstallWindow(activeClawType()!)}
-          />
-        )}
-        {activePage() === "sandbox" && <SandboxPage />}
-        {activePage() === "settings" && <Settings />}
-      </main>
-    </div>
+    <AppContext.Provider value={{ instances, healths, clawTypes, refreshInstances, openInstallWindow }}>
+      <div class="flex h-screen bg-gray-900 text-white">
+        <IconBar
+          activePage={activePage()}
+          onNavigate={setActivePage}
+          clawTypes={clawTypes()}
+          instances={instances()}
+        />
+        <main class="flex-1 overflow-hidden">
+          {activePage() === "home" && (
+            <Home
+              instances={instances()}
+              healths={healths()}
+              onHealthChange={refreshInstances}
+              clawTypes={clawTypes()}
+              onAddInstance={openInstallWindow}
+            />
+          )}
+          {activeClawType() && activeClawDesc() && (
+            <ClawPage
+              clawType={activeClawDesc()!}
+              instances={activeClawInstances()}
+              healths={healths()}
+              onInstancesChanged={refreshInstances}
+              onAddInstance={() => openInstallWindow(activeClawType()!)}
+            />
+          )}
+          {activePage() === "sandbox" && <SandboxPage />}
+          {activePage() === "settings" && <Settings />}
+        </main>
+      </div>
+    </AppContext.Provider>
   );
 }

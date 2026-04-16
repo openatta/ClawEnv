@@ -545,102 +545,35 @@ if p.exists():
     Ok(())
 }
 
-/// Run package install for any claw as a background script in the VM.
-/// `install_cmd` is the full command, e.g., "npm install -g openclaw@latest" or "pip install hermes-agent"
-/// Polls a done-marker file every 5 seconds using short exec() calls.
+/// Run package install as a background script in the VM.
+/// Delegates to the shared `background::run_background_script` module.
 async fn vm_background_install(
     backend: &dyn SandboxBackend,
     tx: &mpsc::Sender<InstallProgress>,
     install_cmd: &str,
     display_name: &str,
 ) -> Result<()> {
-    let log = "/tmp/clawenv-npm.log";
-    let done = "/tmp/clawenv-npm.done";
-
-    // Clean up any previous attempt
-    backend.exec(&format!("rm -f {log} {done}")).await?;
-
-    // Write install script — runs independently in VM.
-    // The install_cmd may contain && chains (e.g., git clone && uv venv && uv pip install).
-    // We write it as the script body and redirect stdout+stderr to the log file.
-    backend.exec(&format!(
-        r#"cat > /tmp/clawenv-npm.sh << 'SCRIPTEOF'
-#!/bin/sh
-set -e
-{install_cmd}
-SCRIPTEOF
-chmod +x /tmp/clawenv-npm.sh"#
-    )).await?;
-
-    // Launch in background: sudo runs the entire script, output goes to log, exit code to done marker
-    backend.exec(&format!(
-        "nohup sh -c 'sudo sh /tmp/clawenv-npm.sh > {log} 2>&1; echo $? > {done}' > /dev/null 2>&1 &"
-    )).await?;
-
-    // Poll for completion
-    let mut last_lines = 0usize;
-    let mut elapsed = 0u64;
-    let mut idle = 0u64;
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        elapsed += 5;
-
-        // Check done marker
-        let done_content = backend.exec(&format!("cat {done} 2>/dev/null || echo ''")).await.unwrap_or_default();
-        let done_val = done_content.trim();
-
-        // Read only NEW lines (tail from last position)
-        let new_output = backend.exec(&format!(
-            "tail -n +{} {log} 2>/dev/null | head -50 || echo ''",
-            last_lines + 1
-        )).await.unwrap_or_default();
-
-        let new_lines: Vec<&str> = new_output.lines()
-            .filter(|l| !l.trim().is_empty())
-            .collect();
-
-        if !new_lines.is_empty() {
-            idle = 0;
-            last_lines += new_lines.len();
-            // Show last meaningful line
-            let display_line = new_lines.last().unwrap_or(&"");
-            let short = if display_line.len() > 85 { &display_line[..85] } else { display_line };
-            let pct = std::cmp::min(40 + (elapsed / 12) as u8, 68);
-            send(tx, &format!("[{elapsed}s] {short}"), pct, InstallStage::InstallOpenClaw).await;
-        } else {
-            idle += 5;
-            let pct = std::cmp::min(40 + (elapsed / 12) as u8, 68);
-            send(tx, &format!("Installing {display_name}... ({elapsed}s)"), pct, InstallStage::InstallOpenClaw).await;
-        }
-
-        // Check completion
-        if !done_val.is_empty() {
-            let exit_code: i32 = done_val.parse().unwrap_or(-1);
-            if let Err(e) = backend.exec("rm -f /tmp/clawenv-npm.sh").await {
-                tracing::debug!("Cleanup rm npm script: {e}");
-            }
-            if exit_code != 0 {
-                let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-                anyhow::bail!("Package install failed (exit {exit_code}):\n{tail}");
-            }
-            // Clean up
-            backend.exec(&format!("rm -f {log} {done}")).await.ok();
-            return Ok(());
-        }
-
-        // Stall: 10 min without output
-        if idle >= 600 {
-            let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-            anyhow::bail!("Package install stalled (no output for 10 min):\n{tail}");
-        }
-    }
+    use super::background::{run_background_script, BackgroundScriptOpts};
+    let tx = tx.clone();
+    run_background_script(backend, &BackgroundScriptOpts {
+        cmd: install_cmd,
+        label: &format!("Installing {display_name}"),
+        sudo: true,
+        log_file: "/tmp/clawenv-install.log",
+        done_file: "/tmp/clawenv-install.done",
+        script_file: "/tmp/clawenv-install.sh",
+        pct_range: (40, 68),
+        ..Default::default()
+    }, move |msg, pct| {
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            send(&tx, &msg, pct, InstallStage::InstallOpenClaw).await;
+        });
+    }).await
 }
 
-/// Run any command as background script in VM with polling and idle detection.
-///
-/// Polls log file for new lines every 5s. If no new output appears for 10 minutes,
-/// the operation is considered stalled and returns an error.
+/// Run any command as a background script in the VM with progress polling.
+/// Delegates to the shared `background::run_background_script` module.
 async fn vm_background_run(
     backend: &dyn SandboxBackend,
     tx: &mpsc::Sender<InstallProgress>,
@@ -650,59 +583,24 @@ async fn vm_background_run(
     pct_end: u8,
     stage: InstallStage,
 ) -> Result<()> {
-    let log = "/tmp/clawenv-bg.log";
-    let done = "/tmp/clawenv-bg.done";
-    backend.exec(&format!("rm -f {log} {done}")).await?;
-    backend.exec(&format!(
-        "nohup sh -c '{cmd} > {log} 2>&1; echo $? > {done}' > /dev/null 2>&1 &"
-    )).await?;
-
-    let mut elapsed = 0u64;
-    let mut idle = 0u64;
-    let mut last_lines = 0usize;
-
-    loop {
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-        elapsed += 5;
-
-        // Check done marker
-        let d = backend.exec(&format!("cat {done} 2>/dev/null || echo ''")).await.unwrap_or_default();
-        if !d.trim().is_empty() {
-            let rc: i32 = d.trim().parse().unwrap_or(-1);
-            backend.exec(&format!("rm -f {log} {done}")).await.ok();
-            if rc != 0 {
-                let tail = backend.exec(&format!("tail -5 {log} 2>/dev/null")).await.unwrap_or_default();
-                anyhow::bail!("{label} failed (exit {rc}):\n{tail}");
-            }
-            return Ok(());
-        }
-
-        // Read new log lines for activity detection
-        let new_output = backend.exec(&format!(
-            "tail -n +{} {log} 2>/dev/null | head -20 || echo ''",
-            last_lines + 1
-        )).await.unwrap_or_default();
-        let new_count = new_output.lines().filter(|l| !l.trim().is_empty()).count();
-
-        if new_count > 0 {
-            idle = 0;
-            last_lines += new_count;
-            let pct = std::cmp::min(pct_start + (elapsed / 10) as u8, pct_end);
-            let last_line = new_output.lines().filter(|l| !l.trim().is_empty()).last().unwrap_or("");
-            let short = if last_line.len() > 80 { &last_line[..80] } else { last_line };
-            send(tx, &format!("[{elapsed}s] {short}"), pct, stage.clone()).await;
-        } else {
-            idle += 5;
-            let pct = std::cmp::min(pct_start + (elapsed / 10) as u8, pct_end);
-            send(tx, &format!("{label}... ({elapsed}s)"), pct, stage.clone()).await;
-        }
-
-        // Idle timeout: 10 minutes without new output
-        if idle >= 600 {
-            let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-            anyhow::bail!("{label} stalled — no output for 10 minutes:\n{tail}");
-        }
-    }
+    use super::background::{run_background_script, BackgroundScriptOpts};
+    let tx = tx.clone();
+    run_background_script(backend, &BackgroundScriptOpts {
+        cmd,
+        label,
+        sudo: false,
+        log_file: "/tmp/clawenv-bg.log",
+        done_file: "/tmp/clawenv-bg.done",
+        script_file: "/tmp/clawenv-bg.sh",
+        pct_range: (pct_start, pct_end),
+        ..Default::default()
+    }, move |msg, pct| {
+        let tx = tx.clone();
+        let stage = stage.clone();
+        tokio::spawn(async move {
+            send(&tx, &msg, pct, stage).await;
+        });
+    }).await
 }
 
 pub async fn send(tx: &mpsc::Sender<InstallProgress>, message: &str, percent: u8, stage: InstallStage) {
@@ -711,4 +609,77 @@ pub async fn send(tx: &mpsc::Sender<InstallProgress>, message: &str, percent: u8
         percent,
         stage,
     }).await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_escape_basic() {
+        assert_eq!(shell_escape("hello"), "hello");
+        assert_eq!(shell_escape("it's"), "it'\\''s");
+        assert_eq!(shell_escape("a'b'c"), "a'\\''b'\\''c");
+    }
+
+    #[test]
+    fn test_shell_escape_empty() {
+        assert_eq!(shell_escape(""), "");
+    }
+
+    #[test]
+    fn test_validate_instance_name_valid() {
+        assert!(validate_instance_name("default").is_ok());
+        assert!(validate_instance_name("my-instance").is_ok());
+        assert!(validate_instance_name("test_123").is_ok());
+        assert!(validate_instance_name("a").is_ok());
+    }
+
+    #[test]
+    fn test_validate_instance_name_invalid() {
+        assert!(validate_instance_name("").is_err());
+        assert!(validate_instance_name("has space").is_err());
+        assert!(validate_instance_name("has.dot").is_err());
+        assert!(validate_instance_name(&"x".repeat(64)).is_err());
+    }
+
+    #[test]
+    fn test_generate_dir_id_format() {
+        let id = generate_dir_id("test");
+        assert_eq!(id.len(), 12, "dir_id should be 12 hex chars");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()), "should be hex: {id}");
+    }
+
+    #[test]
+    fn test_generate_dir_id_unique() {
+        let id1 = generate_dir_id("test");
+        std::thread::sleep(std::time::Duration::from_millis(1));
+        let id2 = generate_dir_id("test");
+        assert_ne!(id1, id2, "different timestamps should produce different IDs");
+    }
+
+    #[test]
+    fn test_allocate_port_basic() {
+        // allocate_port tries base+offset, returns it if free
+        let port = allocate_port(3000, 1);
+        assert!(port >= 3001 && port <= 3019, "should be in block: {port}");
+    }
+
+    #[test]
+    fn test_allocate_port_range() {
+        // allocate_port(base, offset) should return within the 20-port block
+        let port = allocate_port(50000, 2);
+        assert!(port >= 50002 && port <= 50019, "should be in block: {port}");
+    }
+
+    #[test]
+    fn test_install_options_defaults() {
+        let opts = InstallOptions::default();
+        assert_eq!(opts.instance_name, "default");
+        assert_eq!(opts.claw_type, "openclaw");
+        assert_eq!(opts.claw_version, "latest");
+        assert!(!opts.install_browser);
+        assert!(opts.install_mcp_bridge);
+        assert!(!opts.use_native);
+    }
 }
