@@ -241,6 +241,7 @@ fn main() {
             ipc::export_sandbox,
             ipc::export_native_bundle,
             ipc::export_cancel,
+            ipc::lite::lite_scan_packages,
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {

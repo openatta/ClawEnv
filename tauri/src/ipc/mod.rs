@@ -3,6 +3,7 @@ pub mod claw;
 mod export;
 mod install;
 mod instance;
+pub mod lite;
 mod network;
 mod sandbox;
 mod settings;

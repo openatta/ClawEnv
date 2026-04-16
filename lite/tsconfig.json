@@ -1,0 +1,19 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "jsx": "preserve",
+    "jsxImportSource": "solid-js",
+    "paths": {
+      "@components/*": ["../src/components/*"],
+      "@shared/*": ["../src/*"]
+    }
+  },
+  "include": ["src/**/*", "../src/components/**/*", "../src/i18n.ts", "../src/types.ts"]
+}
