@@ -310,20 +310,20 @@ pub async fn install_native(
     // Step 4: Start gateway
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
     let port = opts.gateway_port;
-    let gateway_cmd = desc.gateway_start_cmd(port);
-
-    // Instance name is validated (alphanumeric + dash + underscore), safe for paths.
-    let name_esc = opts.instance_name.replace('\'', "'\\''");
-    #[cfg(not(target_os = "windows"))]
-    backend.exec(&format!(
-        "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
-    )).await?;
-    #[cfg(target_os = "windows")]
-    {
-        let full_cmd = gateway_cmd.replace('\'', "''");
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
+        // Instance name is validated (alphanumeric + dash + underscore), safe for paths.
+        let name_esc = opts.instance_name.replace('\'', "'\\''");
+        #[cfg(not(target_os = "windows"))]
         backend.exec(&format!(
-            "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
+            "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
         )).await?;
+        #[cfg(target_os = "windows")]
+        {
+            let full_cmd = gateway_cmd.replace('\'', "''");
+            backend.exec(&format!(
+                "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
+            )).await?;
+        }
     }
 
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
@@ -448,9 +448,8 @@ async fn install_from_bundle(
     }
 
     // Start gateway via ManagedShell::spawn_detached (works on all platforms)
-    let gateway_cmd = desc.gateway_start_cmd(opts.gateway_port);
-    send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
-    {
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(opts.gateway_port) {
+        send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
         let shell = crate::platform::managed_shell::ManagedShell::new();
         let log_path = dirs::home_dir().unwrap_or_default()
             .join(".clawenv").join("native").join("gateway.log");

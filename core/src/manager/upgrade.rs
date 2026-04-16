@@ -8,9 +8,18 @@ use crate::sandbox::SandboxType;
 use crate::update::checker::{self, VersionInfo};
 
 /// Check if an upgrade is available for an instance.
-/// `npm_registry` can be empty to use the default registry.
-pub async fn check_upgrade(instance: &InstanceConfig, npm_registry: &str, npm_package: &str) -> Result<VersionInfo> {
-    checker::check_latest_version(&instance.version, npm_registry, npm_package).await
+/// Dispatches to npm registry or PyPI based on the claw's package manager.
+pub async fn check_upgrade(instance: &InstanceConfig, registry_url: &str) -> Result<VersionInfo> {
+    let claw_registry = ClawRegistry::load();
+    let desc = claw_registry.get(&instance.claw_type);
+    match desc.package_manager {
+        crate::claw::descriptor::PackageManager::Npm => {
+            checker::check_latest_npm(&instance.version, registry_url, &desc.npm_package).await
+        }
+        crate::claw::descriptor::PackageManager::Pip => {
+            checker::check_latest_pypi(&instance.version, &desc.pip_package).await
+        }
+    }
 }
 
 /// Progress event for upgrade UI
@@ -47,8 +56,12 @@ pub async fn upgrade_instance(
         backend.exec(&crate::platform::process::kill_by_name_cmd(pn)).await.ok();
     }
 
-    // 2. Run npm upgrade
-    let install_cmd = desc.npm_install_verbose_cmd(version);
+    // 2. Run package upgrade (npm or pip)
+    let install_cmd = desc.sandbox_install_cmd(version);
+    let pm_label = match desc.package_manager {
+        crate::claw::descriptor::PackageManager::Npm => "npm",
+        crate::claw::descriptor::PackageManager::Pip => "pip",
+    };
     send(tx, &format!("Upgrading {} to {version}...", desc.display_name), 25, "install").await;
 
     if instance.sandbox_type == SandboxType::Native {
@@ -116,7 +129,7 @@ chmod +x /tmp/clawenv-upgrade.sh"#
                 backend.exec("rm -f /tmp/clawenv-upgrade.sh /tmp/clawenv-upgrade.log /tmp/clawenv-upgrade.done").await.ok();
                 if rc != 0 {
                     let tail = backend.exec(&format!("tail -5 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-                    anyhow::bail!("npm upgrade failed (exit {rc}):\n{tail}");
+                    anyhow::bail!("{pm_label} upgrade failed (exit {rc}):\n{tail}");
                 }
                 break;
             }
@@ -135,10 +148,11 @@ chmod +x /tmp/clawenv-upgrade.sh"#
     // 4. Restart gateway
     send(tx, "Restarting gateway...", 90, "restart").await;
     let port = instance.gateway.gateway_port;
-    let gateway_cmd = desc.gateway_start_cmd(port);
-    backend.exec(&format!(
-        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-    )).await?;
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
+        backend.exec(&format!(
+            "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+        )).await?;
+    }
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
     // 5. Update config

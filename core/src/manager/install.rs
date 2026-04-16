@@ -186,10 +186,17 @@ pub async fn install(
     let mirrors_config = config.config().clawenv.mirrors.clone();
 
     // ---- Step 2: Create VM (provision = system packages only) ----
-    // Check if VM exists AND has basic packages (node/npm). A VM that exists but
+    // Check if VM exists AND has basic packages. A VM that exists but
     // wasn't fully provisioned (e.g., interrupted install) is treated as non-existent.
-    let vm_ready = match backend.exec("node --version 2>/dev/null").await {
-        Ok(o) => o.trim().starts_with('v'),
+    let readiness_cmd = match desc.package_manager {
+        crate::claw::descriptor::PackageManager::Pip => "python3 --version 2>/dev/null",
+        crate::claw::descriptor::PackageManager::Npm => "node --version 2>/dev/null",
+    };
+    let vm_ready = match backend.exec(readiness_cmd).await {
+        Ok(o) => {
+            let t = o.trim();
+            t.starts_with('v') || t.starts_with("Python")
+        }
         Err(_) => false,
     };
 
@@ -307,13 +314,20 @@ pub async fn install(
         mirrors::apply_mirrors(backend.as_ref(), &mirrors_config).await?;
     }
 
+    // ---- Step 2b: Install extra sandbox packages required by this claw type ----
+    if !desc.sandbox_provision.is_empty() {
+        let pkgs = desc.sandbox_provision.join(" ");
+        send(&tx, &format!("Installing {} dependencies ({pkgs})...", desc.display_name), 39, InstallStage::InstallOpenClaw).await;
+        backend.exec(&format!("sudo apk add --no-cache {pkgs} 2>&1 || true")).await?;
+    }
+
     // ---- Step 3: Install claw via background script + polling ----
     let claw_installed = backend.exec(&format!("which {} 2>/dev/null", desc.cli_binary)).await
         .map(|o| !o.trim().is_empty()).unwrap_or(false);
 
     if !claw_installed {
         send(&tx, &format!("Installing {} (5-10 min, runs in background)...", desc.display_name), 40, InstallStage::InstallOpenClaw).await;
-        vm_background_install(backend.as_ref(), &tx, &desc.npm_install_verbose_cmd(&opts.claw_version), &desc.display_name).await?;
+        vm_background_install(backend.as_ref(), &tx, &desc.sandbox_install_cmd(&opts.claw_version), &desc.display_name).await?;
         send(&tx, &format!("{} installed", desc.display_name), 70, InstallStage::InstallOpenClaw).await;
     } else {
         send(&tx, &format!("{} already installed", desc.display_name), 70, InstallStage::InstallOpenClaw).await;
@@ -348,24 +362,64 @@ pub async fn install(
         send(&tx, "Installing plugins (MCP Bridge + HIL Skill)...", 78, InstallStage::StartOpenClaw).await;
         let bridge_url = format!("http://{host_ip}:{}", allocate_port(opts.gateway_port, 2));
 
-        // Deploy MCP Bridge
-        let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
-        let mcp_dir = "/workspace/mcp-bridge";
-        backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
-        backend.exec(&format!("cat > {mcp_dir}/index.mjs << 'MCPEOF'\n{mcp_js}\nMCPEOF")).await?;
+        let use_python = desc.uses_python_mcp();
 
-        // Deploy HIL Skill
-        let hil_js = include_str!("../../../assets/mcp/hil-skill.mjs");
-        let hil_dir = "/workspace/hil-skill";
-        backend.exec(&format!("mkdir -p {hil_dir}")).await?;
-        backend.exec(&format!("cat > {hil_dir}/index.mjs << 'HILEOF'\n{hil_js}\nHILEOF")).await?;
+        if use_python {
+            // Python runtime: deploy .py bridge scripts
+            let mcp_py = include_str!("../../../assets/mcp/mcp-bridge.py");
+            let mcp_dir = "/workspace/mcp-bridge";
+            backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
+            backend.exec(&format!("cat > {mcp_dir}/bridge.py << 'MCPEOF'\n{mcp_py}\nMCPEOF")).await?;
 
-        // Register both with OpenClaw
-        let token = backend.exec(
-            &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write((j.gateway&&j.gateway.auth&&j.gateway.auth.token)||j.token||'') }} catch {{}}"#,
-                id = desc.id)
-        ).await.unwrap_or_default();
-        let token = token.trim();
+            let hil_py = include_str!("../../../assets/mcp/hil-skill.py");
+            let hil_dir = "/workspace/hil-skill";
+            backend.exec(&format!("mkdir -p {hil_dir}")).await?;
+            backend.exec(&format!("cat > {hil_dir}/skill.py << 'HILEOF'\n{hil_py}\nHILEOF")).await?;
+
+            // Install Python MCP SDK
+            backend.exec("pip install --break-system-packages mcp httpx 2>/dev/null || true").await?;
+        } else {
+            // Node.js runtime: deploy .mjs bridge scripts
+            let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
+            let mcp_dir = "/workspace/mcp-bridge";
+            backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
+            backend.exec(&format!("cat > {mcp_dir}/index.mjs << 'MCPEOF'\n{mcp_js}\nMCPEOF")).await?;
+
+            let hil_js = include_str!("../../../assets/mcp/hil-skill.mjs");
+            let hil_dir = "/workspace/hil-skill";
+            backend.exec(&format!("mkdir -p {hil_dir}")).await?;
+            backend.exec(&format!("cat > {hil_dir}/index.mjs << 'HILEOF'\n{hil_js}\nHILEOF")).await?;
+        }
+
+        // Build registration commands based on runtime
+        let (mcp_dir, hil_dir) = ("/workspace/mcp-bridge", "/workspace/hil-skill");
+        let (mcp_runner, mcp_entry, hil_entry) = if use_python {
+            ("python3", format!("{mcp_dir}/bridge.py"), format!("{hil_dir}/skill.py"))
+        } else {
+            ("node", format!("{mcp_dir}/index.mjs"), format!("{hil_dir}/index.mjs"))
+        };
+
+        // Read gateway token for registration (Node.js config format)
+        let token = if !use_python {
+            let t = backend.exec(
+                &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write((j.gateway&&j.gateway.auth&&j.gateway.auth.token)||j.token||'') }} catch {{}}"#,
+                    id = desc.id)
+            ).await.unwrap_or_default();
+            t.trim().to_string()
+        } else {
+            // Hermes / Python agents: try reading token from config
+            let t = backend.exec(
+                &format!(r#"python3 -c "
+import json, os, pathlib
+p = pathlib.Path.home() / '.{id}' / 'config.json'
+if p.exists():
+    d = json.loads(p.read_text())
+    print(d.get('token', d.get('gateway', {{}}).get('auth', {{}}).get('token', '')), end='')
+" 2>/dev/null"#, id = desc.id)
+            ).await.unwrap_or_default();
+            t.trim().to_string()
+        };
+
         if !token.is_empty() {
             let env_prefix = format!(
                 "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token}",
@@ -375,16 +429,30 @@ pub async fn install(
             // Register MCP Bridge
             if let Some(mcp_cmd) = desc.mcp_register_cmd(
                 "clawenv",
-                &format!("{{\"command\":\"node\",\"args\":[\"{mcp_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}")
+                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{mcp_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
             ) {
                 backend.exec(&format!("{env_prefix} {mcp_cmd} 2>/dev/null || true")).await?;
             }
             // Register HIL Skill
             if let Some(hil_cmd) = desc.mcp_register_cmd(
                 "clawenv-hil",
-                &format!("{{\"command\":\"node\",\"args\":[\"{hil_dir}/index.mjs\",\"--bridge-url\",\"{bridge_url}\"]}}")
+                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{hil_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
             ) {
                 backend.exec(&format!("{env_prefix} {hil_cmd} 2>/dev/null || true")).await?;
+            }
+        } else {
+            // No token yet — register without env prefix (agent may not need gateway auth)
+            if let Some(mcp_cmd) = desc.mcp_register_cmd(
+                "clawenv",
+                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{mcp_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
+            ) {
+                backend.exec(&format!("{mcp_cmd} 2>/dev/null || true")).await?;
+            }
+            if let Some(hil_cmd) = desc.mcp_register_cmd(
+                "clawenv-hil",
+                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{hil_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
+            ) {
+                backend.exec(&format!("{hil_cmd} 2>/dev/null || true")).await?;
             }
         }
     }
@@ -406,11 +474,12 @@ pub async fn install(
     backend.exec(&format!(
         "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
     )).await?;
-    let gateway_cmd = desc.gateway_start_cmd(opts.gateway_port);
-    backend.exec(&format!(
-        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-    )).await?;
-    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(opts.gateway_port) {
+        backend.exec(&format!(
+            "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+        )).await?;
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
 
     // ---- Post-install verification ----
     send(&tx, "Verifying installation...", 90, InstallStage::StartOpenClaw).await;
@@ -457,8 +526,8 @@ pub async fn install(
     Ok(())
 }
 
-/// Run npm install for any claw as a background script in the VM.
-/// `install_cmd` is the full command, e.g., "npm install -g --loglevel verbose openclaw@latest"
+/// Run package install for any claw as a background script in the VM.
+/// `install_cmd` is the full command, e.g., "npm install -g openclaw@latest" or "pip install hermes-agent"
 /// Polls a done-marker file every 5 seconds using short exec() calls.
 async fn vm_background_install(
     backend: &dyn SandboxBackend,
@@ -530,7 +599,7 @@ chmod +x /tmp/clawenv-npm.sh"#
             }
             if exit_code != 0 {
                 let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-                anyhow::bail!("npm install failed (exit {exit_code}):\n{tail}");
+                anyhow::bail!("Package install failed (exit {exit_code}):\n{tail}");
             }
             // Clean up
             backend.exec(&format!("rm -f {log} {done}")).await.ok();
@@ -540,7 +609,7 @@ chmod +x /tmp/clawenv-npm.sh"#
         // Stall: 10 min without output
         if idle >= 600 {
             let tail = backend.exec(&format!("tail -10 {log} 2>/dev/null || echo 'no log'")).await.unwrap_or_default();
-            anyhow::bail!("npm install stalled (no output for 10 min):\n{tail}");
+            anyhow::bail!("Package install stalled (no output for 10 min):\n{tail}");
         }
     }
 }

@@ -400,12 +400,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         Commands::UpdateCheck { name } => {
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
-            let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
+            let registry_url = config.config().clawenv.mirrors.npm_registry_url().to_string();
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
-            let claw_reg = clawenv_core::claw::ClawRegistry::load();
-            let desc = claw_reg.get(&inst.claw_type);
 
-            match clawenv_core::update::checker::check_latest_version(&inst.version, &npm_registry, &desc.npm_package).await {
+            match clawenv_core::manager::upgrade::check_upgrade(&inst, &registry_url).await {
                 Ok(info) => {
                     let resp = UpdateCheckResponse {
                         current: info.current,
@@ -550,10 +548,14 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 id: d.id.clone(),
                 display_name: d.display_name.clone(),
                 logo: d.logo.clone(),
+                package_manager: format!("{:?}", d.package_manager).to_lowercase(),
                 npm_package: d.npm_package.clone(),
+                pip_package: d.pip_package.clone(),
                 default_port: d.default_port,
                 supports_mcp: d.supports_mcp,
                 supports_browser: d.supports_browser,
+                has_gateway_ui: d.has_gateway_ui,
+                supports_native: d.supports_native,
             }).collect();
             let resp = ClawTypesResponse { claw_types: types };
             out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });
@@ -1208,34 +1210,37 @@ async fn run_install_step(
 
         // ---- Step: gateway ----
         "gateway" => {
-            let gateway_cmd = desc.gateway_start_cmd(port);
-            out.emit(CliEvent::Info { message: format!("Starting {} gateway on port {}...", desc.display_name, port) });
+            if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
+                out.emit(CliEvent::Info { message: format!("Starting {} gateway on port {}...", desc.display_name, port) });
 
-            if use_native {
-                let backend = clawenv_core::sandbox::native_backend(name);
-                #[cfg(not(target_os = "windows"))]
-                backend.exec(&format!(
-                    "nohup {gateway_cmd} > /tmp/clawenv-gateway-{name}.log 2>&1 &"
-                )).await?;
-                #[cfg(target_os = "windows")]
-                backend.exec(&format!(
-                    "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
-                    desc.cli_binary, desc.gateway_cmd.replace("{port}", &port.to_string())
-                )).await?;
+                if use_native {
+                    let backend = clawenv_core::sandbox::native_backend(name);
+                    #[cfg(not(target_os = "windows"))]
+                    backend.exec(&format!(
+                        "nohup {gateway_cmd} > /tmp/clawenv-gateway-{name}.log 2>&1 &"
+                    )).await?;
+                    #[cfg(target_os = "windows")]
+                    backend.exec(&format!(
+                        "Start-Process -WindowStyle Hidden -FilePath '{}' -ArgumentList '{}'",
+                        desc.cli_binary, desc.gateway_cmd.replace("{port}", &port.to_string())
+                    )).await?;
+                } else {
+                    let backend = detect_backend_for(name)?;
+                    // Start ttyd too
+                    let ttyd_port = port + 4681;
+                    backend.exec(&format!(
+                        "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
+                    )).await?;
+                    backend.exec(&format!(
+                        "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+                    )).await?;
+                }
+
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                out.emit(CliEvent::Complete { message: format!("{} gateway started on port {}", desc.display_name, port) });
             } else {
-                let backend = detect_backend_for(name)?;
-                // Start ttyd too
-                let ttyd_port = port + 4681;
-                backend.exec(&format!(
-                    "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
-                )).await?;
-                backend.exec(&format!(
-                    "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-                )).await?;
+                out.emit(CliEvent::Complete { message: format!("{} has no gateway (agent runs via terminal)", desc.display_name) });
             }
-
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            out.emit(CliEvent::Complete { message: format!("{} gateway started on port {}", desc.display_name, port) });
         }
 
         other => {

@@ -126,6 +126,15 @@ export default function ClawPage(props: {
     catch { prompt("Copy this URL:", url); }
   }
 
+  async function openTerminal() {
+    const inst = activeInstance();
+    if (!inst) return;
+    const ttydPort = inst.ttyd_port || (inst.gateway_port + 1);
+    const url = `http://127.0.0.1:${ttydPort}`;
+    try { await invoke("open_url_in_browser", { url }); }
+    catch { prompt("Copy this URL:", url); }
+  }
+
   const loading = (action: string) => actionLoading() === `${action}:${activeTab()}`;
   const anyLoading = () => actionLoading()?.endsWith(`:${activeTab()}`) ?? false;
 
@@ -208,7 +217,9 @@ export default function ClawPage(props: {
             </h2>
             <p class="text-sm text-gray-400 mb-5">
               {isRunning()
-                ? `Gateway active on port ${activeInstance()?.gateway_port}`
+                ? (props.clawType.has_gateway_ui
+                    ? `Gateway active on port ${activeInstance()?.gateway_port}`
+                    : `Sandbox running — terminal on port ${activeInstance()?.ttyd_port || ((activeInstance()?.gateway_port ?? 3000) + 1)}`)
                 : `Instance "${activeTab()}" is ${activeHealth()}`}
             </p>
 
@@ -219,8 +230,14 @@ export default function ClawPage(props: {
                   onClick={() => doAction("start")}>{t("启动", "Start")}</button>
               </Show>
               <Show when={isRunning() && !anyLoading()}>
-                <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
-                  onClick={openInBrowser}>{t("打开控制面板", "Open Control Panel")}</button>
+                <Show when={props.clawType.has_gateway_ui}>
+                  <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+                    onClick={openInBrowser}>{t("打开控制面板", "Open Control Panel")}</button>
+                </Show>
+                <Show when={!props.clawType.has_gateway_ui}>
+                  <button class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 rounded text-white text-sm"
+                    onClick={openTerminal}>{t("打开终端", "Open Terminal")}</button>
+                </Show>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
                   onClick={() => doAction("stop")}>{t("停止", "Stop")}</button>
                 <button class="px-3 py-2 bg-gray-700 hover:bg-gray-600 rounded text-sm"
@@ -285,8 +302,13 @@ export default function ClawPage(props: {
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Type</td><td>{dn()}</td></tr>
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Version</td><td>{activeInstance()?.version}</td></tr>
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
-                <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
-                <Show when={isRunning()}>
+                <Show when={props.clawType.has_gateway_ui}>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
+                </Show>
+                <Show when={!props.clawType.has_gateway_ui}>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Terminal</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.ttyd_port || ((activeInstance()?.gateway_port ?? 3000) + 1)}</td></tr>
+                </Show>
+                <Show when={isRunning() && props.clawType.has_gateway_ui}>
                   <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Token</td><td class="font-mono text-gray-300 break-all">{gatewayToken() || "..."}</td></tr>
                 </Show>
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Status</td>

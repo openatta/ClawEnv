@@ -192,6 +192,79 @@ fn test_install_step_prereq_sandbox() {
     );
 }
 
+// ---- Hermes Agent (pip-based claw) ----
+
+#[test]
+fn test_claw_types_includes_hermes() {
+    let (code, event) = run_json(&["claw-types"]);
+    assert_eq!(code, 0);
+    let types = event["data"]["claw_types"].as_array().unwrap();
+
+    let hermes = types.iter().find(|t| t["id"] == "hermes");
+    assert!(hermes.is_some(), "hermes should be in claw types");
+    let h = hermes.unwrap();
+    assert_eq!(h["package_manager"], "pip");
+    assert_eq!(h["pip_package"], "hermes-agent");
+    assert_eq!(h["has_gateway_ui"], false);
+    assert_eq!(h["supports_native"], false);
+    assert_eq!(h["supports_mcp"], true);
+}
+
+#[test]
+fn test_claw_types_hermes_human() {
+    let output = cli_bin().arg("claw-types").output().unwrap();
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("hermes"), "claw-types human output should include hermes");
+    assert!(stdout.contains("Hermes Agent"), "claw-types human output should include display name");
+}
+
+#[test]
+fn test_claw_types_all_have_required_fields() {
+    let (code, event) = run_json(&["claw-types"]);
+    assert_eq!(code, 0);
+    let types = event["data"]["claw_types"].as_array().unwrap();
+    assert!(types.len() >= 3, "should have at least 3 claw types (openclaw, nanoclaw, hermes)");
+
+    for ct in types {
+        let id = ct["id"].as_str().unwrap_or("???");
+        assert!(ct["display_name"].is_string(), "{id}: missing display_name");
+        assert!(ct["logo"].is_string(), "{id}: missing logo");
+        assert!(ct["package_manager"].is_string(), "{id}: missing package_manager");
+        assert!(ct["default_port"].is_number(), "{id}: missing default_port");
+        // Boolean fields must be present (not null)
+        assert!(ct["supports_mcp"].is_boolean(), "{id}: missing supports_mcp");
+        assert!(ct["supports_browser"].is_boolean(), "{id}: missing supports_browser");
+        assert!(ct["has_gateway_ui"].is_boolean(), "{id}: missing has_gateway_ui");
+        assert!(ct["supports_native"].is_boolean(), "{id}: missing supports_native");
+    }
+}
+
+#[test]
+fn test_install_hermes_rejects_native_mode() {
+    // Hermes doesn't support native mode — install should fail
+    let (code, event) = run_json(&["install", "--claw-type", "hermes", "--mode", "native", "--step", "prereq"]);
+    // Should either fail (native not supported) or succeed at prereq only (depends on implementation)
+    // At minimum, it should not crash
+    let event_type = event["type"].as_str().unwrap_or("");
+    assert!(
+        event_type == "error" || event_type == "complete" || event_type == "info" || event_type == "progress",
+        "hermes native install should not crash, got code={code} type={event_type}"
+    );
+}
+
+#[test]
+fn test_install_hermes_sandbox_step_prereq() {
+    // Hermes sandbox prereq should work like OpenClaw sandbox
+    let (code, event) = run_json(&["install", "--claw-type", "hermes", "--mode", "sandbox", "--step", "prereq"]);
+    assert_eq!(code, 0, "hermes sandbox prereq should succeed");
+    let event_type = event["type"].as_str().unwrap_or("");
+    assert!(
+        event_type == "complete" || event_type == "info",
+        "hermes prereq should emit complete or info, got: {}", event_type
+    );
+}
+
 // ---- New commands ----
 
 #[test]

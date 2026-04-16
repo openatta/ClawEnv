@@ -7,8 +7,8 @@ mod descriptor_tests {
     #[test]
     fn openclaw_gateway_cmd() {
         let d = openclaw_descriptor();
-        assert_eq!(d.gateway_start_cmd(3000), "openclaw gateway --port 3000 --allow-unconfigured");
-        assert_eq!(d.gateway_start_cmd(8080), "openclaw gateway --port 8080 --allow-unconfigured");
+        assert_eq!(d.gateway_start_cmd(3000).unwrap(), "openclaw gateway --port 3000 --allow-unconfigured");
+        assert_eq!(d.gateway_start_cmd(8080).unwrap(), "openclaw gateway --port 8080 --allow-unconfigured");
     }
 
     #[test]
@@ -31,6 +31,13 @@ mod descriptor_tests {
             d.npm_install_verbose_cmd("latest"),
             "npm install -g --loglevel verbose openclaw@latest"
         );
+    }
+
+    #[test]
+    fn openclaw_sandbox_install() {
+        let d = openclaw_descriptor();
+        assert_eq!(d.sandbox_install_cmd("latest"), "npm install -g --loglevel verbose openclaw@latest");
+        assert_eq!(d.sandbox_install_cmd("1.2.3"), "npm install -g --loglevel verbose openclaw@1.2.3");
     }
 
     #[test]
@@ -62,6 +69,60 @@ mod descriptor_tests {
         let d = openclaw_descriptor();
         assert!(d.supports_mcp);
         assert!(d.supports_browser);
+        assert!(d.has_gateway_ui);
+        assert!(d.supports_native);
+        assert!(!d.uses_python_mcp());
+    }
+
+    // ---- Hermes Agent ----
+
+    #[test]
+    fn hermes_sandbox_install() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        assert_eq!(d.package_manager, PackageManager::Pip);
+        assert_eq!(d.sandbox_install_cmd("latest"), "pip install --break-system-packages hermes-agent");
+        assert_eq!(d.sandbox_install_cmd("0.3.0"), "pip install --break-system-packages hermes-agent==0.3.0");
+    }
+
+    #[test]
+    fn hermes_no_gateway() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        assert!(d.gateway_start_cmd(3000).is_none(), "hermes should have no gateway");
+        assert!(!d.has_gateway_ui);
+    }
+
+    #[test]
+    fn hermes_no_native() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        assert!(!d.supports_native);
+    }
+
+    #[test]
+    fn hermes_uses_python_mcp() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        assert!(d.uses_python_mcp());
+        assert!(d.supports_mcp);
+    }
+
+    #[test]
+    fn hermes_has_sandbox_provision() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        assert!(!d.sandbox_provision.is_empty(), "hermes needs sandbox_provision for Python");
+        assert!(d.sandbox_provision.contains(&"py3-pip".to_string()));
+    }
+
+    #[test]
+    fn hermes_mcp_register() {
+        let registry = crate::claw::ClawRegistry::load();
+        let d = registry.get("hermes");
+        let cmd = d.mcp_register_cmd("clawenv", r#"{"command":"python3"}"#);
+        assert!(cmd.is_some());
+        assert!(cmd.unwrap().contains("hermes mcp add clawenv"));
     }
 
     // ---- Registry-loaded descriptors: command formatting for all claw types ----
@@ -90,15 +151,22 @@ mod descriptor_tests {
         let ver_cmd = d.version_check_cmd();
         assert!(ver_cmd.starts_with(expected_binary), "version_check_cmd doesn't start with binary for {id}: {ver_cmd}");
 
-        // gateway_start_cmd must contain port and binary
-        let gw = d.gateway_start_cmd(expected_port);
-        assert!(gw.contains(expected_binary), "gateway cmd missing binary for {id}: {gw}");
-        assert!(gw.contains(&expected_port.to_string()), "gateway cmd missing port for {id}: {gw}");
+        // gateway_start_cmd: if gateway_cmd is non-empty, must contain port and binary
+        if let Some(gw) = d.gateway_start_cmd(expected_port) {
+            assert!(gw.contains(expected_binary), "gateway cmd missing binary for {id}: {gw}");
+            assert!(gw.contains(&expected_port.to_string()), "gateway cmd missing port for {id}: {gw}");
+        }
 
-        // npm_install_cmd must contain the npm package
-        let npm = d.npm_install_cmd("latest");
-        assert!(npm.contains(&d.npm_package), "npm install missing package for {id}: {npm}");
-        assert!(npm.contains("@latest"), "npm install missing version for {id}: {npm}");
+        // sandbox_install_cmd must contain the package
+        let install = d.sandbox_install_cmd("latest");
+        match d.package_manager {
+            PackageManager::Npm => {
+                assert!(install.contains(&d.npm_package), "sandbox install missing npm package for {id}: {install}");
+            }
+            PackageManager::Pip => {
+                assert!(install.contains(&d.pip_package), "sandbox install missing pip package for {id}: {install}");
+            }
+        }
 
         // process_names must contain binary
         let pns = d.process_names();
@@ -119,10 +187,10 @@ mod descriptor_tests {
 
     #[test]
     fn all_builtin_claws_have_valid_commands() {
-        // Only products ClawEnv can independently install via npm
         //       id,          binary,       port, apikey, mcp
         assert_claw_commands("openclaw",   "openclaw",   3000, true,  true);
         assert_claw_commands("nanoclaw",   "nanoclaw",   3000, true,  false);
+        assert_claw_commands("hermes",     "hermes",     3000, true,  true);
     }
 
     // ---- Edge cases ----
@@ -142,6 +210,13 @@ mod descriptor_tests {
     }
 
     #[test]
+    fn empty_gateway_cmd_returns_none() {
+        let mut d = openclaw_descriptor();
+        d.gateway_cmd = String::new();
+        assert!(d.gateway_start_cmd(3000).is_none());
+    }
+
+    #[test]
     fn apikey_with_special_chars() {
         let d = openclaw_descriptor();
         let cmd = d.set_apikey_cmd("sk-abc'def\"ghi").unwrap();
@@ -153,7 +228,7 @@ mod descriptor_tests {
         let mut d = openclaw_descriptor();
         d.cli_binary = "testclaw".into();
         d.gateway_cmd = "serve --port {port} --host 0.0.0.0".into();
-        assert_eq!(d.gateway_start_cmd(9999), "testclaw serve --port 9999 --host 0.0.0.0");
+        assert_eq!(d.gateway_start_cmd(9999).unwrap(), "testclaw serve --port 9999 --host 0.0.0.0");
     }
 }
 
@@ -167,7 +242,8 @@ mod registry_tests {
         let ids = reg.list_ids();
         assert!(ids.contains(&"openclaw"), "missing openclaw");
         assert!(ids.contains(&"nanoclaw"), "missing nanoclaw");
-        assert!(ids.len() >= 2, "expected at least 2 builtin claws, got {}", ids.len());
+        assert!(ids.contains(&"hermes"), "missing hermes");
+        assert!(ids.len() >= 3, "expected at least 3 builtin claws, got {}", ids.len());
     }
 
     #[test]
@@ -212,7 +288,10 @@ mod registry_tests {
             id: "test-custom".into(),
             display_name: "Test Custom Claw".into(),
             logo: "🧪".into(),
+            package_manager: crate::claw::descriptor::PackageManager::Npm,
             npm_package: "test-custom-claw".into(),
+            pip_package: String::new(),
+            sandbox_provision: vec![],
             cli_binary: "testclaw".into(),
             gateway_cmd: "serve --port {port}".into(),
             version_cmd: "--version".into(),
@@ -221,6 +300,9 @@ mod registry_tests {
             default_port: 4000,
             supports_mcp: false,
             supports_browser: false,
+            has_gateway_ui: true,
+            supports_native: true,
+            mcp_runtime: "node".into(),
         });
         assert_eq!(reg.list_ids().len(), before + 1);
         assert_eq!(reg.get("test-custom").display_name, "Test Custom Claw");

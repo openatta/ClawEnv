@@ -1,19 +1,23 @@
 # ClawEnv — Built-in Claw Product Registry
 #
-# Only includes products that ClawEnv can independently install and manage
-# via `npm install -g` in a sandbox. Products that are:
+# Products that ClawEnv can independently install and manage inside a sandbox.
+# Supports npm-based (OpenClaw, NanoClaw) and pip-based (Hermes Agent) products.
+#
+# Products NOT listed here (documented in docs/13-claw-registry.md):
 #   - OpenClaw wrappers distributed as desktop installers (AutoClaw, QClaw, EasyClaw)
 #   - Cloud SaaS only (ArkClaw, DuClaw, Kimi Claw)
 #   - npm packages without CLI binary (zeroclaw SDK)
-# are documented in docs/13-claw-registry.md but NOT listed here.
 #
-# To add a new claw: verify `npm view <package> bin` returns a CLI binary,
-# then run `bash scripts/test-claw-lifecycle.sh <id>` to validate.
+# To add a new claw:
+#   npm: verify `npm view <package> bin` returns a CLI binary
+#   pip: verify `pip install <package> && <binary> --version` works on Alpine
+# Then run `bash scripts/test-claw-lifecycle.sh <id>` to validate.
 
 [[claw]]
 id = "openclaw"
 display_name = "OpenClaw"
 logo = "🦞"
+package_manager = "npm"
 npm_package = "openclaw"
 cli_binary = "openclaw"
 gateway_cmd = "gateway --port {port} --allow-unconfigured"
@@ -23,6 +27,9 @@ mcp_set_cmd = "mcp set {name} '{json}'"
 default_port = 3000
 supports_mcp = true
 supports_browser = true
+has_gateway_ui = true
+supports_native = true
+mcp_runtime = "node"
 
 # NanoClaw — security-focused OpenClaw alternative (Docker container isolation)
 # npm install from git clone, CLI binary confirmed
@@ -30,6 +37,7 @@ supports_browser = true
 id = "nanoclaw"
 display_name = "NanoClaw"
 logo = "🔒"
+package_manager = "npm"
 npm_package = "nanoclaw"
 cli_binary = "nanoclaw"
 gateway_cmd = "start --port {port}"
@@ -39,3 +47,27 @@ mcp_set_cmd = ""
 default_port = 3000
 supports_mcp = false
 supports_browser = false
+has_gateway_ui = true
+supports_native = true
+mcp_runtime = "node"
+
+# Hermes Agent — self-improving AI agent by Nous Research
+# Python-based, pip install, sandbox-only (no native install)
+[[claw]]
+id = "hermes"
+display_name = "Hermes Agent"
+logo = "☤"
+package_manager = "pip"
+pip_package = "hermes-agent"
+sandbox_provision = ["py3-pip", "py3-uv"]
+cli_binary = "hermes"
+gateway_cmd = ""
+version_cmd = "--version"
+config_apikey_cmd = "config set api_key '{key}'"
+mcp_set_cmd = "mcp add {name} --config '{json}'"
+default_port = 3000
+supports_mcp = true
+supports_browser = false
+has_gateway_ui = false
+supports_native = false
+mcp_runtime = "python"

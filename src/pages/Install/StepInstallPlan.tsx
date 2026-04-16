@@ -12,7 +12,11 @@ export default function StepInstallPlan(props: {
   installMcpBridge: () => boolean;
   onMcpBridgeChange: (v: boolean) => void;
   clawDisplayName: string;
+  supportsNative?: boolean;
+  supportsBrowser?: boolean;
 }) {
+  const supportsNative = () => props.supportsNative !== false;
+  const supportsBrowser = () => props.supportsBrowser !== false;
   const zh = () => props.lang === "zh-CN";
   const [fileValidation, setFileValidation] = createSignal<{ valid: boolean; error: string } | null>(null);
   const [hasNative, setHasNative] = createSignal(false);
@@ -51,24 +55,26 @@ export default function StepInstallPlan(props: {
               <div class="text-xs text-gray-400">{zh() ? "导入预构建的沙盒镜像文件" : "Import a pre-built sandbox image file"}</div>
             </div>
           </label>
-          <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
-            <input type="radio" name="im" checked={props.installMethod() === "native"} disabled={hasNative()}
-              onChange={() => props.onMethodChange("native")} class="w-4 h-4 shrink-0" />
-            <div>
-              <div class="font-medium text-sm">{zh() ? "本地 - 在线安装" : "Native - Online Install"}</div>
-              <div class="text-xs text-gray-400">{zh() ? "直接安装在本机 — 无需虚拟机" : "Install directly on this machine — no VM"}</div>
-              {hasNative() && <div class="text-xs text-red-400 mt-1">{zh() ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
-            </div>
-          </label>
-          <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
-            <input type="radio" name="im" checked={props.installMethod() === "native-import"} disabled={hasNative()}
-              onChange={() => { props.onMethodChange("native-import"); props.onFilePathChange(""); setFileValidation(null); }} class="w-4 h-4 shrink-0" />
-            <div>
-              <div class="font-medium text-sm">{zh() ? "本地 - 导入 Bundle" : "Native - Import Bundle"}</div>
-              <div class="text-xs text-gray-400">{zh() ? "从导出的离线包导入" : "Import from exported offline bundle"}</div>
-              {hasNative() && <div class="text-xs text-red-400 mt-1">{zh() ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
-            </div>
-          </label>
+          <Show when={supportsNative()}>
+            <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
+              <input type="radio" name="im" checked={props.installMethod() === "native"} disabled={hasNative()}
+                onChange={() => props.onMethodChange("native")} class="w-4 h-4 shrink-0" />
+              <div>
+                <div class="font-medium text-sm">{zh() ? "本地 - 在线安装" : "Native - Online Install"}</div>
+                <div class="text-xs text-gray-400">{zh() ? "直接安装在本机 — 无需虚拟机" : "Install directly on this machine — no VM"}</div>
+                {hasNative() && <div class="text-xs text-red-400 mt-1">{zh() ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
+              </div>
+            </label>
+            <label class={`flex items-center gap-3 p-2.5 rounded border border-dashed border-yellow-700/50 ${hasNative() ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-yellow-600/50"}`}>
+              <input type="radio" name="im" checked={props.installMethod() === "native-import"} disabled={hasNative()}
+                onChange={() => { props.onMethodChange("native-import"); props.onFilePathChange(""); setFileValidation(null); }} class="w-4 h-4 shrink-0" />
+              <div>
+                <div class="font-medium text-sm">{zh() ? "本地 - 导入 Bundle" : "Native - Import Bundle"}</div>
+                <div class="text-xs text-gray-400">{zh() ? "从导出的离线包导入" : "Import from exported offline bundle"}</div>
+                {hasNative() && <div class="text-xs text-red-400 mt-1">{zh() ? "已有本地实例，不能重复安装" : "Native instance already exists"}</div>}
+              </div>
+            </label>
+          </Show>
         </div>
         <Show when={props.installMethod() === "local" || props.installMethod() === "native-import"}>
           <div class="mt-3 flex gap-2">
@@ -110,23 +116,25 @@ export default function StepInstallPlan(props: {
             </div>
           </label>
 
-          {/* Browser Automation — default OFF */}
-          <label class={`flex items-start gap-3 p-2.5 rounded border border-gray-700 bg-gray-800/50 ${props.installMethod() !== "online" ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-gray-500"}`}>
-            <input type="checkbox" checked={props.installBrowser() && props.installMethod() === "online"} disabled={props.installMethod() !== "online"}
-              onChange={e => props.onBrowserChange(e.currentTarget.checked)}
-              class="w-4 h-4 mt-0.5 shrink-0" />
-            <div>
-              <div class="text-sm font-medium">{zh() ? "浏览器自动化（Chromium Headless）" : "Browser Automation (Chromium Headless)"}</div>
-              <div class="text-xs text-gray-400 mt-1">
-                {zh()
-                  ? "用于网页抓取、截图、CDP 自动化和验证码处理"
-                  : "Required for web scraping, screenshots, CDP automation, and CAPTCHA handling."}
+          {/* Browser Automation — default OFF, hidden if claw doesn't support it */}
+          <Show when={supportsBrowser()}>
+            <label class={`flex items-start gap-3 p-2.5 rounded border border-gray-700 bg-gray-800/50 ${props.installMethod() !== "online" ? "opacity-40 cursor-not-allowed" : "cursor-pointer hover:border-gray-500"}`}>
+              <input type="checkbox" checked={props.installBrowser() && props.installMethod() === "online"} disabled={props.installMethod() !== "online"}
+                onChange={e => props.onBrowserChange(e.currentTarget.checked)}
+                class="w-4 h-4 mt-0.5 shrink-0" />
+              <div>
+                <div class="text-sm font-medium">{zh() ? "浏览器自动化（Chromium Headless）" : "Browser Automation (Chromium Headless)"}</div>
+                <div class="text-xs text-gray-400 mt-1">
+                  {zh()
+                    ? "用于网页抓取、截图、CDP 自动化和验证码处理"
+                    : "Required for web scraping, screenshots, CDP automation, and CAPTCHA handling."}
+                </div>
+                <div class="text-xs text-yellow-500 mt-1">
+                  {zh() ? "⚠ 增加约 630MB 空间，可稍后在设置中安装" : "⚠ Adds ~630MB. Can be installed later from Settings."}
+                </div>
               </div>
-              <div class="text-xs text-yellow-500 mt-1">
-                {zh() ? "⚠ 增加约 630MB 空间，可稍后在设置中安装" : "⚠ Adds ~630MB. Can be installed later from Settings."}
-              </div>
-            </div>
-          </label>
+            </label>
+          </Show>
         </div>
       </fieldset>
     </div>

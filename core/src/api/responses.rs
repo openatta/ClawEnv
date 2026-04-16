@@ -89,10 +89,14 @@ pub struct ClawTypeInfo {
     pub id: String,
     pub display_name: String,
     pub logo: String,
+    pub package_manager: String,
     pub npm_package: String,
+    pub pip_package: String,
     pub default_port: u16,
     pub supports_mcp: bool,
     pub supports_browser: bool,
+    pub has_gateway_ui: bool,
+    pub supports_native: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

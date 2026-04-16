@@ -136,25 +136,25 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     }
 
-    let gateway_cmd = desc.gateway_start_cmd(port);
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
+        if instance.sandbox_type == SandboxType::Native {
+            // Native: use ManagedShell::spawn_detached for a truly independent process
+            // with correct PATH (our own node/git, not system)
+            let shell = crate::platform::managed_shell::ManagedShell::new();
+            let log_path = dirs::home_dir().unwrap_or_default()
+                .join(".clawenv").join("native").join("gateway.log");
 
-    if instance.sandbox_type == SandboxType::Native {
-        // Native: use ManagedShell::spawn_detached for a truly independent process
-        // with correct PATH (our own node/git, not system)
-        let shell = crate::platform::managed_shell::ManagedShell::new();
-        let log_path = dirs::home_dir().unwrap_or_default()
-            .join(".clawenv").join("native").join("gateway.log");
+            // Parse gateway_cmd into binary + args: "openclaw gateway --port 3000 --allow-unconfigured"
+            let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
+            let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
 
-        // Parse gateway_cmd into binary + args: "openclaw gateway --port 3000 --allow-unconfigured"
-        let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
-        let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
-
-        shell.spawn_detached(bin, args, &log_path).await?;
-    } else {
-        // Sandbox: nohup inside VM/container
-        backend.exec(&format!(
-            "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
-        )).await?;
+            shell.spawn_detached(bin, args, &log_path).await?;
+        } else {
+            // Sandbox: nohup inside VM/container
+            backend.exec(&format!(
+                "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+            )).await?;
+        }
     }
 
     // Wait for gateway to become responsive (up to 15s)

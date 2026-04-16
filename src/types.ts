@@ -13,10 +13,14 @@ export type ClawType = {
   id: string;
   display_name: string;
   logo: string;
+  package_manager: "npm" | "pip";
   npm_package: string;
+  pip_package: string;
   default_port: number;
   supports_mcp: boolean;
   supports_browser: boolean;
+  has_gateway_ui: boolean;
+  supports_native: boolean;
 };
 
 export type UpgradeInfo = {

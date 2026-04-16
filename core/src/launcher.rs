@@ -47,9 +47,7 @@ async fn check_upgrade_available(instance: &InstanceConfig, npm_registry: &str) 
     if instance.version.is_empty() {
         return Ok(false);
     }
-    let registry = crate::claw::ClawRegistry::load();
-    let desc = registry.get(&instance.claw_type);
-    let info = crate::update::checker::check_latest_version(&instance.version, npm_registry, &desc.npm_package).await?;
+    let info = crate::manager::upgrade::check_upgrade(instance, npm_registry).await?;
     Ok(info.has_upgrade)
 }
 
@@ -61,21 +59,26 @@ pub async fn post_install_start(instance: &InstanceConfig) -> Result<()> {
 
     let registry = crate::claw::ClawRegistry::load();
     let desc = registry.get(&instance.claw_type);
-    let gateway_cmd = desc.gateway_start_cmd(instance.gateway.gateway_port);
-
     let backend = backend_for_instance(instance)?;
     backend.start().await?;
-    backend.exec(&format!("nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &")).await?;
 
-    // Wait for health check (up to 30 seconds)
-    for _ in 0..30 {
-        let health = InstanceMonitor::check_health(backend.as_ref()).await;
-        if health == crate::monitor::InstanceHealth::Running {
-            tracing::info!("{} started successfully for '{}'", desc.display_name, instance.name);
-            return Ok(());
+    if let Some(gateway_cmd) = desc.gateway_start_cmd(instance.gateway.gateway_port) {
+        backend.exec(&format!("nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &")).await?;
+
+        // Wait for health check (up to 30 seconds)
+        for _ in 0..30 {
+            let health = InstanceMonitor::check_health(backend.as_ref()).await;
+            if health == crate::monitor::InstanceHealth::Running {
+                tracing::info!("{} started successfully for '{}'", desc.display_name, instance.name);
+                return Ok(());
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
 
-    anyhow::bail!("{} failed to start within 30 seconds", desc.display_name)
+        anyhow::bail!("{} failed to start within 30 seconds", desc.display_name)
+    } else {
+        // Non-gateway agents (e.g., Hermes): sandbox started, agent runs interactively via ttyd
+        tracing::info!("{} sandbox started for '{}' (no gateway)", desc.display_name, instance.name);
+        Ok(())
+    }
 }
