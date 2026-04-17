@@ -105,8 +105,13 @@ if [ "$CLI_ONLY" = true ]; then
     ls -lh "$BIN"
 else
     echo "--- Building Tauri app ($MODE) ---"
+    # Prefer cargo tauri (doesn't require @tauri-apps/cli in node_modules)
+    if ! command -v cargo-tauri &>/dev/null; then
+        echo "  Installing Tauri CLI..."
+        cargo install tauri-cli --locked 2>&1 | tail -1
+    fi
     if [ "$MODE" = "release" ]; then
-        npx tauri build 2>&1
+        cargo tauri build 2>&1
     else
         # Dev build: just compile, don't package
         cargo build -p clawcli
@@ -114,7 +119,7 @@ else
         npm run build
         cargo build -p clawgui
         echo ""
-        echo "  Dev build complete. Run with: npx tauri dev"
+        echo "  Dev build complete. Run with: cargo tauri dev"
     fi
 fi
 

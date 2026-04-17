@@ -99,15 +99,20 @@ if ($CliOnly) {
     Get-Item $bin | Select-Object Length, LastWriteTime
 } else {
     Write-Host "--- Building Tauri app ($Mode) ---"
+    # Prefer cargo tauri (doesn't require @tauri-apps/cli in node_modules)
+    if (-not (Get-Command "cargo-tauri" -ErrorAction SilentlyContinue)) {
+        Write-Host "  Installing Tauri CLI..."
+        cargo install tauri-cli --locked
+    }
     if ($Mode -eq "release") {
-        npx tauri build
+        cargo tauri build
     } else {
         cargo build -p clawcli
         node scripts\copy-cli-sidecar.cjs debug
         npm run build
         cargo build -p clawgui
         Write-Host ""
-        Write-Host "  Dev build complete. Run with: npx tauri dev"
+        Write-Host "  Dev build complete. Run with: cargo tauri dev"
     }
 }
 
