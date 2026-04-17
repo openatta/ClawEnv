@@ -1,8 +1,18 @@
-use axum::{extract::State, http::StatusCode, routing::{get, post}, Json, Router};
+use axum::{
+    extract::{
+        ws::{Message, WebSocket},
+        State, WebSocketUpgrade,
+    },
+    http::StatusCode,
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{Notify, RwLock};
+use tokio::sync::{broadcast, Notify, RwLock};
 
 use super::permissions::{BridgePermissions, PermissionResult};
 
@@ -20,6 +30,18 @@ pub struct BridgeState {
     pub approval_pending: Option<String>,
     /// Tauri app handle for emitting events to frontend
     pub event_emitter: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    /// Registered hardware devices (in-memory, devices re-register on reconnect)
+    pub hw_devices: Vec<HwDevice>,
+    /// Broadcast channel for pushing notifications to ALL hardware WebSocket connections
+    pub hw_notify_tx: broadcast::Sender<String>,
+    /// Targeted channel: (device_id, payload) for pushing to a specific device
+    pub hw_targeted_tx: broadcast::Sender<(String, String)>,
+    /// Device IDs currently connected via WebSocket (for dedup vs HTTP callback)
+    pub hw_ws_device_ids: HashSet<String>,
+    /// Shared HTTP client for hardware callbacks (reuse connection pool)
+    pub hw_http_client: reqwest::Client,
+    /// Token for hardware API authentication (empty = no auth)
+    pub hw_auth_token: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -27,6 +49,20 @@ pub struct HilRequest {
     pub reason: String,
     #[serde(default)]
     pub url: String,
+}
+
+/// A registered hardware device that can receive notifications.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HwDevice {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub callback_url: String,
+    #[serde(default)]
+    pub capabilities: Vec<String>,
+    pub registered_at: String,
+    /// Last activity timestamp (register or heartbeat), for TTL cleanup.
+    pub last_seen: String,
 }
 
 type SharedState = Arc<RwLock<BridgeState>>;
@@ -424,13 +460,321 @@ async fn exec_pending_handler(State(state): State<SharedState>) -> Json<Approval
     })
 }
 
+// ---------- Hardware device handlers ----------
+
+/// Device registration TTL: devices not seen for 30 minutes are cleaned up.
+const HW_DEVICE_TTL_SECS: i64 = 1800;
+
+/// Generate a collision-resistant device ID: timestamp_ms + 4 random hex digits.
+fn generate_device_id() -> String {
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let rand_part: u16 = (ts as u16).wrapping_mul(0x9E37).wrapping_add(
+        std::process::id() as u16
+    ) ^ (ts >> 16) as u16;
+    format!("hw-{ts:013x}-{rand_part:04x}")
+}
+
+/// Check X-ClawEnv-HW-Token header. Returns Err if token is configured but missing/wrong.
+fn check_hw_auth(state: &BridgeState, headers: &axum::http::HeaderMap) -> Result<(), (StatusCode, Json<ErrorRes>)> {
+    if state.hw_auth_token.is_empty() {
+        return Ok(()); // no auth configured
+    }
+    let provided = headers
+        .get("X-ClawEnv-HW-Token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if provided == state.hw_auth_token {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED, Json(ErrorRes { error: "Invalid or missing X-ClawEnv-HW-Token".into() })))
+    }
+}
+
+/// Remove devices not seen for more than HW_DEVICE_TTL_SECS.
+fn cleanup_stale_devices(devices: &mut Vec<HwDevice>) {
+    let now = chrono::Utc::now();
+    let before = devices.len();
+    devices.retain(|d| {
+        chrono::DateTime::parse_from_rfc3339(&d.last_seen)
+            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_seconds() < HW_DEVICE_TTL_SECS)
+            .unwrap_or(false) // malformed timestamp → remove
+    });
+    let removed = before - devices.len();
+    if removed > 0 {
+        tracing::info!("Cleaned up {removed} stale hardware device(s)");
+    }
+}
+
+#[derive(Deserialize)]
+struct HwRegisterReq {
+    name: String,
+    #[serde(default)]
+    callback_url: String,
+    #[serde(default)]
+    capabilities: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct HwRegisterRes {
+    ok: bool,
+    device_id: String,
+}
+
+#[derive(Deserialize)]
+struct HwUnregisterReq {
+    device_id: String,
+}
+
+#[derive(Deserialize)]
+struct HwNotifyReq {
+    message: String,
+    #[serde(default = "default_notify_level")]
+    level: String,
+    #[serde(default)]
+    device_id: String,
+    #[serde(default)]
+    from_instance: String,
+}
+
+fn default_notify_level() -> String { "info".into() }
+
+#[derive(Serialize)]
+struct HwNotifyRes {
+    ok: bool,
+    ws_delivered: usize,
+    http_callbacks_sent: usize,
+}
+
+#[derive(Serialize)]
+struct HwDeviceListRes {
+    devices: Vec<HwDevice>,
+}
+
+/// POST /api/hw/register — hardware device registers itself
+async fn hw_register_handler(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HwRegisterReq>,
+) -> Result<Json<HwRegisterRes>, (StatusCode, Json<ErrorRes>)> {
+    {
+        let s = state.read().await;
+        check_hw_auth(&s, &headers)?;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let device_id = generate_device_id();
+    let device = HwDevice {
+        id: device_id.clone(),
+        name: req.name,
+        callback_url: req.callback_url,
+        capabilities: req.capabilities,
+        registered_at: now.clone(),
+        last_seen: now,
+    };
+    let mut s = state.write().await;
+    cleanup_stale_devices(&mut s.hw_devices);
+    tracing::info!("Hardware device registered: {} ({})", device.name, device.id);
+    s.hw_devices.push(device);
+    Ok(Json(HwRegisterRes { ok: true, device_id }))
+}
+
+/// POST /api/hw/unregister — hardware device unregisters
+async fn hw_unregister_handler(
+    State(state): State<SharedState>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<HwUnregisterReq>,
+) -> Result<Json<OkRes>, (StatusCode, Json<ErrorRes>)> {
+    {
+        let s = state.read().await;
+        check_hw_auth(&s, &headers)?;
+    }
+    let mut s = state.write().await;
+    let before = s.hw_devices.len();
+    s.hw_devices.retain(|d| d.id != req.device_id);
+    s.hw_ws_device_ids.remove(&req.device_id);
+    let removed = s.hw_devices.len() < before;
+    if removed {
+        tracing::info!("Hardware device unregistered: {}", req.device_id);
+    }
+    Ok(Json(OkRes { ok: removed }))
+}
+
+/// GET /api/hw/devices — list registered hardware devices
+async fn hw_devices_handler(
+    State(state): State<SharedState>,
+) -> Json<HwDeviceListRes> {
+    let s = state.read().await;
+    Json(HwDeviceListRes { devices: s.hw_devices.clone() })
+}
+
+/// POST /api/hw/notify — MCP plugin calls this to push notification to devices.
+/// Broadcasts via WebSocket to connected devices; HTTP callback only for non-WS devices.
+async fn hw_notify_handler(
+    State(state): State<SharedState>,
+    Json(req): Json<HwNotifyReq>,
+) -> Result<Json<HwNotifyRes>, (StatusCode, Json<ErrorRes>)> {
+    let payload = serde_json::json!({
+        "type": "notify",
+        "message": req.message,
+        "level": req.level,
+        "device_id": req.device_id,
+        "from_instance": req.from_instance,
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    }).to_string();
+
+    let s = state.read().await;
+
+    // WS delivery: broadcast to all, or targeted to specific device
+    let target_all = req.device_id.is_empty() || req.device_id == "*";
+    let ws_delivered = if target_all {
+        let count = s.hw_notify_tx.receiver_count();
+        if count > 0 {
+            let _ = s.hw_notify_tx.send(payload.clone());
+        }
+        count
+    } else if s.hw_ws_device_ids.contains(&req.device_id) {
+        let _ = s.hw_targeted_tx.send((req.device_id.clone(), payload.clone()));
+        1
+    } else {
+        0
+    };
+
+    // HTTP callback fallback — only for devices NOT connected via WS (B2 fix)
+    let callback_devices: Vec<HwDevice> = s.hw_devices.iter()
+        .filter(|d| {
+            let id_match = target_all || d.id == req.device_id;
+            let has_url = !d.callback_url.is_empty();
+            let not_on_ws = !s.hw_ws_device_ids.contains(&d.id);
+            id_match && has_url && not_on_ws
+        })
+        .cloned()
+        .collect();
+    let http_client = s.hw_http_client.clone(); // B3 fix: reuse client
+    drop(s);
+
+    let http_callbacks_sent = callback_devices.len();
+    for device in callback_devices {
+        let url = device.callback_url;
+        let body = payload.clone();
+        let client = http_client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = client.post(&url)
+                .header("Content-Type", "application/json")
+                .body(body)
+                .timeout(std::time::Duration::from_secs(5))
+                .send().await
+            {
+                tracing::warn!("HW callback to {} failed: {e}", url);
+            }
+        });
+    }
+
+    Ok(Json(HwNotifyRes { ok: true, ws_delivered, http_callbacks_sent }))
+}
+
+/// GET /ws/hw?device_id=xxx — WebSocket upgrade for hardware device long connections.
+/// Query param `device_id` associates this connection with a registered device (I4).
+async fn hw_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<SharedState>,
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ErrorRes>)> {
+    // Auth check via query param (WS can't easily set custom headers)
+    {
+        let s = state.read().await;
+        if !s.hw_auth_token.is_empty() {
+            let token = params.get("token").map(|s| s.as_str()).unwrap_or("");
+            if token != s.hw_auth_token {
+                return Err((StatusCode::UNAUTHORIZED, Json(ErrorRes {
+                    error: "Invalid or missing token query parameter".into(),
+                })));
+            }
+        }
+    }
+    let device_id = params.get("device_id").cloned().unwrap_or_default();
+    Ok(ws.on_upgrade(move |socket| hw_ws_connection(socket, state, device_id)))
+}
+
+async fn hw_ws_connection(mut socket: WebSocket, state: SharedState, device_id: String) {
+    let (mut rx, mut targeted_rx) = {
+        let mut s = state.write().await;
+        if !device_id.is_empty() {
+            s.hw_ws_device_ids.insert(device_id.clone());
+            // Touch last_seen on WS connect
+            if let Some(dev) = s.hw_devices.iter_mut().find(|d| d.id == device_id) {
+                dev.last_seen = chrono::Utc::now().to_rfc3339();
+            }
+        }
+        (s.hw_notify_tx.subscribe(), s.hw_targeted_tx.subscribe())
+    };
+    tracing::info!("Hardware WS client connected (device_id={device_id:?})");
+
+    loop {
+        tokio::select! {
+            // Forward broadcast notifications
+            msg = rx.recv() => {
+                match msg {
+                    Ok(text) => {
+                        if socket.send(Message::Text(text.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!("HW WS client lagged, skipped {n} messages");
+                    }
+                    Err(_) => break,
+                }
+            }
+            // Forward targeted notifications (matched by device_id)
+            msg = targeted_rx.recv() => {
+                match msg {
+                    Ok((target_id, text)) => {
+                        if target_id == device_id {
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(_)) => {}
+                    Err(_) => break,
+                }
+            }
+            // Handle incoming messages from hw client
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Ping(data))) => {
+                        if socket.send(Message::Pong(data)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Cleanup on disconnect
+    if !device_id.is_empty() {
+        let mut s = state.write().await;
+        s.hw_ws_device_ids.remove(&device_id);
+    }
+    tracing::info!("Hardware WS client disconnected (device_id={device_id:?})");
+}
+
 // ---------- Server entry point ----------
 
 pub async fn start_bridge(
     port: u16,
     permissions: BridgePermissions,
     event_emitter: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    hw_auth_token: String,
 ) -> anyhow::Result<()> {
+    let (hw_notify_tx, _) = broadcast::channel::<String>(64);
+    let (hw_targeted_tx, _) = broadcast::channel::<(String, String)>(64);
+
     let state: SharedState = Arc::new(RwLock::new(BridgeState {
         permissions,
         hil_complete: Arc::new(Notify::new()),
@@ -439,6 +783,12 @@ pub async fn start_bridge(
         approval_decision: None,
         approval_pending: None,
         event_emitter,
+        hw_devices: Vec::new(),
+        hw_notify_tx,
+        hw_targeted_tx,
+        hw_ws_device_ids: HashSet::new(),
+        hw_http_client: reqwest::Client::new(),
+        hw_auth_token,
     }));
 
     let app = Router::new()
@@ -454,6 +804,12 @@ pub async fn start_bridge(
         .route("/api/hil/request", post(hil_request_handler))
         .route("/api/hil/status", get(hil_status_handler))
         .route("/api/hil/complete", post(hil_complete_handler))
+        // Hardware device endpoints
+        .route("/api/hw/register", post(hw_register_handler))
+        .route("/api/hw/unregister", post(hw_unregister_handler))
+        .route("/api/hw/devices", get(hw_devices_handler))
+        .route("/api/hw/notify", post(hw_notify_handler))
+        .route("/ws/hw", get(hw_ws_handler))
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;

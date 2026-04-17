@@ -205,7 +205,7 @@ fn test_claw_types_includes_hermes() {
     let h = hermes.unwrap();
     assert_eq!(h["package_manager"], "git_pip");
     assert_eq!(h["pip_package"], "hermes-agent");
-    assert_eq!(h["has_gateway_ui"], false);
+    assert_eq!(h["has_gateway_ui"], true);
     assert_eq!(h["supports_native"], false);
     assert_eq!(h["supports_mcp"], true);
 }

@@ -95,11 +95,11 @@ mod descriptor_tests {
     }
 
     #[test]
-    fn hermes_no_gateway() {
+    fn hermes_has_gateway() {
         let registry = crate::claw::ClawRegistry::load();
         let d = registry.get("hermes");
-        assert!(d.gateway_start_cmd(3000).is_none(), "hermes should have no gateway");
-        assert!(!d.has_gateway_ui);
+        assert!(d.gateway_start_cmd(3000).is_some(), "hermes should have gateway (API Server)");
+        assert!(d.has_gateway_ui);
     }
 
     #[test]

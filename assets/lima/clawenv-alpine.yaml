@@ -48,3 +48,6 @@ provision:
     apk update
     apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3 procps
     ssh-keygen -A
+    # Allow clawenv user to npm install -g without sudo
+    mkdir -p /usr/local/lib/node_modules /usr/local/bin
+    chown -R clawenv:clawenv /usr/local/lib/node_modules /usr/local/bin

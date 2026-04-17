@@ -60,10 +60,12 @@ fn main() {
                         let emitter: Box<dyn Fn(&str, &str) + Send + Sync> = Box::new(move |event, payload| {
                             let _ = bh.emit(event, payload.to_string());
                         });
+                        let hw_token = std::env::var("CLAWENV_HW_TOKEN").unwrap_or_default();
                         if let Err(e) = clawenv_core::bridge::server::start_bridge(
                             bridge_cfg.port,
                             bridge_cfg.permissions.clone(),
                             Some(emitter),
+                            hw_token,
                         ).await {
                             tracing::error!("Bridge server failed: {e}");
                         }

@@ -53,6 +53,10 @@ mcp_runtime = "node"
 
 # Hermes Agent — self-improving AI agent by Nous Research
 # Python-based, git clone + uv install, sandbox-only (no native install)
+# Hermes has an OpenAI-compatible API Server (FastAPI/Uvicorn) via `hermes gateway`.
+# Requires API_SERVER_ENABLED=true in ~/.hermes/.env (configured by ClawEnv at install).
+# Known issue: [web] extra has uv.lock bug (NousResearch/hermes-agent#9569),
+# fastapi/uvicorn installed explicitly as workaround.
 [[claw]]
 id = "hermes"
 display_name = "Hermes Agent"
@@ -65,13 +69,13 @@ pip_extras = "termux,messaging,web"
 pip_package = "hermes-agent"
 sandbox_provision = ["py3-pip", "py3-uv", "nodejs", "npm"]
 cli_binary = "hermes"
-gateway_cmd = ""
+gateway_cmd = "gateway --port {port}"
 version_cmd = "--version"
 config_apikey_cmd = "config set api_key '{key}'"
 mcp_set_cmd = "mcp add {name} --config '{json}'"
 default_port = 3000
 supports_mcp = true
 supports_browser = false
-has_gateway_ui = false
+has_gateway_ui = true
 supports_native = false
 mcp_runtime = "python"

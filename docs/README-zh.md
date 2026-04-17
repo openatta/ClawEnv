@@ -61,3 +61,5 @@ GUI (SolidJS + Tauri) ──IPC──► clawcli --json <命令>
 - [技术栈](03-tech-stack.md)
 - [沙盒实现](04-sandbox.md)
 - [打包与发布](05-packaging.md)
+- [智能硬件对接](16-hardware-integration.md)
+- [构建指南](17-build-guide.md)

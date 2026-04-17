@@ -207,10 +207,12 @@ impl SandboxBackend for LimaBackend {
             );
         }
 
-        // Add to PATH hint
+        // Add to current process PATH so subsequent limactl calls work immediately
         let bin_path = format!("{install_dir}/bin");
-        if !std::env::var("PATH").unwrap_or_default().contains(&bin_path) {
-            tracing::info!("Lima installed to {bin_path}. Add to PATH: export PATH=\"{bin_path}:$PATH\"");
+        let current_path = std::env::var("PATH").unwrap_or_default();
+        if !current_path.contains(&bin_path) {
+            std::env::set_var("PATH", format!("{bin_path}:{current_path}"));
+            tracing::info!("Lima installed to {bin_path}, added to PATH");
         }
 
         Ok(())

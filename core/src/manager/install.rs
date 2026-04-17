@@ -367,26 +367,51 @@ pub async fn install(
         SandboxType::Native => "127.0.0.1".into(),
     };
 
-    // MCP plugins (Bridge + HIL skill)
+    // Hermes API Server: configure .env + install fastapi/uvicorn workaround
+    if desc.uses_python_mcp() && !desc.gateway_cmd.is_empty() {
+        send(&tx, "Configuring Hermes API Server...", 76, InstallStage::StartOpenClaw).await;
+        // Enable API Server in ~/.hermes/.env (idempotent: check before appending)
+        backend.exec(&format!(
+            "mkdir -p ~/.{id}; grep -q 'API_SERVER_ENABLED' ~/.{id}/.env 2>/dev/null || printf 'API_SERVER_ENABLED=true\\nAPI_SERVER_KEY=clawenv-local\\n' >> ~/.{id}/.env",
+            id = desc.id
+        )).await?;
+        // Workaround: [web] extra uv.lock bug (NousResearch/hermes-agent#9569)
+        backend.exec("pip install --break-system-packages fastapi \"uvicorn[standard]\" 2>/dev/null || true").await?;
+    }
+
+    // MCP plugins (Bridge + HIL skill + HW Notify)
     if opts.install_mcp_bridge && desc.supports_mcp {
-        send(&tx, "Installing plugins (MCP Bridge + HIL Skill)...", 78, InstallStage::StartOpenClaw).await;
+        send(&tx, "Installing plugins (MCP Bridge + HIL Skill + HW Notify)...", 78, InstallStage::StartOpenClaw).await;
         let bridge_url = format!("http://{host_ip}:{}", allocate_port(opts.gateway_port, 2));
 
         let use_python = desc.uses_python_mcp();
+        let mcp_runner = if use_python { "python3" } else { "node" };
 
+        // Plugin definitions: (dir_name, reg_name, file_name, content)
+        let plugins: Vec<(&str, &str, &str, &str)> = if use_python {
+            vec![
+                ("mcp-bridge", "clawenv",     "bridge.py", include_str!("../../../assets/mcp/mcp-bridge.py")),
+                ("hil-skill",  "clawenv-hil", "skill.py",  include_str!("../../../assets/mcp/hil-skill.py")),
+                ("hw-notify",  "hw-notify",   "notify.py", include_str!("../../../assets/mcp/hw-notify.py")),
+            ]
+        } else {
+            vec![
+                ("mcp-bridge", "clawenv",     "index.mjs", include_str!("../../../assets/mcp/mcp-bridge.mjs")),
+                ("hil-skill",  "clawenv-hil", "index.mjs", include_str!("../../../assets/mcp/hil-skill.mjs")),
+                ("hw-notify",  "hw-notify",   "index.mjs", include_str!("../../../assets/mcp/hw-notify.mjs")),
+            ]
+        };
+
+        // Deploy all plugin scripts into sandbox
+        for (dir_name, _, file_name, content) in &plugins {
+            let dir = format!("/workspace/{dir_name}");
+            backend.exec(&format!("mkdir -p {dir}")).await?;
+            let eof_marker = format!("EOF_{}", dir_name.to_uppercase().replace('-', "_"));
+            backend.exec(&format!("cat > {dir}/{file_name} << '{eof_marker}'\n{content}\n{eof_marker}")).await?;
+        }
+
+        // Python runtime: install MCP SDK
         if use_python {
-            // Python runtime: deploy .py bridge scripts
-            let mcp_py = include_str!("../../../assets/mcp/mcp-bridge.py");
-            let mcp_dir = "/workspace/mcp-bridge";
-            backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
-            backend.exec(&format!("cat > {mcp_dir}/bridge.py << 'MCPEOF'\n{mcp_py}\nMCPEOF")).await?;
-
-            let hil_py = include_str!("../../../assets/mcp/hil-skill.py");
-            let hil_dir = "/workspace/hil-skill";
-            backend.exec(&format!("mkdir -p {hil_dir}")).await?;
-            backend.exec(&format!("cat > {hil_dir}/skill.py << 'HILEOF'\n{hil_py}\nHILEOF")).await?;
-
-            // Install Python MCP SDK (mcp + httpx)
             let pip_result = backend.exec("pip install --break-system-packages mcp httpx 2>&1").await;
             match &pip_result {
                 Ok(output) if output.contains("ERROR") || output.contains("error:") => {
@@ -397,28 +422,9 @@ pub async fn install(
                 }
                 _ => {}
             }
-        } else {
-            // Node.js runtime: deploy .mjs bridge scripts
-            let mcp_js = include_str!("../../../assets/mcp/mcp-bridge.mjs");
-            let mcp_dir = "/workspace/mcp-bridge";
-            backend.exec(&format!("mkdir -p {mcp_dir}")).await?;
-            backend.exec(&format!("cat > {mcp_dir}/index.mjs << 'MCPEOF'\n{mcp_js}\nMCPEOF")).await?;
-
-            let hil_js = include_str!("../../../assets/mcp/hil-skill.mjs");
-            let hil_dir = "/workspace/hil-skill";
-            backend.exec(&format!("mkdir -p {hil_dir}")).await?;
-            backend.exec(&format!("cat > {hil_dir}/index.mjs << 'HILEOF'\n{hil_js}\nHILEOF")).await?;
         }
 
-        // Build registration commands based on runtime
-        let (mcp_dir, hil_dir) = ("/workspace/mcp-bridge", "/workspace/hil-skill");
-        let (mcp_runner, mcp_entry, hil_entry) = if use_python {
-            ("python3", format!("{mcp_dir}/bridge.py"), format!("{hil_dir}/skill.py"))
-        } else {
-            ("node", format!("{mcp_dir}/index.mjs"), format!("{hil_dir}/index.mjs"))
-        };
-
-        // Read gateway token for registration (Node.js config format)
+        // Read gateway token for registration
         let token = if !use_python {
             let t = backend.exec(
                 &format!(r#"node -e "try {{ const j = JSON.parse(require('fs').readFileSync(require('path').join(process.env.HOME||'~','.{id}','{id}.json'),'utf8')); process.stdout.write((j.gateway&&j.gateway.auth&&j.gateway.auth.token)||j.token||'') }} catch {{}}"#,
@@ -426,7 +432,6 @@ pub async fn install(
             ).await.unwrap_or_default();
             t.trim().to_string()
         } else {
-            // Hermes / Python agents: try reading token from config
             let t = backend.exec(
                 &format!(r#"python3 -c "
 import json, os, pathlib
@@ -439,39 +444,24 @@ if p.exists():
             t.trim().to_string()
         };
 
-        if !token.is_empty() {
-            let env_prefix = format!(
-                "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token}",
+        // Register all plugins in one loop
+        let env_prefix = if !token.is_empty() {
+            format!(
+                "{id_upper}_GATEWAY_URL=ws://127.0.0.1:{p} {id_upper}_GATEWAY_TOKEN={token} ",
                 id_upper = desc.id.to_uppercase(),
                 p = opts.gateway_port,
-            );
-            // Register MCP Bridge
-            if let Some(mcp_cmd) = desc.mcp_register_cmd(
-                "clawenv",
-                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{mcp_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
-            ) {
-                backend.exec(&format!("{env_prefix} {mcp_cmd} 2>/dev/null || true")).await?;
-            }
-            // Register HIL Skill
-            if let Some(hil_cmd) = desc.mcp_register_cmd(
-                "clawenv-hil",
-                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{hil_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
-            ) {
-                backend.exec(&format!("{env_prefix} {hil_cmd} 2>/dev/null || true")).await?;
-            }
+            )
         } else {
-            // No token yet — register without env prefix (agent may not need gateway auth)
-            if let Some(mcp_cmd) = desc.mcp_register_cmd(
-                "clawenv",
-                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{mcp_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
+            String::new()
+        };
+
+        for (dir_name, reg_name, file_name, _) in &plugins {
+            let entry = format!("/workspace/{dir_name}/{file_name}");
+            if let Some(cmd) = desc.mcp_register_cmd(
+                reg_name,
+                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
             ) {
-                backend.exec(&format!("{mcp_cmd} 2>/dev/null || true")).await?;
-            }
-            if let Some(hil_cmd) = desc.mcp_register_cmd(
-                "clawenv-hil",
-                &format!("{{\"command\":\"{mcp_runner}\",\"args\":[\"{hil_entry}\",\"--bridge-url\",\"{bridge_url}\"]}}")
-            ) {
-                backend.exec(&format!("{hil_cmd} 2>/dev/null || true")).await?;
+                backend.exec(&format!("{env_prefix}{cmd} 2>/dev/null || true")).await?;
             }
         }
     }

@@ -307,7 +307,59 @@ pub async fn install_native(
         }
     }
 
-    // Step 4: Start gateway
+    // Step 4: Deploy MCP plugins (native mode — same plugins as sandbox)
+    if desc.supports_mcp {
+        send(tx, "Installing MCP plugins...", 75, InstallStage::StartOpenClaw).await;
+        let mcp_base = install_dir.join("mcp");
+        let bridge_url = format!("http://127.0.0.1:{}", crate::manager::install::allocate_port(opts.gateway_port, 2));
+        let use_python = desc.uses_python_mcp();
+
+        // Deploy scripts based on agent runtime (Node.js or Python)
+        let plugins: Vec<(&str, &str, &str)> = if use_python {
+            vec![
+                ("mcp-bridge", "bridge.py", include_str!("../../../../assets/mcp/mcp-bridge.py")),
+                ("hil-skill", "skill.py", include_str!("../../../../assets/mcp/hil-skill.py")),
+                ("hw-notify", "notify.py", include_str!("../../../../assets/mcp/hw-notify.py")),
+            ]
+        } else {
+            vec![
+                ("mcp-bridge", "index.mjs", include_str!("../../../../assets/mcp/mcp-bridge.mjs")),
+                ("hil-skill", "index.mjs", include_str!("../../../../assets/mcp/hil-skill.mjs")),
+                ("hw-notify", "index.mjs", include_str!("../../../../assets/mcp/hw-notify.mjs")),
+            ]
+        };
+
+        for (dir_name, file_name, content) in &plugins {
+            let dir = mcp_base.join(dir_name);
+            tokio::fs::create_dir_all(&dir).await?;
+            tokio::fs::write(dir.join(file_name), content).await?;
+        }
+
+        // Register all MCP plugins with the agent
+        let runner = if use_python { "python3" } else { "node" };
+        let plugin_entries: Vec<(&str, std::path::PathBuf)> = plugins.iter()
+            .map(|(dir_name, file_name, _)| {
+                let reg_name = match *dir_name {
+                    "mcp-bridge" => "clawenv",
+                    "hil-skill" => "clawenv-hil",
+                    _ => *dir_name,
+                };
+                (reg_name, mcp_base.join(dir_name).join(file_name))
+            })
+            .collect();
+
+        for (name, entry) in &plugin_entries {
+            if let Some(cmd) = desc.mcp_register_cmd(
+                name,
+                &format!("{{\"command\":\"{runner}\",\"args\":[\"{}\",\"--bridge-url\",\"{bridge_url}\"]}}", entry.display()),
+            ) {
+                backend.exec(&format!("{cmd} 2>/dev/null || true")).await.ok();
+            }
+        }
+        tracing::info!("MCP plugins ({runner}) deployed to {}", mcp_base.display());
+    }
+
+    // Step 5: Start gateway
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
     let port = opts.gateway_port;
     if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {

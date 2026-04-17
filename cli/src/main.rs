@@ -1119,7 +1119,9 @@ async fn run_install_step(
                     let ver = backend.exec(&desc.version_check_cmd()).await.unwrap_or_default();
                     out.emit(CliEvent::Complete { message: format!("{} {} already installed", desc.display_name, ver.trim()) });
                 } else {
-                    let cmd = desc.npm_install_verbose_cmd(version);
+                    let raw_cmd = desc.npm_install_verbose_cmd(version);
+                    // Sandbox: wrap with sudo (non-root user may lack /usr/local/lib write permission)
+                    let cmd = format!("sudo {raw_cmd}");
                     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
                     let out_clone = out.clone();
                     let _dn = desc.display_name.clone();
