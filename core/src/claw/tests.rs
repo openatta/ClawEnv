@@ -98,8 +98,15 @@ mod descriptor_tests {
     fn hermes_has_gateway() {
         let registry = crate::claw::ClawRegistry::load();
         let d = registry.get("hermes");
-        assert!(d.gateway_start_cmd(3000).is_some(), "hermes should have gateway (API Server)");
-        assert!(d.has_gateway_ui);
+        // Plan B (v0.2.7+): Hermes splits UI from API. `gateway_cmd` is now
+        // empty (the gateway concept maps to messaging, which is opt-in
+        // user-configured and must not auto-start), and the web UI lives
+        // in a separate `dashboard` process. The rename: "has gateway UI"
+        // now means "has a UI somewhere" — gateway or dashboard.
+        assert!(d.has_dashboard(), "hermes should ship a standalone dashboard process");
+        assert!(d.dashboard_start_cmd(3005).is_some(), "dashboard_start_cmd must render");
+        assert!(d.dashboard_port_offset > 0, "dashboard needs its own port slot");
+        assert!(d.has_gateway_ui, "Hermes still has a UI, just via a different daemon");
     }
 
     #[test]
@@ -313,6 +320,8 @@ mod registry_tests {
             sandbox_provision: vec![],
             cli_binary: "testclaw".into(),
             gateway_cmd: "serve --port {port}".into(),
+            dashboard_cmd: String::new(),
+            dashboard_port_offset: 0,
             version_cmd: "--version".into(),
             config_apikey_cmd: String::new(),
             mcp_set_cmd: String::new(),

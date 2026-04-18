@@ -57,7 +57,14 @@ pub async fn has_git() -> bool {
 /// Pinned dugite-native Git release metadata, loaded from the bundled TOML.
 /// Version bumps happen by editing `assets/git/git-release.toml` — no code
 /// change required.
-#[allow(dead_code)] // some per-platform sha256 fields are only read under matching #[cfg]
+///
+/// Only used on macOS/Linux: Windows ships MinGit through a separate
+/// hard-coded URL (see the `#[cfg(target_os = "windows")]` branch of
+/// `install_git`). Gating the struct + impl here keeps the Windows build
+/// under `-D warnings` without a blanket `#[allow(dead_code)]` that
+/// would also hide accidental deadness on macOS/Linux.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(dead_code)] // per-platform sha256 fields are only read under the matching #[cfg]
 struct GitRelease {
     tag: String,                  // dugite release tag, e.g. "2.53.0-3" — URL path
     upstream_version: String,     // upstream git version, e.g. "2.53.0" — filename
@@ -69,6 +76,7 @@ struct GitRelease {
     sha256_linux_x86_64: String,
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 impl GitRelease {
     fn load() -> Result<Self> {
         let src = include_str!("../../../../assets/git/git-release.toml");
@@ -110,11 +118,11 @@ impl GitRelease {
         let arch = std::env::consts::ARCH;
         #[cfg(target_os = "macos")]
         {
-            return match arch {
+            match arch {
                 "aarch64" => Ok(("macOS-arm64", self.sha256_macos_arm64.as_str())),
                 "x86_64"  => Ok(("macOS-x64",   self.sha256_macos_x86_64.as_str())),
                 other => anyhow::bail!("Unsupported macOS architecture: {other}"),
-            };
+            }
         }
         #[cfg(target_os = "linux")]
         {
@@ -145,50 +153,6 @@ impl GitRelease {
                 .replace("{filename}",         &filename);
             (u, filename.clone())
         }).collect()
-    }
-}
-
-#[cfg(test)]
-mod git_release_tests {
-    use super::GitRelease;
-
-    // Regression guard: dugite-native's release tag (e.g. "2.53.0-3") carries
-    // a build-counter suffix that is NOT present in asset filenames ("2.53.0").
-    // Conflating the two produces URLs like /download/v2.53.0-3/dugite-...-
-    // v2.53.0-3-f49d009-macOS-arm64.tar.gz which 404 on the server.
-    #[test]
-    fn release_toml_renders_dugite_url_correctly() {
-        let release = GitRelease::load().expect("git-release.toml must parse");
-        assert!(!release.tag.is_empty(), "tag must not be empty");
-        assert!(!release.upstream_version.is_empty(), "upstream_version must not be empty");
-        assert!(!release.commit.is_empty(), "commit must not be empty");
-        assert_eq!(release.sha256_macos_arm64.len(), 64);
-
-        let urls = release.render_urls("macOS-arm64");
-        assert!(!urls.is_empty(), "urls array must have at least one entry");
-        let (url, filename) = &urls[0];
-
-        // Path must carry the full release tag…
-        assert!(
-            url.contains(&format!("/download/v{}/", release.tag)),
-            "URL path should use release tag 'v{}' but got: {url}",
-            release.tag
-        );
-        // …while the asset filename uses only the upstream git version.
-        assert!(
-            filename.contains(&format!("v{}-", release.upstream_version)),
-            "filename should use upstream_version 'v{}' but got: {filename}",
-            release.upstream_version
-        );
-        // And must NOT embed the tag's build-counter suffix inside the filename,
-        // which was the exact regression that produced 404s.
-        assert!(
-            !filename.contains(&release.tag) || release.tag == release.upstream_version,
-            "filename must not contain the full dugite tag '{}' — that was the 404 bug. \
-             Got: {filename}",
-            release.tag
-        );
-        assert!(filename.ends_with("-macOS-arm64.tar.gz"));
     }
 }
 
@@ -547,12 +511,18 @@ pub async fn install_native(
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
     let port = opts.gateway_port;
     if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
-        // Instance name is validated (alphanumeric + dash + underscore), safe for paths.
-        let name_esc = opts.instance_name.replace('\'', "'\\''");
+        // Instance name is validated (alphanumeric + dash + underscore),
+        // safe for paths. Unix wants single-quote escaping for the log
+        // path literal; Windows uses a different invocation that doesn't
+        // interpolate instance_name — compute each inside the cfg that
+        // actually uses it.
         #[cfg(not(target_os = "windows"))]
-        backend.exec(&format!(
-            "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
-        )).await?;
+        {
+            let name_esc = opts.instance_name.replace('\'', "'\\''");
+            backend.exec(&format!(
+                "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
+            )).await?;
+        }
         #[cfg(target_os = "windows")]
         {
             let full_cmd = gateway_cmd.replace('\'', "''");
@@ -579,6 +549,12 @@ pub async fn install_native(
             gateway_port: opts.gateway_port,
             ttyd_port: 0,
             bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2),
+            // Native Hermes isn't supported yet (supports_native=false in
+            // registry), so in practice this branch only ever runs for
+            // OpenClaw — but we still honor has_dashboard() for future claws.
+            dashboard_port: if desc.has_dashboard() {
+                crate::manager::install::allocate_port(opts.gateway_port, desc.dashboard_port_offset)
+            } else { 0 },
             webchat_enabled: true,
             channels: Default::default(),
         },
@@ -605,9 +581,46 @@ async fn install_from_bundle(
         anyhow::bail!("Bundle file not found: {}", bundle_path.display());
     }
 
+    // Validate the manifest BEFORE extracting. v0.2.6+ bundles carry a
+    // `clawenv-bundle.toml` at archive root — we insist on it being present
+    // and identifying a native-produced bundle so we never untar, say, a
+    // Lima or WSL bundle into ~/.clawenv/ and end up with mixed state. The
+    // old string-search over `manifest.toml` was both too loose (matched
+    // partial words) and too late (ran after extract).
+    let manifest = crate::export::BundleManifest::peek_from_tarball(bundle_path).await
+        .map_err(|e| anyhow::anyhow!(
+            "Cannot import native bundle from {}: {e}\n\nBundles produced by \
+             pre-v0.2.6 clawenv are no longer supported — re-export from the \
+             source with a current clawenv build.",
+            bundle_path.display()
+        ))?;
+    if manifest.sandbox_type != crate::sandbox::SandboxType::Native.as_wire_str() {
+        anyhow::bail!(
+            "Bundle {} declares sandbox_type '{}' but this machine uses a native install. \
+             Don't cross-import sandbox bundles into a native setup.",
+            bundle_path.display(), manifest.sandbox_type
+        );
+    }
+    // Matching claw_type isn't strictly required (the user might be
+    // reinstalling a different claw over this native install), but mixing
+    // typically leads to broken gateway startup — warn rather than block.
+    if manifest.claw_type != opts.claw_type {
+        tracing::warn!(
+            "Bundle is for claw_type '{}' but install options request '{}'; \
+             proceeding but the installed gateway may not match expectations.",
+            manifest.claw_type, opts.claw_type
+        );
+    }
+
     send(tx, "Extracting native bundle...", 10, InstallStage::EnsurePrerequisites).await;
 
-    let dest = install_dir.to_string_lossy().to_string();
+    // The bundle layout produced by v0.2.6+ has node/git/native at archive
+    // root alongside the manifest. install_dir is ~/.clawenv/native, but
+    // node/ and git/ live one level up at ~/.clawenv/{node,git}. So we
+    // extract into ~/.clawenv (install_dir.parent()), not install_dir
+    // itself — otherwise node/git land nested and nothing finds them.
+    let extract_root = install_dir.parent().unwrap_or(install_dir);
+    let dest = extract_root.to_string_lossy().to_string();
     let src = bundle_path.to_string_lossy().to_string();
 
     // Platform-specific extraction
@@ -629,22 +642,14 @@ async fn install_from_bundle(
             anyhow::bail!("Failed to extract bundle. Ensure Windows 10+ with built-in tar.");
         }
     }
+    // The manifest copy that got extracted along with the payload is
+    // redundant on disk — strip it so ~/.clawenv doesn't accumulate stale
+    // sidecar files across multiple imports.
+    let _ = tokio::fs::remove_file(
+        extract_root.join(crate::export::manifest::MANIFEST_FILENAME)
+    ).await;
 
     send(tx, "Bundle extracted", 30, InstallStage::EnsurePrerequisites).await;
-
-    // Validate manifest
-    let manifest_path = install_dir.join("manifest.toml");
-    if manifest_path.exists() {
-        let manifest_str = tokio::fs::read_to_string(&manifest_path).await.unwrap_or_default();
-        let expected_platform = std::env::consts::OS;
-        let expected_arch = match std::env::consts::ARCH { "x86_64" => "x64", "aarch64" => "arm64", other => other };
-        let ok = manifest_str.lines().any(|l| l.contains(expected_platform))
-            && manifest_str.lines().any(|l| l.contains(expected_arch));
-        if !ok {
-            anyhow::bail!("Bundle platform mismatch: expected {}-{}", expected_platform, expected_arch);
-        }
-    }
-
     send(tx, "Bundle validated", 40, InstallStage::EnsurePrerequisites).await;
 
     // Setup PATH
@@ -705,7 +710,16 @@ async fn install_from_bundle(
         sandbox_id: "native".into(),
         created_at: chrono::Utc::now().to_rfc3339(),
         last_upgraded_at: String::new(),
-        gateway: GatewayConfig { gateway_port: opts.gateway_port, ttyd_port: 0, bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2), webchat_enabled: true, channels: Default::default() },
+        gateway: GatewayConfig {
+            gateway_port: opts.gateway_port,
+            ttyd_port: 0,
+            bridge_port: crate::manager::install::allocate_port(opts.gateway_port, 2),
+            dashboard_port: if desc.has_dashboard() {
+                crate::manager::install::allocate_port(opts.gateway_port, desc.dashboard_port_offset)
+            } else { 0 },
+            webchat_enabled: true,
+            channels: Default::default(),
+        },
         resources: ResourceConfig::default(),
         browser: Default::default(),
         cached_latest_version: String::new(),
@@ -714,4 +728,51 @@ async fn install_from_bundle(
 
     send(tx, "Installation complete! (from bundle)", 100, InstallStage::Complete).await;
     Ok(())
+}
+
+// The test module references `GitRelease` which is cfg-gated to
+// macos/linux. Gate the tests the same way so the Windows build doesn't
+// drag in a non-existent symbol.
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod git_release_tests {
+    use super::GitRelease;
+
+    // Regression guard: dugite-native's release tag (e.g. "2.53.0-3") carries
+    // a build-counter suffix that is NOT present in asset filenames ("2.53.0").
+    // Conflating the two produces URLs like /download/v2.53.0-3/dugite-...-
+    // v2.53.0-3-f49d009-macOS-arm64.tar.gz which 404 on the server.
+    #[test]
+    fn release_toml_renders_dugite_url_correctly() {
+        let release = GitRelease::load().expect("git-release.toml must parse");
+        assert!(!release.tag.is_empty(), "tag must not be empty");
+        assert!(!release.upstream_version.is_empty(), "upstream_version must not be empty");
+        assert!(!release.commit.is_empty(), "commit must not be empty");
+        assert_eq!(release.sha256_macos_arm64.len(), 64);
+
+        let urls = release.render_urls("macOS-arm64");
+        assert!(!urls.is_empty(), "urls array must have at least one entry");
+        let (url, filename) = &urls[0];
+
+        // Path must carry the full release tag…
+        assert!(
+            url.contains(&format!("/download/v{}/", release.tag)),
+            "URL path should use release tag 'v{}' but got: {url}",
+            release.tag
+        );
+        // …while the asset filename uses only the upstream git version.
+        assert!(
+            filename.contains(&format!("v{}-", release.upstream_version)),
+            "filename should use upstream_version 'v{}' but got: {filename}",
+            release.upstream_version
+        );
+        // And must NOT embed the tag's build-counter suffix inside the filename,
+        // which was the exact regression that produced 404s.
+        assert!(
+            !filename.contains(&release.tag) || release.tag == release.upstream_version,
+            "filename must not contain the full dugite tag '{}' — that was the 404 bug. \
+             Got: {filename}",
+            release.tag
+        );
+        assert!(filename.ends_with("-macOS-arm64.tar.gz"));
+    }
 }

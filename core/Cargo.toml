@@ -1,6 +1,6 @@
 [package]
 name = "clawenv-core"
-version = "0.1.0"
+version = "0.2.7"
 edition = "2021"
 
 [dependencies]
@@ -26,3 +26,4 @@ tower         = "0.5"
 
 [dev-dependencies]
 mockall       = "0.13"
+tempfile      = "3"

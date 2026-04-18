@@ -19,10 +19,11 @@ pub struct NativeBackend {
 impl NativeBackend {
     pub fn new(_dir_hint: &str) -> Self {
         let shell = ManagedShell::new();
-        let install_dir = shell.inst_bin_dir().parent()
-            .unwrap_or(&shell.inst_bin_dir())
-            .to_path_buf();
-        // On Windows inst_bin_dir() == install_dir, on Unix inst_bin_dir() == install_dir/bin
+        // Native install lives at a fixed ~/.clawenv/native path — there's
+        // only ever one native install per machine by design (the native
+        // backend doesn't scope by instance name the way Lima/WSL/Podman
+        // do). An earlier version derived install_dir from inst_bin_dir()
+        // first, but that output was always overwritten — dead code.
         let install_dir = dirs::home_dir()
             .unwrap_or_else(|| PathBuf::from("."))
             .join(".clawenv").join("native");
@@ -125,8 +126,7 @@ impl SandboxBackend for NativeBackend {
             let mut reader = BufReader::new(out).lines();
             let stderr_tx = tx.clone();
             let stderr_buf_c = stderr_buf.clone();
-            let stderr_task = if let Some(err) = stderr {
-                Some(tokio::spawn(async move {
+            let stderr_task = stderr.map(|err| tokio::spawn(async move {
                     let mut reader = BufReader::new(err).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
                         {
@@ -136,8 +136,7 @@ impl SandboxBackend for NativeBackend {
                         }
                         let _ = stderr_tx.send(line).await;
                     }
-                }))
-            } else { None };
+                }));
 
             while let Ok(Some(line)) = reader.next_line().await {
                 output.push_str(&line);

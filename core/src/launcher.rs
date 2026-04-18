@@ -42,15 +42,6 @@ pub async fn detect_launch_state() -> Result<LaunchState> {
     Ok(LaunchState::Ready { instances })
 }
 
-async fn check_upgrade_available(instance: &InstanceConfig, npm_registry: &str) -> Result<bool> {
-    // Skip if version is unknown/empty (freshly installed, version not yet recorded)
-    if instance.version.is_empty() {
-        return Ok(false);
-    }
-    let info = crate::manager::upgrade::check_upgrade(instance, npm_registry).await?;
-    Ok(info.has_upgrade)
-}
-
 /// Auto-start a claw instance after installation completes.
 /// Called after install wizard finishes successfully.
 pub async fn post_install_start(instance: &InstanceConfig) -> Result<()> {

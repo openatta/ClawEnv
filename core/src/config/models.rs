@@ -115,6 +115,14 @@ pub struct GatewayConfig {
     /// Per-instance MCP bridge port (gateway_port + 2)
     #[serde(default)]
     pub bridge_port: u16,
+    /// Per-instance web dashboard port, for claws that serve their
+    /// management UI from a process separate from the gateway (e.g.
+    /// Hermes: `hermes dashboard` on +5, independent of `hermes gateway`
+    /// which is the OpenAI-compatible API). `0` means "no dashboard;
+    /// the UI button opens gateway_port instead" — that's the case for
+    /// OpenClaw and any older config.toml imported from pre-v0.2.7.
+    #[serde(default)]
+    pub dashboard_port: u16,
     #[serde(default)]
     pub webchat_enabled: bool,
     #[serde(default)]
@@ -315,6 +323,11 @@ impl Default for GatewayConfig {
             gateway_port: 3000,
             ttyd_port: default_ttyd_port(),
             bridge_port: 3002,
+            // 0 = no dashboard. Real installs call allocate_port when the
+            // claw descriptor has dashboard_cmd; Default is used for
+            // synthetic / test / import-fallback cases where there's no
+            // descriptor context to consult.
+            dashboard_port: 0,
             webchat_enabled: false,
             channels: ChannelsConfig::default(),
         }

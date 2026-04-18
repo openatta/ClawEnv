@@ -1,17 +1,35 @@
+//! Export IPC — thin shell over the CLI.
+//!
+//! Earlier versions reimplemented the tar/podman/wsl dance inside Tauri.
+//! That duplicated the CLI's export logic verbatim and drifted out of sync
+//! (e.g. the manifest-write step had to land in two places, cancel
+//! behaviour differed subtly, and platform fixes needed double-applying).
+//!
+//! Now we just spawn `clawcli export` with `--json` and forward its
+//! `CliEvent::Progress` events onto the Tauri `export-progress` channel.
+//! Per CLAUDE.md铁律 8: "CLI 是核心，GUI 是薄壳" — this file is the薄壳.
+//!
+//! Cancel: `export_cancel` kills the child process via the shared
+//! `CURRENT_CHILD_PID` slot. kill_on_drop is also on, so if the Tauri
+//! process dies the child tar cleans up too.
+
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
 use clawenv_core::sandbox::SandboxType;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
-use tokio::io::{AsyncBufReadExt, BufReader};
 
-// Global cancel flag for export operations
-static EXPORT_CANCELLED: AtomicBool = AtomicBool::new(false);
+use crate::cli_bridge::{run_cli_streaming, CliEvent};
 
-/// File naming: {platform}-{arch}-{timestamp}.tar.gz
-/// platform: windows/macos/linux for native, lima/wsl2/podman for sandbox
-fn suggest_filename(sandbox_type: &SandboxType) -> String {
+/// PID of the currently-running export CLI child, or 0 if idle. Set when a
+/// new export starts; cleared when it finishes. `export_cancel` reads this
+/// to send a SIGTERM/TerminateProcess. AtomicU32 is sufficient because we
+/// only run one export at a time (the filesystem dialog is modal).
+static CURRENT_CHILD_PID: AtomicU32 = AtomicU32::new(0);
+
+/// File naming: {sandbox}-{arch}-{claw_type}-{timestamp}.tar.gz
+fn suggest_filename(sandbox_type: &SandboxType, claw_type: &str) -> String {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let arch = std::env::consts::ARCH;
     let platform = match sandbox_type {
@@ -24,95 +42,118 @@ fn suggest_filename(sandbox_type: &SandboxType) -> String {
             else { "linux" }
         }
     };
-    format!("{platform}-{arch}-{ts}.tar.gz")
+    format!("{platform}-{arch}-{claw_type}-{ts}.tar.gz")
 }
 
-/// Emit structured stage progress to frontend
-fn emit_stage(app: &tauri::AppHandle, stage: &str, status: &str, percent: u8, message: &str) {
-    let _ = app.emit("export-progress", serde_json::json!({
-        "stage": stage,
-        "status": status,  // "pending" | "active" | "done" | "error"
-        "percent": percent,
-        "message": message,
-    }));
-}
-
-/// Count files in a directory (cross-platform)
-async fn count_files(dir: &std::path::Path) -> u64 {
-    let mut count = 0u64;
-    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
-        while let Ok(Some(entry)) = entries.next_entry().await {
-            if let Ok(ft) = entry.file_type().await {
-                if ft.is_file() {
-                    count += 1;
-                } else if ft.is_dir() {
-                    count += Box::pin(count_files(&entry.path())).await;
-                }
-            }
+/// Forward a single CLI event onto the frontend's `export-progress`
+/// channel. The frontend's UI state machine keys off the `stage` field.
+fn emit_progress(app: &tauri::AppHandle, event: &CliEvent) {
+    let payload = match event {
+        CliEvent::Progress { stage, percent, message } => {
+            serde_json::json!({
+                "stage": stage,
+                "status": if *percent >= 100 { "done" } else { "active" },
+                "percent": *percent,
+                "message": message,
+            })
         }
-    }
-    count
-}
-
-/// Run tar with verbose output, streaming progress based on file count
-async fn tar_with_progress(
-    app: &tauri::AppHandle,
-    output: &str,
-    base_dir: &str,
-    items: &[&str],
-    total_files: u64,
-    stage_name: &str,
-    cancelled: &AtomicBool,
-) -> Result<(), String> {
-    let mut cmd = clawenv_core::platform::process::silent_cmd("tar");
-    cmd.arg("-czvf").arg(output).arg("-C").arg(base_dir);
-    for item in items {
-        cmd.arg(item);
-    }
-
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
-
-    let mut child = cmd.spawn().map_err(|e| format!("Failed to start tar: {e}"))?;
-    let stderr = child.stderr.take().ok_or("No stderr from tar")?;
-    let mut reader = BufReader::new(stderr).lines();
-
-    let mut processed = 0u64;
-    while let Ok(Some(line)) = reader.next_line().await {
-        if cancelled.load(Ordering::Relaxed) {
-            child.kill().await.ok();
-            // Clean up partial file
-            tokio::fs::remove_file(output).await.ok();
-            return Err("Export cancelled".into());
+        CliEvent::Info { message } => {
+            serde_json::json!({
+                "stage": "info",
+                "status": "active",
+                "percent": 0,
+                "message": message,
+            })
         }
-        processed += 1;
-        let pct = if total_files > 0 {
-            std::cmp::min((processed * 100 / total_files) as u8, 99)
-        } else {
-            50
-        };
-        // Show last component of file path
-        let short = line.rsplit('/').next().unwrap_or(&line);
-        let short = short.rsplit('\\').next().unwrap_or(short);
-        let display = if short.len() > 60 { &short[..60] } else { short };
-        emit_stage(app, stage_name, "active", pct, display);
-    }
-
-    let status = child.wait().await.map_err(|e| format!("tar wait failed: {e}"))?;
-    if !status.success() {
-        return Err("tar compression failed".into());
-    }
-    Ok(())
+        CliEvent::Complete { message } => {
+            serde_json::json!({
+                "stage": "complete",
+                "status": "done",
+                "percent": 100,
+                "message": message,
+            })
+        }
+        CliEvent::Error { message, .. } => {
+            serde_json::json!({
+                "stage": "error",
+                "status": "error",
+                "percent": 100,
+                "message": message,
+            })
+        }
+        CliEvent::Data { .. } => return, // export doesn't emit Data; ignore
+    };
+    let _ = app.emit("export-progress", payload);
 }
 
-/// Cancel the current export operation
+/// Cancel the current export operation by killing the CLI child process.
+///
+/// On Unix we send SIGTERM so the CLI has a chance to restart the backend
+/// gateway before exiting (its RAII guards handle cleanup). On Windows we
+/// `taskkill /T` to also reap any grandchildren (tar.exe, wsl.exe, etc.)
+/// that the CLI spawned. The CLI's `kill_on_drop(true)` belt-and-braces
+/// ensures partial tarballs don't leak.
 #[tauri::command]
 pub async fn export_cancel() -> Result<(), String> {
-    EXPORT_CANCELLED.store(true, Ordering::Relaxed);
+    let pid = CURRENT_CHILD_PID.load(Ordering::Relaxed);
+    if pid == 0 {
+        return Ok(()); // no export in flight, silent noop
+    }
+
+    #[cfg(unix)]
+    {
+        // kill(1) is universally available on unix — avoids adding libc
+        // as a dep just to do one syscall. Fire-and-forget; we don't wait
+        // on the kill process itself.
+        let _ = tokio::process::Command::new("kill")
+            .args(["-TERM", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await;
+    }
+    #[cfg(windows)]
+    {
+        // /T reaps the whole process tree; /F forces without asking the
+        // child nicely. silent_cmd prevents a flashing console window.
+        let _ = clawenv_core::platform::process::silent_cmd("taskkill")
+            .args(["/F", "/T", "/PID", &pid.to_string()])
+            .status().await;
+    }
     Ok(())
 }
 
-/// Export a sandbox VM image
+/// Shared driver: spawns `clawcli export <name> --output <path>`, forwards
+/// events, returns () on success.
+///
+/// Stores the child PID in `CURRENT_CHILD_PID` via `on_spawn` so
+/// `export_cancel` can reach it. Resets the slot to 0 on completion so a
+/// stale cancel (user clicks X after export already finished) is a no-op.
+async fn run_export_cli(app: &tauri::AppHandle, name: &str, output: &str) -> Result<(), String> {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<CliEvent>(64);
+
+    let app2 = app.clone();
+    let forwarder = tokio::spawn(async move {
+        while let Some(event) = rx.recv().await {
+            emit_progress(&app2, &event);
+        }
+    });
+
+    let args: &[&str] = &["export", name, "--output", output];
+    let result = run_cli_streaming(args, tx, |pid| {
+        CURRENT_CHILD_PID.store(pid, Ordering::Relaxed);
+    }).await;
+
+    drop(forwarder); // rx was moved; tx dropped in run_cli_streaming; join.
+
+    CURRENT_CHILD_PID.store(0, Ordering::Relaxed);
+
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Export a sandbox VM image.
 #[tauri::command]
 pub async fn export_sandbox(app: tauri::AppHandle, name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
@@ -121,7 +162,7 @@ pub async fn export_sandbox(app: tauri::AppHandle, name: String) -> Result<Strin
         return Err("Use 'Export Bundle' for native instances".into());
     }
 
-    let suggested = suggest_filename(&inst.sandbox_type);
+    let suggested = suggest_filename(&inst.sandbox_type, &inst.claw_type);
     let path = app.dialog().file()
         .set_file_name(&suggested)
         .add_filter("VM Image", &["tar.gz", "gz"])
@@ -131,161 +172,20 @@ pub async fn export_sandbox(app: tauri::AppHandle, name: String) -> Result<Strin
         None => return Err("Export cancelled".into()),
     };
 
-    EXPORT_CANCELLED.store(false, Ordering::Relaxed);
     let app2 = app.clone();
     let name2 = name.clone();
     let path2 = path.clone();
 
     tokio::spawn(async move {
-        let result = do_sandbox_export(&app2, &name2, &path2).await;
-        match result {
-            Ok(_) => { let _ = app2.emit("export-complete", &path2); }
-            Err(e) => { let _ = app2.emit("export-failed", e.to_string()); }
+        match run_export_cli(&app2, &name2, &path2).await {
+            Ok(()) => { let _ = app2.emit("export-complete", &path2); }
+            Err(e) => { let _ = app2.emit("export-failed", e); }
         }
     });
     Ok(path)
 }
 
-async fn do_sandbox_export(app: &tauri::AppHandle, name: &str, output: &str) -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let vm_name = &inst.sandbox_id;
-    let needs_stop = inst.sandbox_type != SandboxType::PodmanAlpine;
-
-    // Stage 1: Stop
-    if needs_stop {
-        emit_stage(app, "stop", "active", 0, "Stopping instance...");
-        backend.stop().await.map_err(|e| e.to_string())?;
-        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        emit_stage(app, "stop", "done", 100, "Stopped");
-    }
-
-    // Stage 2: Count files
-    emit_stage(app, "count", "active", 0, "Counting files...");
-    let total = match inst.sandbox_type {
-        SandboxType::LimaAlpine => {
-            // Lima bundle = VM directory + limactl binary + share/lima templates,
-            // so the receiving side doesn't need to install Lima separately.
-            let clawenv_root = dirs::home_dir().unwrap_or_default().join(".clawenv");
-            let mut n = count_files(&clawenv_root.join("lima").join(vm_name)).await;
-            let bin = clawenv_root.join("bin").join("limactl");
-            if bin.exists() { n += 1; }
-            n += count_files(&clawenv_root.join("share").join("lima")).await;
-            n
-        }
-        _ => count_files(&std::path::PathBuf::from(".")).await,
-    };
-    emit_stage(app, "count", "done", 100, &format!("{total} files"));
-
-    if EXPORT_CANCELLED.load(Ordering::Relaxed) {
-        if needs_stop { backend.start().await.ok(); }
-        return Err("Export cancelled".into());
-    }
-
-    // Stage 3: Compress
-    emit_stage(app, "compress", "active", 0, "Starting compression...");
-    match inst.sandbox_type {
-        SandboxType::LimaAlpine => {
-            // Export is rooted at ~/.clawenv so a receiving clawgui can untar
-            // into its own ~/.clawenv and get a ready-to-run VM + Lima toolchain.
-            let clawenv_root = dirs::home_dir().unwrap_or_default().join(".clawenv");
-            let vm_rel = format!("lima/{vm_name}");
-            // Keep cidata.iso: it holds cloud-init seed data required for a
-            // fresh receiver machine to finish provisioning on first boot.
-            // Sockets / pidfiles / logs are transient runtime artefacts —
-            // they're safe to strip.
-            let excludes = ["*.sock", "*.pid", "*.log"];
-            let mut cmd = clawenv_core::platform::process::silent_cmd("tar");
-            cmd.arg("-czvf").arg(output).arg("-C").arg(&clawenv_root);
-            for ex in &excludes {
-                cmd.arg("--exclude").arg(&format!("{vm_rel}/{ex}"));
-            }
-            cmd.arg(&vm_rel);
-            if clawenv_root.join("bin").join("limactl").exists() {
-                cmd.arg("bin/limactl");
-            }
-            if clawenv_root.join("share").join("lima").exists() {
-                cmd.arg("share/lima");
-            }
-            cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
-
-            let mut child = cmd.spawn().map_err(|e| format!("tar failed: {e}"))?;
-            let stderr = child.stderr.take().ok_or("no stderr")?;
-            let mut reader = BufReader::new(stderr).lines();
-            let mut processed = 0u64;
-            while let Ok(Some(line)) = reader.next_line().await {
-                if EXPORT_CANCELLED.load(Ordering::Relaxed) {
-                    child.kill().await.ok();
-                    tokio::fs::remove_file(output).await.ok();
-                    if needs_stop { backend.start().await.ok(); }
-                    return Err("Export cancelled".into());
-                }
-                processed += 1;
-                let pct = if total > 0 { std::cmp::min((processed * 100 / total) as u8, 99) } else { 50 };
-                let short = line.rsplit('/').next().unwrap_or(&line);
-                emit_stage(app, "compress", "active", pct, short);
-            }
-            let status = child.wait().await.map_err(|e| format!("tar: {e}"))?;
-            if !status.success() {
-                if needs_stop { backend.start().await.ok(); }
-                return Err("tar compression failed".into());
-            }
-        }
-        SandboxType::Wsl2Alpine => {
-            #[cfg(target_os = "windows")]
-            {
-                emit_stage(app, "compress", "active", 50, "Exporting WSL distro...");
-                let status = clawenv_core::platform::process::silent_cmd("wsl")
-                    .args(["--export", vm_name, output])
-                    .status().await.map_err(|e| e.to_string())?;
-                if !status.success() {
-                    if needs_stop { backend.start().await.ok(); }
-                    return Err("WSL export failed".into());
-                }
-            }
-            #[cfg(not(target_os = "windows"))]
-            { return Err("WSL2 export only on Windows".into()); }
-        }
-        SandboxType::PodmanAlpine => {
-            let tag = format!("clawenv-export:{name}");
-            emit_stage(app, "compress", "active", 30, "Committing container...");
-            tokio::process::Command::new("podman").args(["commit", vm_name, &tag])
-                .status().await.map_err(|e| e.to_string())?;
-            emit_stage(app, "compress", "active", 60, "Saving image...");
-            let raw = format!("{output}.tmp");
-            tokio::process::Command::new("podman").args(["save", "-o", &raw, &tag])
-                .status().await.map_err(|e| e.to_string())?;
-            emit_stage(app, "compress", "active", 80, "Compressing...");
-            tokio::process::Command::new("gzip").args(["-f", &raw])
-                .status().await.map_err(|e| e.to_string())?;
-            if std::path::Path::new(&format!("{raw}.gz")).exists() {
-                tokio::fs::rename(format!("{raw}.gz"), output).await.ok();
-            }
-        }
-        SandboxType::Native => unreachable!(),
-    }
-    emit_stage(app, "compress", "done", 100, "Compressed");
-
-    // Stage 4: Checksum
-    emit_stage(app, "checksum", "active", 0, "Calculating SHA256...");
-    let size = tokio::fs::metadata(output).await.map_err(|e| e.to_string())?.len();
-    emit_stage(app, "checksum", "done", 100, &format!("{} MB", size / 1_048_576));
-
-    // Stage 5: Restart
-    if needs_stop {
-        emit_stage(app, "restart", "active", 0, "Restarting instance...");
-        backend.start().await.ok();
-        let config = ConfigManager::load().map_err(|e| e.to_string())?;
-        let inst = instance::get_instance(&config, name).map_err(|e| e.to_string())?;
-        instance::start_instance(inst).await.ok();
-        emit_stage(app, "restart", "done", 100, "Running");
-    }
-
-    Ok(())
-}
-
-/// Export a native instance as an offline bundle
+/// Export a native instance as an offline bundle.
 #[tauri::command]
 pub async fn export_native_bundle(app: tauri::AppHandle, name: String) -> Result<String, String> {
     let config = ConfigManager::load().map_err(|e| e.to_string())?;
@@ -294,7 +194,7 @@ pub async fn export_native_bundle(app: tauri::AppHandle, name: String) -> Result
         return Err("Use 'Export Image' for sandbox instances".into());
     }
 
-    let suggested = suggest_filename(&inst.sandbox_type);
+    let suggested = suggest_filename(&inst.sandbox_type, &inst.claw_type);
     let path = app.dialog().file()
         .set_file_name(&suggested)
         .add_filter("Native Bundle", &["tar.gz", "gz"])
@@ -304,70 +204,15 @@ pub async fn export_native_bundle(app: tauri::AppHandle, name: String) -> Result
         None => return Err("Export cancelled".into()),
     };
 
-    EXPORT_CANCELLED.store(false, Ordering::Relaxed);
     let app2 = app.clone();
+    let name2 = name.clone();
     let path2 = path.clone();
 
     tokio::spawn(async move {
-        let result = do_native_export(&app2, &path2).await;
-        match result {
-            Ok(_) => { let _ = app2.emit("export-complete", &path2); }
-            Err(e) => { let _ = app2.emit("export-failed", e.to_string()); }
+        match run_export_cli(&app2, &name2, &path2).await {
+            Ok(()) => { let _ = app2.emit("export-complete", &path2); }
+            Err(e) => { let _ = app2.emit("export-failed", e); }
         }
     });
     Ok(path)
-}
-
-async fn do_native_export(app: &tauri::AppHandle, output: &str) -> Result<(), String> {
-    let home = dirs::home_dir().unwrap_or_default();
-    let clawenv = home.join(".clawenv");
-
-    // Refuse to produce a half-packaged bundle. The bundle is meant to run
-    // on a fresh machine with no system git / node — if either private
-    // install is missing, a receiver would either crash silently or pick up
-    // whatever happens to live on their system, breaking the portability
-    // contract. Surface a clear error now instead.
-    let required = [
-        ("node",   "Private Node.js is missing at ~/.clawenv/node/. Run the installer again; it downloads a pinned node build."),
-        ("git",    "Private Git is missing at ~/.clawenv/git/. Run the installer again; it downloads a pinned dugite-native git build."),
-        ("native", "No claw product is installed at ~/.clawenv/native/. Install at least one claw before exporting."),
-    ];
-    for (name, msg) in required {
-        if !clawenv.join(name).exists() {
-            return Err(msg.to_string());
-        }
-    }
-
-    // Stage 1: Count files
-    emit_stage(app, "count", "active", 0, "Counting files...");
-    let mut total = 0u64;
-    for sub in ["node", "git", "native"] {
-        total += count_files(&clawenv.join(sub)).await;
-    }
-    emit_stage(app, "count", "done", 100, &format!("{total} files"));
-
-    if EXPORT_CANCELLED.load(Ordering::Relaxed) {
-        return Err("Export cancelled".into());
-    }
-
-    // Stage 2: Compress with verbose progress. All three dirs are required —
-    // validated above, so no more conditional inclusion (which silently
-    // produced broken bundles before).
-    emit_stage(app, "compress", "active", 0, "Starting compression...");
-    let items: Vec<&str> = vec!["node", "git", "native"];
-
-    tar_with_progress(
-        app, output,
-        &clawenv.to_string_lossy(),
-        &items, total, "compress",
-        &EXPORT_CANCELLED,
-    ).await?;
-    emit_stage(app, "compress", "done", 100, "Compressed");
-
-    // Stage 3: Checksum
-    emit_stage(app, "checksum", "active", 0, "Calculating SHA256...");
-    let size = tokio::fs::metadata(output).await.map_err(|e| e.to_string())?.len();
-    emit_stage(app, "checksum", "done", 100, &format!("{} MB", size / 1_048_576));
-
-    Ok(())
 }

@@ -4,6 +4,119 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.7 — 2026-04-18
+
+Two-pronged release: **bundle manifest protocol** (formalise the
+export/import contract so importers stop guessing claw identity) and
+**Hermes dashboard split** (give Hermes its real management UI instead of
+a blank page where the gateway used to live). Plus quite a lot of old
+debt paid down — version sync, CI `-D warnings` gate, Windows cross-
+platform warnings that had been accumulating.
+
+### Features
+
+- **Bundle manifest (v1)** — every `.tar.gz` export now carries a
+  `clawenv-bundle.toml` at archive root with `claw_type`, `sandbox_type`,
+  `schema_version`, source platform, clawenv version. Import bails fast
+  if the manifest is absent, wrong sandbox type, or newer schema. Drops
+  the old "probe each claw's version command in a loop" heuristic — the
+  manifest is authoritative. Podman/WSL get a wrapped outer tar (with
+  manifest + `payload.tar` inner) because `podman save` / `wsl --export`
+  produce container/distro tars we can't append to. See
+  `docs/18-bundle-format.md` for the full schema + V1→V2 migration path.
+- **Hermes dashboard as a separate daemon** — Hermes splits UI and API:
+  `hermes dashboard` serves the React web UI + OpenAI-compatible API
+  server, `hermes gateway run` serves messaging bridges (Telegram/
+  Discord/WhatsApp) and is opt-in / manual. ClawDescriptor gets
+  `dashboard_cmd` + `dashboard_port_offset`; `InstanceConfig.gateway`
+  gets `dashboard_port`; start/stop/restart/upgrade/health-probe all
+  track it. OpenClaw is unchanged (no dashboard_cmd = old behaviour).
+- **Install-time Hermes provisioning** — chown `/opt/hermes` to the
+  sandbox user, pre-build the React dashboard (`cd web && npm install
+  && npm run build`), and auto-start `hermes dashboard` alongside the
+  claw. User's first "Open Control Panel" click no longer waits 3+
+  minutes for an npm build.
+- **Tauri export → CLI薄壳** — `export_sandbox` / `export_native_bundle`
+  now `spawn clawcli export --json` and translate JSON progress events
+  into `export-progress` Tauri events. Deletes ~200 lines of duplicated
+  tar/podman logic that used to live in `tauri/src/ipc/export.rs`.
+  Aligns with CLAUDE.md铁律 8: "CLI 是核心，GUI 是薄壳".
+- **One-shot legacy migration** — pre-v0.2.7 Hermes instances in
+  `config.toml` had `dashboard_port = 0`; first `clawcli` run after
+  upgrade detects that, computes `gateway_port + 5`, writes back AND
+  patches the Lima VM's `lima.yaml` to forward the new port. Idempotent.
+- **Export cancel works** — `run_cli_streaming` surfaces the child PID
+  via callback; `export_cancel` taskkill/SIGTERM's the CLI. Used to be
+  a silent no-op.
+- **e2e scripts + Podman real-backend CI test** —
+  `scripts/e2e-bundle.sh` (live instance roundtrip) and
+  `scripts/e2e-bundle-offline.sh` (synthetic-bundle contract checks on
+  CI); `core/tests/podman_roundtrip.rs` runs `podman save → wrap →
+  unwrap → podman load` against a real Alpine image on Linux CI runners.
+- **Version SSOT** — 3 × `Cargo.toml` + `tauri.conf.json` +
+  `package.json` all hold the same version; `scripts/check-version-sync.sh`
+  is a CI gate that fails on drift. (v0.2.5 shipped with `Cargo.toml =
+  0.1.0` stamped into exported manifests — that particular embarrassment
+  won't recur.)
+- **`docs/README.md`** index added; new `docs/18-bundle-format.md`
+  documents the manifest schema + wrap structure + evolution rules.
+
+### Bug fixes
+
+- **"Open Control Panel" empty page for Hermes** — the underlying
+  reason the dashboard split was necessary. Previously
+  `gateway_cmd = "gateway --port {port}"` invoked `hermes gateway`
+  (messaging management), which errored at launch with "invalid choice:
+  '3000'". Nothing listened on port 3000; button landed on a blank
+  page.
+- **Tauri `InstanceInfo` was dropping `dashboard_port`** — CLI
+  `InstanceSummary` had the field but the IPC bridge map discarded it,
+  so the frontend fell back to `gateway_port` and reproduced the blank
+  page even after all the other fixes landed. Fixed by threading the
+  field through.
+- **`instance_health` / tray / start-readiness probe now consistent** —
+  all three probe `dashboard_port` when set, `gateway_port` otherwise.
+  Previously tray said "Stopped" while ClawPage said "Running" for
+  Hermes.
+- **`upgrade_instance` didn't relaunch dashboard** — step 1 killed
+  both gateway + dashboard via `process_names()` but step 4 only
+  restarted gateway. Hermes stayed dead after every upgrade.
+- **ConfigModal port-conflict check ignored dashboard_port** — picking
+  a `gateway_port` that collided with a sibling instance's dashboard
+  would silently accept.
+- **`wrap_with_inner_tar` was blocking on GB payloads** — `std::fs::
+  rename/copy` in an async function stalled the tokio runtime for the
+  duration of a WSL export (routinely 2–4 GB). Now uses `tokio::fs`.
+- **`extract_inner_payload` buffered entire payload into RAM** —
+  `tar -O ...` stdout → `std::fs::write` round-tripped GB through
+  process memory. Now extracts to a scratch dir + `tokio::fs::rename`.
+- **Peek/extract error messages stopped leaking tar stderr** — raw
+  "tar: Not found in archive" noise is tracing::debug now, user sees a
+  clean "bundles produced by pre-v0.2.6 clawenv can't be imported".
+- **Dead code & platform-gate cleanup** — removed
+  `check_upgrade_available` (never called), `is_win_native` (unused
+  shadow), `install_dir` shadow in `NativeBackend::new`; gated
+  `GitRelease` + its impl + its test module to `macos/linux` only so
+  Windows `-D warnings` builds clean. `kill_by_name_cmd` /
+  `check_process_cmd` pattern-escape vars moved into their cfg branches.
+- **Hermes dashboard binds 127.0.0.1** — `0.0.0.0` was refused by
+  Hermes without `--insecure` ("exposes API keys without robust
+  auth"). Lima/WSL/Podman all port-forward guest 127.0.0.1 to host
+  127.0.0.1 anyway, so loopback-only is correct + safer.
+
+### CI hygiene
+
+- `cargo clippy --workspace --tests -- -D warnings` is now a hard gate
+  (was `continue-on-error: true` — dead code had been silently
+  accumulating for weeks).
+- Version SSOT guard runs on every CI build.
+- New steps: "Bundle manifest unit tests", "Bundle offline e2e",
+  "Install podman (Linux)" + "Podman wrap roundtrip (Linux)".
+- Pre-existing Windows-specific clippy warnings fixed: dead
+  `CommandExt` imports (tokio provides `creation_flags` directly),
+  unused `esc` variables in non-unix cfg branches, `name_esc` in
+  install_native, needless `return` in `bridge::permissions`.
+
 ## v0.2.5 — 2026-04-18
 
 Big session focused on (1) privatising all sandbox/toolchain data under

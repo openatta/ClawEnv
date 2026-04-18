@@ -22,6 +22,11 @@ impl Drop for InstallRunningGuard {
     }
 }
 
+// This is a Tauri `#[command]` IPC endpoint — its argument list is the wire
+// protocol between the install wizard frontend and the backend. Packing
+// the fields into a struct just forces every JS caller to build an object
+// with the same keys, adding indirection without simplification.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn install_openclaw(
     app: tauri::AppHandle,
@@ -98,7 +103,7 @@ pub async fn install_openclaw(
         });
 
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let result = cli_bridge::run_cli_streaming(&args_ref, tx).await;
+        let result = cli_bridge::run_cli_streaming(&args_ref, tx, |_| {}).await;
         fwd_task.await.ok();
 
         match result {

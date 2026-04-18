@@ -38,6 +38,8 @@ portForwards:
   hostPort: {CDP_PORT}
 - guestPort: {VNC_WS_PORT}
   hostPort: {VNC_WS_PORT}
+- guestPort: {DASHBOARD_PORT}
+  hostPort: {DASHBOARD_PORT}
 
 provision:
 - mode: system

@@ -125,13 +125,25 @@ pub async fn upgrade_instance(
     let new_ver = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await?;
     let new_ver = new_ver.trim().to_string();
 
-    // 4. Restart gateway
+    // 4. Restart gateway + dashboard
+    // Mirrors start_instance: step 1 killed both via process_names(), so
+    // we have to bring both back up. For OpenClaw dashboard_cmd is empty
+    // and dashboard_port is 0, so the second block is a no-op.
     send(tx, "Restarting gateway...", 90, "restart").await;
     let port = instance.gateway.gateway_port;
     if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
         backend.exec(&format!(
             "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
         )).await?;
+    }
+    let dashboard_port = instance.gateway.dashboard_port;
+    if dashboard_port != 0 {
+        if let Some(dashboard_cmd) = desc.dashboard_start_cmd(dashboard_port) {
+            send(tx, "Restarting dashboard...", 92, "restart").await;
+            backend.exec(&format!(
+                "nohup {dashboard_cmd} > /tmp/clawenv-dashboard.log 2>&1 &"
+            )).await?;
+        }
     }
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 

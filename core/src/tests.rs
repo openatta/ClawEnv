@@ -1,4 +1,10 @@
+// The file lives at `core/src/tests.rs` and mounts a `mod tests {}` — the
+// doubled "tests" name is intentional (and matches Rust's conventional
+// `tests.rs` + `mod tests` pattern used by many crates). The clippy lint
+// here is style-only, flagged to keep one-line `allow` honest with a
+// reason rather than silently nocap'd.
 #[cfg(test)]
+#[allow(clippy::module_inception)]
 mod tests {
     // ===== Platform Detection =====
 

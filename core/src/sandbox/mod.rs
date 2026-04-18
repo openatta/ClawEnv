@@ -7,6 +7,9 @@ mod exec_helper;
 pub mod mock;
 
 pub use lima::{LimaBackend, init_lima_env, lima_home, limactl_bin};
+// Re-export with a stable, module-prefixed name so migration code in
+// manager/instance.rs doesn't reach into `sandbox::lima::*` privates.
+pub(crate) use lima::ensure_dashboard_port_forward as ensure_dashboard_port_forward_yaml;
 pub use native::NativeBackend;
 pub use wsl::WslBackend;
 pub use podman::{PodmanBackend, init_podman_env, podman_data_home, podman_runtime_home};
@@ -184,6 +187,34 @@ impl SandboxType {
             Ok(OsType::Linux) | Err(_) => Self::PodmanAlpine,
         }
     }
+
+    /// Stable wire-format string matching the serde `kebab-case` rename rule.
+    /// Keeping this as a hand-written match (rather than going through
+    /// `serde_json`) avoids a fallible serialize at the call-site — the
+    /// export/import code that stamps this into the bundle manifest needs it
+    /// to be infallible, and a match doesn't drift because a `#[test]` below
+    /// asserts it stays in sync with the derived serde.
+    pub fn as_wire_str(&self) -> &'static str {
+        match self {
+            Self::Wsl2Alpine => "wsl2-alpine",
+            Self::LimaAlpine => "lima-alpine",
+            Self::PodmanAlpine => "podman-alpine",
+            Self::Native => "native",
+        }
+    }
+
+    /// Inverse of `as_wire_str`. Import side uses this to map a manifest's
+    /// `sandbox_type` string back to the enum (so we can route to the right
+    /// backend importer).
+    pub fn parse_wire(s: &str) -> Option<Self> {
+        match s {
+            "wsl2-alpine" => Some(Self::Wsl2Alpine),
+            "lima-alpine" => Some(Self::LimaAlpine),
+            "podman-alpine" => Some(Self::PodmanAlpine),
+            "native" => Some(Self::Native),
+            _ => None,
+        }
+    }
 }
 
 /// 工厂函数：根据当前平台自动选择后端（默认实例名 "default"）
@@ -204,4 +235,25 @@ pub fn detect_backend_for(instance_name: &str) -> Result<Box<dyn SandboxBackend>
 /// 创建 native 模式后端（开发者专用）
 pub fn native_backend(instance_name: &str) -> NativeBackend {
     NativeBackend::new(instance_name)
+}
+
+#[cfg(test)]
+mod sandbox_type_tests {
+    use super::SandboxType;
+
+    /// Guard against `as_wire_str` drifting from the `#[serde(rename_all =
+    /// "kebab-case")]` derivation — those two must stay identical since
+    /// manifests written with one are read back through the other (via
+    /// `InstanceConfig`'s serde roundtrip in config.toml).
+    #[test]
+    fn wire_str_matches_serde() {
+        for v in [SandboxType::Wsl2Alpine, SandboxType::LimaAlpine,
+                  SandboxType::PodmanAlpine, SandboxType::Native] {
+            let serde_str = serde_json::to_value(v).unwrap()
+                .as_str().unwrap().to_string();
+            assert_eq!(v.as_wire_str(), serde_str,
+                "as_wire_str() out of sync with serde for {v:?}");
+            assert_eq!(SandboxType::parse_wire(&serde_str), Some(v));
+        }
+    }
 }

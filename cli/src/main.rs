@@ -161,6 +161,34 @@ fn resolve_name(name: Option<String>) -> String {
     name.unwrap_or_else(|| "default".into())
 }
 
+/// Validate an export `--output` value and produce its absolute/canonicalish
+/// path. Export used to be repetitive across four backend arms; extracting
+/// this kills ~25 lines of dupe. Two failure modes worth surfacing loudly:
+///
+///   1. User pointed at an existing directory. `PathBuf::is_dir()` matches
+///      anything that *currently exists* as a directory — in past versions
+///      the code silently treated this as "append a default filename" and
+///      nested the tarball under a left-over directory from a previous
+///      failed run.
+///   2. Parent dir doesn't exist. Create it (best-effort) rather than
+///      failing with an opaque tar errno.
+fn validate_export_out_path(output: &str) -> Result<std::path::PathBuf> {
+    let out_path = std::path::PathBuf::from(output);
+    if out_path.is_dir() {
+        anyhow::bail!(
+            "Refusing to export: --output '{}' is a directory. \
+             Pass a full .tar.gz filename.",
+            out_path.display()
+        );
+    }
+    if let Some(parent) = out_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    Ok(out_path)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -244,6 +272,18 @@ async fn main() -> Result<()> {
 async fn run(command: Commands, out: &Output) -> Result<()> {
     use clawenv_core::api::*;
     use clawenv_core::config::{ConfigManager, UserMode};
+
+    // One-shot legacy migration: patches pre-v0.2.7 instances that are
+    // missing dashboard_port. Idempotent and best-effort — a failure here
+    // (e.g. read-only config) shouldn't prevent the command from running
+    // on instances that don't need migration. Runs before `match command`
+    // so every subcommand sees the migrated config view.
+    if let Ok(mut cfg) = ConfigManager::load() {
+        let registry = clawenv_core::claw::ClawRegistry::load();
+        if let Err(e) = clawenv_core::manager::instance::migrate_instance_ports(&mut cfg, &registry) {
+            tracing::warn!("dashboard_port migration skipped: {e}");
+        }
+    }
 
     match command {
         // ====== Install ======
@@ -334,9 +374,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             claw_type: inst.claw_type.clone(),
                             version: inst.version.clone(),
                             sandbox_type: inst.sandbox_type.display_name().to_string(),
-                            health: serde_json::to_value(&health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
+                            health: serde_json::to_value(health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
                             gateway_port: inst.gateway.gateway_port,
                             ttyd_port: inst.gateway.ttyd_port,
+                            dashboard_port: inst.gateway.dashboard_port,
                         });
                     }
                     let resp = ListResponse { instances };
@@ -388,9 +429,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 claw_type: inst.claw_type.clone(),
                 version: inst.version.clone(),
                 sandbox_type: inst.sandbox_type.display_name().to_string(),
-                health: serde_json::to_value(&health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
+                health: serde_json::to_value(health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
                 gateway_port: inst.gateway.gateway_port,
                 ttyd_port: inst.gateway.ttyd_port,
+                dashboard_port: inst.gateway.dashboard_port,
                 capabilities: None,
                 gateway_token: None,
             };
@@ -408,7 +450,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let cmd = if follow {
                 format!("{} logs -f", desc.cli_binary)
             } else {
-                format!("cat /tmp/clawenv-gateway.log 2>/dev/null | tail -200")
+                "cat /tmp/clawenv-gateway.log 2>/dev/null | tail -200".to_string()
             };
             let output = backend.exec(&cmd).await?;
             out.emit(CliEvent::Data { data: serde_json::Value::String(output) });
@@ -447,7 +489,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let registry_url = config.config().clawenv.mirrors.npm_registry_url().to_string();
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
 
-            match clawenv_core::manager::upgrade::check_upgrade(&inst, &registry_url).await {
+            match clawenv_core::manager::upgrade::check_upgrade(inst, &registry_url).await {
                 Ok(info) => {
                     let resp = UpdateCheckResponse {
                         current: info.current,
@@ -463,8 +505,20 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         }
 
         // ====== Export ======
+        //
+        // Stage convention (emitted as CliEvent::Progress so GUI shells can
+        // render a staged progress bar without duplicating the export
+        // business logic). Stages are in temporal order; percent is a
+        // coarse indicator, not a precise byte/file ratio:
+        //   `stop`     0→10   stopping the instance quiescent for tar
+        //   `compress` 10→90  running tar / podman save / wsl --export
+        //   `wrap`     90→95  outer-tar the payload + manifest (Podman/WSL only)
+        //   `checksum` 95→99  sizing the output / optional SHA256
+        //   `restart`  99→100 bringing the gateway back up
+        // The Tauri GUI's export-progress event mirrors these stage names.
         Commands::Export { name, output } => {
             use clawenv_core::sandbox::SandboxType;
+            use clawenv_core::export::BundleManifest;
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
@@ -475,6 +529,17 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             out.emit(CliEvent::Info { message: format!("Exporting '{name}'...") });
             let version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
             out.emit(CliEvent::Info { message: format!("{}: {}", desc.display_name, version.trim()) });
+
+            // Build the manifest once up-front; each backend decides where
+            // to drop it (in-tree for Native/Lima, inside the outer wrap for
+            // Podman/WSL). Using the registry claw_type here is what lets
+            // the import side drop the old "probe version_check_cmd for
+            // every known claw" loop.
+            let manifest = BundleManifest::build(
+                &inst.claw_type,
+                version.trim(),
+                inst.sandbox_type.as_wire_str(),
+            );
 
             // Route by backend. Previously this unconditionally called the
             // Alpine packaging script via `bash`, which (a) doesn't know how
@@ -502,34 +567,25 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         }
                     }
 
-                    // Stop any running gateway so we tar a quiescent state;
-                    // start it back afterwards regardless of export success.
+                    let out_path = validate_export_out_path(&output)?;
+
+                    out.emit(CliEvent::Progress {
+                        stage: "stop".into(), percent: 5,
+                        message: "Stopping native gateway...".into(),
+                    });
                     backend.stop().await.ok();
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-                    // Use --output literally as the target file path. An
-                    // earlier iteration tried to be helpful by appending a
-                    // default filename when `--output` looked like a dir,
-                    // but `PathBuf::is_dir()` returns true for any path that
-                    // happens to exist as a directory (e.g. left over from
-                    // an earlier failed run), which silently nested the
-                    // tarball one level deeper than the user asked. Refuse
-                    // to overwrite an existing directory — fail loudly so
-                    // the user can clean up or pick a different path.
-                    let out_path = std::path::PathBuf::from(&output);
-                    if out_path.is_dir() {
-                        anyhow::bail!(
-                            "Refusing to export: --output '{}' is a directory. \
-                             Pass a full .tar.gz filename.",
-                            out_path.display()
-                        );
-                    }
-                    if let Some(parent) = out_path.parent() {
-                        if !parent.as_os_str().is_empty() {
-                            std::fs::create_dir_all(parent)?;
-                        }
-                    }
+                    // Drop the manifest next to node/git/native so the
+                    // receiver sees `clawenv-bundle.toml` at archive root.
+                    // Clean it up after tar to keep ~/.clawenv tidy if the
+                    // user ever inspects it.
+                    manifest.write_to_dir(&clawenv)?;
 
+                    out.emit(CliEvent::Progress {
+                        stage: "compress".into(), percent: 15,
+                        message: "Compressing node + git + native tree...".into(),
+                    });
                     // Windows' built-in tar.exe (BSD tar + gzip). `-C clawenv`
                     // so archive paths are "node/..", "git/..", "native/.."
                     // and a receiving machine can untar directly into its own
@@ -538,10 +594,20 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         .args(["czf",
                                &out_path.to_string_lossy(),
                                "-C", &clawenv.to_string_lossy(),
+                               clawenv_core::export::manifest::MANIFEST_FILENAME,
                                "node", "git", "native"])
                         .status().await;
 
+                    // Remove the manifest sidecar once it's in the archive.
+                    let _ = std::fs::remove_file(
+                        clawenv.join(clawenv_core::export::manifest::MANIFEST_FILENAME),
+                    );
+
                     // Always try to restart the gateway, even on export failure
+                    out.emit(CliEvent::Progress {
+                        stage: "restart".into(), percent: 99,
+                        message: "Restarting native gateway...".into(),
+                    });
                     backend.start().await.ok();
 
                     match status {
@@ -554,27 +620,166 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         Err(e) => anyhow::bail!("failed to run tar: {e}"),
                     }
                 }
-                _ => {
-                    // Sandbox (Lima / WSL / Podman) — keeps the existing
-                    // bash-based packaging script, which knows each backend's
-                    // VM/container export idiom. `--output` is treated as a
-                    // directory by that script.
-                    std::fs::create_dir_all(&output)?;
+                SandboxType::LimaAlpine => {
+                    // Lima VM export: tar ~/.clawenv/lima/<sandbox_id>/ (the
+                    // private LIMA_HOME tree set up by init_lima_env). The old
+                    // path called `bash tools/package-alpine.sh` which
+                    // hardcoded ~/.lima and assumed vm_name == "clawenv-<name>"
+                    // — both wrong after v0.2.5's LIMA_HOME privatisation and
+                    // sandbox_id (auto-generated hash) mapping. Matching the
+                    // Native branch's pattern avoids shelling out entirely.
+                    let out_path = validate_export_out_path(&output)?;
 
+                    out.emit(CliEvent::Progress {
+                        stage: "stop".into(), percent: 5,
+                        message: "Stopping Lima VM...".into(),
+                    });
                     backend.stop().await.ok();
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-                    let status = tokio::process::Command::new("bash")
-                        .args(["tools/package-alpine.sh", &name, &output])
-                        .status().await?;
+                    let lima_home = clawenv_core::sandbox::lima_home();
+                    let vm_name = &inst.sandbox_id;
 
+                    // Manifest lives alongside the VM dir inside LIMA_HOME so
+                    // it ends up at archive root (tar is `-C lima_home`, then
+                    // items `clawenv-bundle.toml` + `<vm_name>/`).
+                    manifest.write_to_dir(&lima_home)?;
+
+                    out.emit(CliEvent::Progress {
+                        stage: "compress".into(), percent: 15,
+                        message: "Compressing Lima VM tree...".into(),
+                    });
+                    // Exclude runtime-only artefacts so the tarball doesn't
+                    // carry dead sockets / stale pids into the receiving
+                    // machine. cidata.iso IS included (cloud-init seed for
+                    // first-boot provisioning on the target).
+                    let status = tokio::process::Command::new("tar")
+                        .args([
+                            "czf",
+                            &out_path.to_string_lossy(),
+                            "-C", &lima_home.to_string_lossy(),
+                            "--exclude", &format!("{vm_name}/*.sock"),
+                            "--exclude", &format!("{vm_name}/*.pid"),
+                            "--exclude", &format!("{vm_name}/*.log"),
+                            clawenv_core::export::manifest::MANIFEST_FILENAME,
+                            vm_name,
+                        ])
+                        .status().await;
+
+                    let _ = std::fs::remove_file(
+                        lima_home.join(clawenv_core::export::manifest::MANIFEST_FILENAME),
+                    );
+
+                    out.emit(CliEvent::Progress {
+                        stage: "restart".into(), percent: 99,
+                        message: "Restarting Lima VM...".into(),
+                    });
                     backend.start().await.ok();
 
-                    if status.success() {
-                        out.emit(CliEvent::Complete { message: format!("Exported to {output}/") });
-                    } else {
-                        anyhow::bail!("Export failed");
+                    match status {
+                        Ok(s) if s.success() => {
+                            out.emit(CliEvent::Complete {
+                                message: format!("Exported to {}", out_path.display())
+                            });
+                        }
+                        Ok(s) => anyhow::bail!("tar exited with status {:?}", s.code()),
+                        Err(e) => anyhow::bail!("failed to run tar: {e}"),
                     }
+                }
+                SandboxType::PodmanAlpine => {
+                    // Podman: commit running container to image, then
+                    // `podman save` to tarball. The PodmanBackend's XDG env
+                    // vars are already set at process start by init_podman_env.
+                    let out_path = validate_export_out_path(&output)?;
+
+                    let vm_name = &inst.sandbox_id;
+                    let image_tag = format!("clawenv-export:{name}");
+                    out.emit(CliEvent::Progress {
+                        stage: "compress".into(), percent: 15,
+                        message: "Committing Podman container...".into(),
+                    });
+                    let commit = tokio::process::Command::new("podman")
+                        .args(["commit", vm_name, &image_tag])
+                        .status().await?;
+                    if !commit.success() {
+                        anyhow::bail!("podman commit failed");
+                    }
+
+                    // podman save produces an image tarball that's
+                    // inherently not a filesystem tar, so we can't stuff the
+                    // manifest inside alongside the image layers. Instead we
+                    // save to a temp tarball and wrap it in an outer tar.gz
+                    // together with the manifest; the import side unwraps
+                    // `payload.tar` back out before `podman load -i`.
+                    let parent = out_path.parent().unwrap_or(std::path::Path::new("."));
+                    let inner_path = parent.join(format!(
+                        ".clawenv-podman-save-{}.tar", std::process::id()
+                    ));
+                    out.emit(CliEvent::Progress {
+                        stage: "compress".into(), percent: 40,
+                        message: "podman save (image → tar)...".into(),
+                    });
+                    let save = tokio::process::Command::new("podman")
+                        .args(["save", "-o", &inner_path.to_string_lossy(), &image_tag])
+                        .status().await?;
+                    if !save.success() {
+                        let _ = std::fs::remove_file(&inner_path);
+                        anyhow::bail!("podman save failed");
+                    }
+
+                    out.emit(CliEvent::Progress {
+                        stage: "wrap".into(), percent: 90,
+                        message: "Wrapping payload + manifest...".into(),
+                    });
+                    let wrap_result = manifest.wrap_with_inner_tar(&inner_path, &out_path).await;
+                    // wrap_with_inner_tar renames/copies the inner in — clean
+                    // up any leftover if wrap bailed mid-flight.
+                    let _ = std::fs::remove_file(&inner_path);
+                    wrap_result?;
+
+                    out.emit(CliEvent::Complete {
+                        message: format!("Exported to {}", out_path.display())
+                    });
+                }
+                SandboxType::Wsl2Alpine => {
+                    // WSL: `wsl --export <distro> <file>` is the native path.
+                    // The distro data already lives in ~/.clawenv/wsl/ from
+                    // install time (WslBackend was always private).
+                    let out_path = validate_export_out_path(&output)?;
+
+                    let vm_name = &inst.sandbox_id;
+
+                    // Same wrap pattern as Podman: `wsl --export` produces
+                    // a distro tarball that isn't a filesystem tar we can
+                    // append to, so we write it to a temp file first, then
+                    // wrap it + the manifest into the user-facing tar.gz.
+                    let parent = out_path.parent().unwrap_or(std::path::Path::new("."));
+                    let inner_path = parent.join(format!(
+                        ".clawenv-wsl-export-{}.tar", std::process::id()
+                    ));
+                    out.emit(CliEvent::Progress {
+                        stage: "compress".into(), percent: 20,
+                        message: "wsl --export (distro → tar)...".into(),
+                    });
+                    let status = tokio::process::Command::new("wsl")
+                        .args(["--export", vm_name, &inner_path.to_string_lossy()])
+                        .status().await?;
+                    if !status.success() {
+                        let _ = std::fs::remove_file(&inner_path);
+                        anyhow::bail!("wsl --export failed");
+                    }
+
+                    out.emit(CliEvent::Progress {
+                        stage: "wrap".into(), percent: 90,
+                        message: "Wrapping payload + manifest...".into(),
+                    });
+                    let wrap_result = manifest.wrap_with_inner_tar(&inner_path, &out_path).await;
+                    let _ = std::fs::remove_file(&inner_path);
+                    wrap_result?;
+
+                    out.emit(CliEvent::Complete {
+                        message: format!("Exported to {}", out_path.display())
+                    });
                 }
             }
         }
@@ -582,43 +787,89 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         // ====== Import ======
         Commands::Import { file, name } => {
             use clawenv_core::config::{InstanceConfig, GatewayConfig, ResourceConfig};
+            use clawenv_core::export::BundleManifest;
             use clawenv_core::sandbox::SandboxType;
 
             let path = std::path::PathBuf::from(&file);
             if !path.exists() {
                 anyhow::bail!("File not found: {}", path.display());
             }
-            out.emit(CliEvent::Info { message: format!("Importing '{name}' from {file}...") });
+
+            // Peek the bundle manifest FIRST. Manifests became mandatory in
+            // v0.2.6 — bundles produced by earlier clawenv don't carry one
+            // and are rejected outright here (by explicit user decision; the
+            // compat shim was dropped). This also lets us validate
+            // host-vs-source sandbox type and claw_type before we spend any
+            // time untarring.
+            let manifest = BundleManifest::peek_from_tarball(&path).await
+                .map_err(|e| anyhow::anyhow!(
+                    "Cannot import {}: {e}\n\nThis version of clawenv only imports \
+                     bundles produced by clawenv v0.2.6 or later. Re-export from the \
+                     source machine with a current clawenv build.",
+                    path.display()
+                ))?;
+
+            let host_sandbox = SandboxType::from_os();
+            let bundle_sandbox = SandboxType::parse_wire(&manifest.sandbox_type)
+                .ok_or_else(|| anyhow::anyhow!(
+                    "Bundle declares unknown sandbox_type '{}'", manifest.sandbox_type
+                ))?;
+            if bundle_sandbox != host_sandbox {
+                anyhow::bail!(
+                    "Cannot import {}: bundle was produced for sandbox '{}' but this host \
+                     uses '{}'. Cross-backend import is not supported — run the bundle \
+                     on a matching OS/backend.",
+                    path.display(),
+                    bundle_sandbox.as_wire_str(),
+                    host_sandbox.as_wire_str(),
+                );
+            }
+
+            out.emit(CliEvent::Info {
+                message: format!(
+                    "Importing '{name}' ({} / {}) from {file}...",
+                    manifest.claw_type, manifest.sandbox_type
+                )
+            });
             let backend = clawenv_core::sandbox::detect_backend_for(&name)?;
             backend.import_image(&path).await?;
 
-            // Detect claw version inside the imported VM
-            let claw_reg = clawenv_core::claw::ClawRegistry::load();
-            let mut claw_type = "openclaw".to_string();
-            let mut claw_version = String::new();
-            for desc in claw_reg.list_all() {
-                if let Ok(ver) = backend.exec(&desc.version_check_cmd()).await {
-                    if !ver.trim().is_empty() && ver.trim() != "unknown" {
-                        claw_type = desc.id.clone();
-                        claw_version = ver.trim().to_string();
-                        break;
-                    }
-                }
-            }
+            // Claw identity comes from the manifest — no more probe loop.
+            // The version the source reported is authoritative; if the user
+            // wants a fresh reading they can hit `clawenv list --refresh`.
+            let claw_type = manifest.claw_type.clone();
+            let claw_version = manifest.claw_version.clone();
 
             // Save instance config
             let mut config = ConfigManager::load()
                 .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-            let sandbox_type = SandboxType::from_os();
+            // Look up the claw descriptor to decide whether to provision
+            // a dashboard_port. Imported instances land on the fixed
+            // 3000-block (no multi-instance conflict management — import
+            // is always into a fresh slot) so we compute offsets
+            // statically rather than going through allocate_port.
+            let claw_reg_for_import = clawenv_core::claw::ClawRegistry::load();
+            let desc_for_import = claw_reg_for_import.get(&claw_type);
+            let gateway_port = 3000u16;
+            let dashboard_port = if desc_for_import.has_dashboard() {
+                gateway_port + desc_for_import.dashboard_port_offset
+            } else { 0 };
             config.save_instance(InstanceConfig {
                 name: name.clone(),
                 claw_type,
                 version: claw_version,
-                sandbox_type,
+                sandbox_type: host_sandbox,
                 sandbox_id: format!("clawenv-{name}"),
                 created_at: chrono::Utc::now().to_rfc3339(),
                 last_upgraded_at: String::new(),
-                gateway: GatewayConfig { gateway_port: 3000, ttyd_port: 3001, bridge_port: 3002, webchat_enabled: true, channels: Default::default() },
+                gateway: GatewayConfig {
+                    gateway_port,
+                    ttyd_port: gateway_port + 1,
+                    bridge_port: gateway_port + 2,
+                    dashboard_port,
+                    webchat_enabled: true,
+                    channels: Default::default(),
+                },
                 resources: ResourceConfig::default(),
                 browser: Default::default(),
                 cached_latest_version: String::new(),
@@ -1112,6 +1363,13 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 ///   claw    — Install claw product inside existing environment
 ///   config  — Store API key + save instance config
 ///   gateway — Start gateway service
+///
+/// 9 args is over clippy's default threshold, but all of them are distinct
+/// install inputs that the wizard collects separately and hands off here.
+/// Bundling them into a struct would just rename the args without
+/// simplifying anything — the struct would be used exactly once. Silenced
+/// with a reason so we don't pretend the lint is unknown.
+#[allow(clippy::too_many_arguments)]
 async fn run_install_step(
     out: &Output,
     step: &str,
@@ -1334,6 +1592,9 @@ async fn run_install_step(
                     gateway_port: port,
                     ttyd_port,
                     bridge_port: clawenv_core::manager::install::allocate_port(port, 2),
+                    dashboard_port: if desc.has_dashboard() {
+                        clawenv_core::manager::install::allocate_port(port, desc.dashboard_port_offset)
+                    } else { 0 },
                     webchat_enabled: true,
                     channels: Default::default(),
                 },

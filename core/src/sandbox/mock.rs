@@ -155,8 +155,8 @@ impl SandboxBackend for MockBackend {
     async fn exec(&self, cmd: &str) -> Result<String> {
         self.calls.lock().unwrap().push(ExecCall { cmd: cmd.into() });
         let response = self.find_response(cmd);
-        if response.starts_with("ERROR:") {
-            anyhow::bail!("{}", &response[6..]);
+        if let Some(err) = response.strip_prefix("ERROR:") {
+            anyhow::bail!("{}", err);
         }
         Ok(response)
     }

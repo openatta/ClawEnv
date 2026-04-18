@@ -127,10 +127,23 @@ export default function ClawPage(props: {
 
   async function openInBrowser() {
     const inst = activeInstance();
-    const port = inst?.gateway_port ?? props.clawType.default_port;
-    await fetchToken();
-    const token = gatewayToken();
-    const url = token ? `http://127.0.0.1:${port}/?token=${token}` : `http://127.0.0.1:${port}`;
+    // Prefer the dashboard port (Hermes) if one was allocated. Falls back
+    // to the gateway port for claws whose gateway IS the UI (OpenClaw).
+    // dashboard_port is `0` (treated as absent) rather than undefined on
+    // instances saved before v0.2.7, so both `?? 0` and a truthiness
+    // check are needed to get the "no dashboard" semantics right.
+    const dash = inst?.dashboard_port ?? 0;
+    const port = dash !== 0 ? dash : (inst?.gateway_port ?? props.clawType.default_port);
+    // Token auth is a gateway-only feature (OpenClaw). Hermes dashboard
+    // binds to 0.0.0.0 but only inside the sandbox — host-level access
+    // goes through Lima/WSL/Podman port-forward which is loopback-only.
+    // Skip the token query param when targeting the dashboard.
+    let url = `http://127.0.0.1:${port}`;
+    if (dash === 0) {
+      await fetchToken();
+      const token = gatewayToken();
+      if (token) url = `http://127.0.0.1:${port}/?token=${token}`;
+    }
     try { await invoke("open_url_in_browser", { url }); }
     catch { prompt("Copy this URL:", url); }
   }

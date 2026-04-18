@@ -16,6 +16,12 @@ use tokio::sync::{broadcast, Notify, RwLock};
 
 use super::permissions::{BridgePermissions, PermissionResult};
 
+/// Opaque event-emitter callback signature used to forward bridge events
+/// into whichever UI layer embeds the bridge (Tauri's frontend emit in
+/// production, a test double in tests). Aliased because the bare type has
+/// three trait bounds and reads poorly in struct fields and function args.
+pub type EventEmitter = Box<dyn Fn(&str, &str) + Send + Sync>;
+
 pub struct BridgeState {
     pub permissions: BridgePermissions,
     /// HIL: signals when human intervention is complete
@@ -29,7 +35,7 @@ pub struct BridgeState {
     /// Exec approval: pending command for display
     pub approval_pending: Option<String>,
     /// Tauri app handle for emitting events to frontend
-    pub event_emitter: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    pub event_emitter: Option<EventEmitter>,
     /// Registered hardware devices (in-memory, devices re-register on reconnect)
     pub hw_devices: Vec<HwDevice>,
     /// Broadcast channel for pushing notifications to ALL hardware WebSocket connections
@@ -146,9 +152,9 @@ struct ErrorRes {
 // ---------- Helpers ----------
 
 fn expand_home(p: &str) -> PathBuf {
-    if p.starts_with("~/") {
+    if let Some(rest) = p.strip_prefix("~/") {
         if let Some(home) = dirs::home_dir() {
-            return home.join(&p[2..]);
+            return home.join(rest);
         }
     }
     PathBuf::from(p)
@@ -731,11 +737,10 @@ async fn hw_ws_connection(mut socket: WebSocket, state: SharedState, device_id: 
             msg = targeted_rx.recv() => {
                 match msg {
                     Ok((target_id, text)) => {
-                        if target_id == device_id {
-                            if socket.send(Message::Text(text.into())).await.is_err() {
+                        if target_id == device_id
+                            && socket.send(Message::Text(text.into())).await.is_err() {
                                 break;
                             }
-                        }
                     }
                     Err(broadcast::error::RecvError::Lagged(_)) => {}
                     Err(_) => break,
@@ -769,7 +774,7 @@ async fn hw_ws_connection(mut socket: WebSocket, state: SharedState, device_id: 
 pub async fn start_bridge(
     port: u16,
     permissions: BridgePermissions,
-    event_emitter: Option<Box<dyn Fn(&str, &str) + Send + Sync>>,
+    event_emitter: Option<EventEmitter>,
     hw_auth_token: String,
 ) -> anyhow::Result<()> {
     let (hw_notify_tx, _) = broadcast::channel::<String>(64);

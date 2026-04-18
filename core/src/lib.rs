@@ -9,6 +9,7 @@ pub mod manager;
 pub mod update;
 pub mod browser;
 pub mod bridge;
+pub mod export;
 
 #[cfg(test)]
 mod tests;

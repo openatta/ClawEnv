@@ -70,7 +70,7 @@ impl WslBackend {
         let body = resp.text().await?;
 
         // Parse directory listing for "alpine-minirootfs-X.Y.Z-{arch}.tar.gz"
-        let prefix = format!("alpine-minirootfs-");
+        let prefix = "alpine-minirootfs-".to_string();
         let suffix = format!("-{arch}.tar.gz");
         let mut versions: Vec<String> = Vec::new();
         for segment in body.split('"') {
@@ -575,13 +575,37 @@ echo "0" > "$DONE"
         if !path.exists() {
             anyhow::bail!("Image file not found: {}", path.display());
         }
+
+        // v0.2.6+ bundles are wrapped: outer tar.gz with `clawenv-bundle.toml`
+        // + `payload.tar` (the raw `wsl --export`). Peek manifest to
+        // validate, then unwrap payload into a temp file for `wsl --import`.
+        let manifest = crate::export::BundleManifest::peek_from_tarball(path).await
+            .map_err(|e| anyhow!(
+                "Cannot import WSL bundle from {}: {e}",
+                path.display()
+            ))?;
+        if manifest.sandbox_type != crate::sandbox::SandboxType::Wsl2Alpine.as_wire_str() {
+            anyhow::bail!(
+                "Bundle {} declares sandbox_type '{}' but this is the WSL importer.",
+                path.display(), manifest.sandbox_type
+            );
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "clawenv-wsl-import-{}.tar", std::process::id()
+        ));
+        crate::export::BundleManifest::extract_inner_payload(path, &tmp).await?;
+
         let distro_dir = self.distro_dir()?;
         tokio::fs::create_dir_all(&distro_dir).await?;
         let distro_path = distro_dir.to_string_lossy().to_string();
-        self.wsl_cmd(&[
+        let import_result = self.wsl_cmd(&[
             "--import", &self.distro_name, &distro_path,
-            &path.to_string_lossy(), "--version", "2",
-        ]).await?;
+            &tmp.to_string_lossy(), "--version", "2",
+        ]).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        import_result?;
+
         tracing::info!("Image imported as WSL distro '{}'", self.distro_name);
         Ok(())
     }

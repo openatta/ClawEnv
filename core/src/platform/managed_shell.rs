@@ -18,6 +18,12 @@ pub struct ManagedShell {
     install_dir: PathBuf,
 }
 
+impl Default for ManagedShell {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ManagedShell {
     /// Create a ManagedShell for the native instance.
     pub fn new() -> Self {
@@ -83,7 +89,7 @@ impl ManagedShell {
             format!("{cli_binary}.mjs"),
             format!("bin/{cli_binary}.js"),
             format!("dist/{cli_binary}.mjs"),
-            format!("dist/index.mjs"),
+            "dist/index.mjs".to_string(),
         ] {
             let p = pkg_dir.join(&entry);
             if p.exists() { return Some(p); }

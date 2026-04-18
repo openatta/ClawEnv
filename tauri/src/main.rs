@@ -76,9 +76,10 @@ fn main() {
                         tracing::info!("Starting bridge server on port {}", bridge_cfg.port);
                         // Create event emitter closure for HIL notifications
                         let bh = bridge_handle.clone();
-                        let emitter: Box<dyn Fn(&str, &str) + Send + Sync> = Box::new(move |event, payload| {
-                            let _ = bh.emit(event, payload.to_string());
-                        });
+                        let emitter: clawenv_core::bridge::server::EventEmitter =
+                            Box::new(move |event, payload| {
+                                let _ = bh.emit(event, payload.to_string());
+                            });
                         let hw_token = std::env::var("CLAWENV_HW_TOKEN").unwrap_or_default();
                         if let Err(e) = clawenv_core::bridge::server::start_bridge(
                             bridge_cfg.port,
@@ -153,13 +154,13 @@ fn main() {
                                     let browser = clawenv_core::browser::chromium::ChromiumBackend::new(
                                         std::sync::Arc::from(backend) as std::sync::Arc<dyn clawenv_core::sandbox::SandboxBackend>
                                     );
-                                    if let Ok(status) = browser.status().await {
-                                        if let clawenv_core::browser::BrowserStatus::Interactive { ref novnc_url } = status {
-                                            let _ = monitor_handle.emit("hil-required", serde_json::json!({
-                                                "instance": inst.name,
-                                                "novnc_url": novnc_url,
-                                            }));
-                                        }
+                                    if let Ok(clawenv_core::browser::BrowserStatus::Interactive { ref novnc_url })
+                                        = browser.status().await
+                                    {
+                                        let _ = monitor_handle.emit("hil-required", serde_json::json!({
+                                            "instance": inst.name,
+                                            "novnc_url": novnc_url,
+                                        }));
                                     }
                                 }
                             }
@@ -285,7 +286,14 @@ fn main() {
         .build(tauri::generate_context!())
         .expect("error while building ClawEnv")
         .run(|app, event| {
-            // macOS: clicking Dock icon when window is hidden should show it
+            // macOS-only handling: the Reopen event only fires on Apple
+            // platforms. On Windows/Linux the closure args are otherwise
+            // unused — `let _ = (...)` consumes them so clippy's
+            // `unused_variables` stays quiet without an ecosystem-level
+            // `#[allow]` sprinkled on the closure signature.
+            #[cfg(not(target_os = "macos"))]
+            let _ = (&app, &event);
+
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
                 if !has_visible_windows {

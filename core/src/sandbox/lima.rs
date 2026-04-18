@@ -358,8 +358,218 @@ async fn rewrite_lima_yaml_for_host(vm_dir: &Path, vm_name: &str) -> Result<()> 
         }
     }).collect::<Vec<_>>().join("\n");
 
+    // v0.2.7 added DASHBOARD_PORT forward. Bundles exported by older
+    // clawenv (or from clawenv-v0.2.7 on a claw that didn't need a
+    // dashboard at export time) don't have it. Import runs here; this is
+    // the one chance to patch the yaml before `limactl start` reads it
+    // and binds the port-forward set. Without this, an imported Hermes
+    // bundle reaches the dashboard-enabled config but the VM forwards
+    // only 3000-3004, so the host can never reach the dashboard.
+    //
+    // At import time we don't yet know the final dashboard_port (instance
+    // config is written AFTER import_image returns), so infer from the
+    // yaml's first guestPort + standard offset 5. Fine for bundles that
+    // follow our numbering convention; manual re-numbering by the user
+    // would miss, but at that point they know what they're doing.
+    let inferred_gw = find_first_guest_port(&rewritten).unwrap_or(3000);
+    let rewritten = ensure_dashboard_port_forward(&rewritten, inferred_gw + 5);
+
     tokio::fs::write(&yaml_path, rewritten).await?;
     Ok(())
+}
+
+/// Parse the yaml and return the first `guestPort:` found under
+/// `portForwards:`. Used by the import path to guess the gateway port
+/// when plumbing the authoritative config value through isn't possible.
+fn find_first_guest_port(yaml: &str) -> Option<u16> {
+    let mut in_port_forwards = false;
+    for line in yaml.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("portForwards:") {
+            in_port_forwards = true;
+            continue;
+        }
+        if in_port_forwards {
+            if !line.starts_with(' ') && !line.is_empty() && !trimmed.starts_with('#')
+                && !trimmed.starts_with("- ")
+            {
+                return None;
+            }
+            let key_part = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            if let Some(rest) = key_part.strip_prefix("guestPort:") {
+                if let Ok(p) = rest.trim().parse::<u16>() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Ensure the `portForwards:` list contains an entry for the given
+/// `dashboard_port`. Idempotent — running a second time does nothing.
+///
+/// Caller passes `dashboard_port` explicitly because inferring from the
+/// yaml was unreliable: an existing VM's yaml may list gateway_port=3000
+/// while the instance config has long since been renumbered to a
+/// different block (e.g. multi-instance allocation). The authoritative
+/// source is `InstanceConfig.gateway.dashboard_port`, not the yaml.
+///
+/// `pub(crate)` so migration code in manager/instance.rs can re-use this
+/// for live patching of existing VM yamls — re-exported as
+/// `crate::sandbox::ensure_dashboard_port_forward_yaml` for a stable name.
+pub(crate) fn ensure_dashboard_port_forward(yaml: &str, dashboard_port: u16) -> String {
+    if dashboard_port == 0 {
+        return yaml.to_string(); // nothing to add
+    }
+    let mut in_port_forwards = false;
+    let mut already_present = false;
+
+    for line in yaml.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("portForwards:") {
+            in_port_forwards = true;
+            continue;
+        }
+        if in_port_forwards {
+            if !line.starts_with(' ') && !line.is_empty() && !trimmed.starts_with('#')
+                && !trimmed.starts_with("- ")
+            {
+                in_port_forwards = false;
+                continue;
+            }
+            let key_part = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            if let Some(rest) = key_part.strip_prefix("guestPort:") {
+                if let Ok(p) = rest.trim().parse::<u16>() {
+                    if p == dashboard_port {
+                        already_present = true;
+                    }
+                }
+            }
+        }
+    }
+
+    if already_present {
+        return yaml.to_string();
+    }
+
+    // Append the new entry to the portForwards block. Find the last line
+    // of that block by scanning again — safer than regex splicing.
+    let mut out = String::with_capacity(yaml.len() + 80);
+    let mut inserted = false;
+    let mut in_pf = false;
+    let lines: Vec<&str> = yaml.lines().collect();
+    for (i, line) in lines.iter().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("portForwards:") {
+            in_pf = true;
+            out.push_str(line);
+            out.push('\n');
+            continue;
+        }
+        if in_pf && !inserted {
+            let next_is_end = i + 1 >= lines.len() || {
+                let nt = lines[i + 1].trim_start();
+                !lines[i + 1].starts_with(' ')
+                    && !lines[i + 1].is_empty()
+                    && !nt.starts_with('#')
+                    && !nt.starts_with("- ")
+            };
+            out.push_str(line);
+            out.push('\n');
+            if next_is_end {
+                out.push_str(&format!(
+                    "- guestPort: {dashboard_port}\n  hostPort: {dashboard_port}\n"
+                ));
+                inserted = true;
+                in_pf = false;
+            }
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Drop the trailing newline we may have added past the last source line
+    if !yaml.ends_with('\n') && out.ends_with('\n') {
+        out.pop();
+    }
+    out
+}
+
+#[cfg(test)]
+mod dashboard_forward_tests {
+    use super::ensure_dashboard_port_forward;
+
+    /// A yaml missing the dashboard forward should get one appended.
+    #[test]
+    fn appends_when_missing() {
+        let input = "\
+user:
+  name: clawenv
+portForwards:
+- guestPort: 3000
+  hostPort: 3000
+- guestPort: 3004
+  hostPort: 3004
+
+provision:
+- mode: system
+";
+        let out = ensure_dashboard_port_forward(input, 3005);
+        assert!(out.contains("guestPort: 3005"), "should insert 3005:\n{out}");
+        assert!(out.contains("hostPort: 3005"));
+        // Idempotent: running again shouldn't add a second copy.
+        let out2 = ensure_dashboard_port_forward(&out, 3005);
+        let count = out2.matches("guestPort: 3005").count();
+        assert_eq!(count, 1, "idempotent, got {count} copies");
+    }
+
+    /// A yaml that already has the forward should be left untouched.
+    #[test]
+    fn noop_when_present() {
+        let input = "\
+portForwards:
+- guestPort: 3000
+  hostPort: 3000
+- guestPort: 3005
+  hostPort: 3005
+
+provision: []
+";
+        assert_eq!(ensure_dashboard_port_forward(input, 3005), input);
+    }
+
+    /// Caller specifies the dashboard port authoritatively — the
+    /// function should use it regardless of what the yaml's existing
+    /// entries happen to contain.
+    #[test]
+    fn uses_caller_supplied_port() {
+        // yaml says gateway 3000 but caller asks for 3025 (multi-instance
+        // allocation where config.toml holds the truth).
+        let input = "\
+portForwards:
+- guestPort: 3000
+  hostPort: 3000
+
+provision: []
+";
+        let out = ensure_dashboard_port_forward(input, 3025);
+        assert!(out.contains("guestPort: 3025"), "\n{out}");
+        assert!(!out.contains("guestPort: 3005"));
+    }
+
+    /// dashboard_port == 0 means "no dashboard" — don't modify.
+    #[test]
+    fn zero_port_is_noop() {
+        let input = "\
+portForwards:
+- guestPort: 3000
+  hostPort: 3000
+
+provision: []
+";
+        assert_eq!(ensure_dashboard_port_forward(input, 0), input);
+    }
 }
 
 #[async_trait]
@@ -469,6 +679,14 @@ impl SandboxBackend for LimaBackend {
                 let bridge_port = crate::manager::install::allocate_port(gateway_port, 2);
                 let cdp_port = crate::manager::install::allocate_port(gateway_port, 3);
                 let vnc_ws_port = crate::manager::install::allocate_port(gateway_port, 4);
+                // Offset 5 is the conventional dashboard slot (see
+                // ClawDescriptor::dashboard_port_offset). We unconditionally
+                // allocate + forward this port: claws that don't use it
+                // (OpenClaw) simply won't bind to it, which makes the
+                // port-forward a harmless no-op. Keeping it unconditional
+                // means a later install of a dashboard-bearing claw into
+                // the same VM doesn't require re-rendering the yaml.
+                let dashboard_port = crate::manager::install::allocate_port(gateway_port, 5);
 
                 // The provision script carries its own multi-mirror fallback
                 // chain; USER_ALPINE_MIRROR is just its highest-priority entry.
@@ -481,6 +699,7 @@ impl SandboxBackend for LimaBackend {
                     .replace("{BRIDGE_PORT}", &bridge_port.to_string())
                     .replace("{CDP_PORT}", &cdp_port.to_string())
                     .replace("{VNC_WS_PORT}", &vnc_ws_port.to_string())
+                    .replace("{DASHBOARD_PORT}", &dashboard_port.to_string())
                     .replace("{PROXY_SCRIPT}", &opts.proxy_script)
                     .replace("{USER_ALPINE_MIRROR}", opts.alpine_mirror.trim_end_matches('/'));
 
@@ -611,6 +830,26 @@ impl SandboxBackend for LimaBackend {
     async fn import_image(&self, path: &Path) -> Result<()> {
         if !path.exists() {
             anyhow::bail!("Image file not found: {}", path.display());
+        }
+
+        // Manifest is mandatory (v0.2.6+). Peek before untarring so we can
+        // fail with a clear, actionable message instead of letting
+        // find_vm_dir_in_layout bail with a generic "no lima.yaml" after
+        // an expensive extract. We also verify the manifest's
+        // sandbox_type matches this backend — a native or wsl bundle
+        // landing here would otherwise hit confusing downstream errors.
+        let manifest = crate::export::BundleManifest::peek_from_tarball(path).await
+            .map_err(|e| anyhow!(
+                "Cannot import Lima bundle from {}: {e}",
+                path.display()
+            ))?;
+        if manifest.sandbox_type != crate::sandbox::SandboxType::LimaAlpine.as_wire_str() {
+            anyhow::bail!(
+                "Bundle {} declares sandbox_type '{}' but this is the Lima importer. \
+                 Run 'clawenv import' (which routes to the right backend), or use a \
+                 matching-backend bundle.",
+                path.display(), manifest.sandbox_type
+            );
         }
 
         let lima_base = lima_home();

@@ -102,9 +102,11 @@ fn cli_binary_path() -> String {
 fn new_cli_command(binary: &str) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(binary);
+    // tokio::process::Command has creation_flags directly on Windows —
+    // no need to import std's CommandExt, which clippy flags as unused
+    // (the method is resolved via tokio's inherent impl).
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000);
     }
     cmd
@@ -153,11 +155,7 @@ pub async fn run_cli(args: &[&str]) -> Result<Value> {
     let (activity_tx, mut activity_rx) = mpsc::channel::<()>(64);
 
     // Spawn stderr reader
-    let stderr_task = if let Some(se) = stderr {
-        Some(spawn_stderr_reader(se, activity_tx.clone()))
-    } else {
-        None
-    };
+    let stderr_task = stderr.map(|se| spawn_stderr_reader(se, activity_tx.clone()));
 
     // Read stdout JSON lines
     let stdout_activity = activity_tx.clone();
@@ -226,10 +224,19 @@ pub async fn run_cli(args: &[&str]) -> Result<Value> {
 /// All event types (Progress, Info, Complete, Error, Data) are forwarded.
 /// stderr is captured and logged.
 /// Acquires per-instance mutex to prevent duplicate concurrent operations.
-pub async fn run_cli_streaming(
+///
+/// `on_spawn` fires once the child is spawned, receiving its OS PID. Use
+/// it to wire up cancel buttons: store the PID somewhere the cancel
+/// handler can find, then send the child a SIGTERM / taskkill. Most
+/// callers don't need this and can pass `|_| {}`.
+pub async fn run_cli_streaming<F>(
     args: &[&str],
     tx: mpsc::Sender<CliEvent>,
-) -> Result<Value> {
+    on_spawn: F,
+) -> Result<Value>
+where
+    F: FnOnce(u32),
+{
     let _instance_guard = acquire_instance_lock(args).await;
     let binary = cli_binary_path();
     let mut cmd = new_cli_command(&binary);
@@ -240,16 +247,19 @@ pub async fn run_cli_streaming(
     let mut child = cmd.spawn()
         .with_context(|| format!("Failed to spawn CLI: {} --json {}", binary, args.join(" ")))?;
 
+    // Surface the child PID to the caller so they can kill it on cancel.
+    // `child.id()` can return None only after the child exits, which hasn't
+    // happened yet at this point.
+    if let Some(pid) = child.id() {
+        on_spawn(pid);
+    }
+
     let stdout = child.stdout.take().context("No stdout")?;
     let stderr = child.stderr.take();
 
     let (activity_tx, mut activity_rx) = mpsc::channel::<()>(64);
 
-    let stderr_task = if let Some(se) = stderr {
-        Some(spawn_stderr_reader(se, activity_tx.clone()))
-    } else {
-        None
-    };
+    let stderr_task = stderr.map(|se| spawn_stderr_reader(se, activity_tx.clone()));
 
     let stdout_activity = activity_tx.clone();
     let (line_tx, mut line_rx) = mpsc::channel::<String>(64);

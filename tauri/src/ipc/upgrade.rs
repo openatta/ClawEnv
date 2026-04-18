@@ -33,7 +33,7 @@ pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_versio
         });
 
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let result = cli_bridge::run_cli_streaming(&args_ref, tx).await;
+        let result = cli_bridge::run_cli_streaming(&args_ref, tx, |_| {}).await;
         fwd_task.await.ok();
 
         match result {

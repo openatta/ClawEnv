@@ -309,7 +309,7 @@ impl SandboxBackend for PodmanBackend {
 
     async fn exec(&self, cmd: &str) -> Result<String> {
         // Plan C: spawn with pipes, join!(wait, read, read) with timeout
-        let args = ["exec", &self.container_name.as_str(), "sh", "-c", cmd];
+        let args = ["exec", self.container_name.as_str(), "sh", "-c", cmd];
         let (stdout, stderr, rc) = super::exec_helper::exec("podman", &args).await?;
         if rc != 0 {
             anyhow::bail!("exec in Podman failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
@@ -320,7 +320,7 @@ impl SandboxBackend for PodmanBackend {
     }
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
-        let args = ["exec", &self.container_name.as_str(), "sh", "-c", cmd];
+        let args = ["exec", self.container_name.as_str(), "sh", "-c", cmd];
         let (output, rc) = super::exec_helper::exec_with_progress("podman", &args, tx).await?;
         if rc != 0 {
             anyhow::bail!("command failed in Podman (exit {rc}): {cmd}");
@@ -369,7 +369,34 @@ impl SandboxBackend for PodmanBackend {
         if !path.exists() {
             anyhow::bail!("Image file not found: {}", path.display());
         }
-        self.podman(&["load", "-i", &path.to_string_lossy()]).await?;
+
+        // Bundles produced by v0.2.6+ are an outer tar.gz containing a
+        // `clawenv-bundle.toml` and the raw `podman save` output as
+        // `payload.tar`. Peek the manifest first to validate sandbox_type,
+        // then unwrap the inner tar to a temp location and hand it to
+        // `podman load`. Older (unwrapped) bundles are rejected — the
+        // compat shim was dropped by user decision in v0.2.6.
+        let manifest = crate::export::BundleManifest::peek_from_tarball(path).await
+            .map_err(|e| anyhow::anyhow!(
+                "Cannot import Podman bundle from {}: {e}",
+                path.display()
+            ))?;
+        if manifest.sandbox_type != crate::sandbox::SandboxType::PodmanAlpine.as_wire_str() {
+            anyhow::bail!(
+                "Bundle {} declares sandbox_type '{}' but this is the Podman importer.",
+                path.display(), manifest.sandbox_type
+            );
+        }
+
+        let tmp = std::env::temp_dir().join(format!(
+            "clawenv-podman-import-{}.tar", std::process::id()
+        ));
+        crate::export::BundleManifest::extract_inner_payload(path, &tmp).await?;
+
+        let load_result = self.podman(&["load", "-i", &tmp.to_string_lossy()]).await;
+        let _ = tokio::fs::remove_file(&tmp).await;
+        load_result?;
+
         tracing::info!("Image loaded from {}", path.display());
         Ok(())
     }

@@ -40,10 +40,19 @@ export default function ConfigModal(props: {
     const gp = cfgGatewayPort();
     const tp = cfgTtydPort();
     if (gp === tp) return "Gateway and terminal ports cannot be the same";
+    // Check against every port a sibling instance holds: gateway, ttyd,
+    // AND dashboard (Hermes). The dashboard_port check was missing in
+    // v0.2.6 — a user could pick a gateway_port that landed on another
+    // instance's Hermes dashboard port (e.g. 3005 when instance A has
+    // dashboard at 3005) and the UI would silently accept it. Guard by
+    // coercing `undefined` (older instance records) to 0 so they never
+    // match a real port.
     for (const inst of props.instances) {
       if (inst.name === props.instanceName) continue;
-      if (inst.gateway_port === gp || inst.ttyd_port === gp) return `Port ${gp} already used by "${inst.name}"`;
-      if (inst.gateway_port === tp || inst.ttyd_port === tp) return `Port ${tp} already used by "${inst.name}"`;
+      const used = [inst.gateway_port, inst.ttyd_port, inst.dashboard_port ?? 0]
+        .filter(p => p !== 0);
+      if (used.includes(gp)) return `Port ${gp} already used by "${inst.name}"`;
+      if (used.includes(tp)) return `Port ${tp} already used by "${inst.name}"`;
     }
     if (gp < 1024 || gp > 65535) return "Gateway port must be 1024-65535";
     if (tp < 1024 || tp > 65535) return "Terminal port must be 1024-65535";

@@ -51,6 +51,15 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: ${{ runner.os }}-cargo-
 
+      # Version-drift guard: all four version strings (core/cli/tauri Cargo,
+      # tauri.conf.json, package.json) must agree, otherwise released bundles
+      # stamp the wrong clawenv_version in their manifest. Linux-only — the
+      # check is pure text, doesn't need three OSes.
+      - name: Version SSOT guard
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./scripts/check-version-sync.sh
+
       - name: Check (core + cli)
         run: cargo check -p clawenv-core -p clawcli
 
@@ -60,9 +69,11 @@ jobs:
       - name: Test (cli e2e)
         run: cargo test -p clawcli
 
+      # Clippy is a hard gate now — we shipped dead-code warnings for weeks
+      # because this step had continue-on-error. No more silent drift.
+      # `--tests` ensures test code isn't a loophole for warnings either.
       - name: Clippy
-        run: cargo clippy -p clawenv-core -p clawcli -- -D warnings
-        continue-on-error: true
+        run: cargo clippy -p clawenv-core -p clawcli --tests -- -D warnings
 
   # ============================================================
   # L2: CLI smoke — heavy matrix; only on tags / manual runs.
@@ -138,6 +149,34 @@ jobs:
       - name: CLI sandbox info
         shell: bash
         run: ${{ steps.cli.outputs.path }} --json sandbox info || true
+
+      # Bundle manifest unit tests — file-format correctness, synthetic
+      # payloads, serde drift guard. Fast (~0.05s).
+      - name: Bundle manifest unit tests
+        shell: bash
+        run: cargo test -p clawenv-core --lib export:: sandbox::sandbox_type_tests
+
+      # Bundle contract e2e — CLI import rejects manifest-less /
+      # future-schema / wrong-backend bundles. No live instance required,
+      # so CI can run it on all three OSes.
+      - name: Bundle offline e2e
+        shell: bash
+        run: ./scripts/e2e-bundle-offline.sh
+
+      # Podman wrap/unwrap roundtrip — Linux only. Installs podman and
+      # runs a real `podman save → wrap → unwrap → podman load` cycle
+      # against a 3MB alpine image. Catches wrap helper regressions
+      # against actual container-image tar format (unit tests only use
+      # synthetic bytes). Skipped if podman install fails on the runner.
+      - name: Install podman (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y podman
+          podman --version
+      - name: Podman wrap roundtrip (Linux)
+        if: runner.os == 'Linux'
+        run: cargo test -p clawenv-core --test podman_roundtrip -- --ignored --nocapture
 
   # ============================================================
   # L3: Cross-compile Linux static binary — tags / manual only.

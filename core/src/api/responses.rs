@@ -18,6 +18,11 @@ pub struct InstanceSummary {
     pub gateway_port: u16,
     #[serde(default)]
     pub ttyd_port: u16,
+    /// Web dashboard port. `0` when the claw uses its gateway process as
+    /// the UI (OpenClaw); non-zero for claws with a split UI process
+    /// (Hermes). Frontend opens `http://127.0.0.1:{dashboard_port || gateway_port}/`.
+    #[serde(default)]
+    pub dashboard_port: u16,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,6 +39,9 @@ pub struct StatusResponse {
     pub health: String,
     pub gateway_port: u16,
     pub ttyd_port: u16,
+    /// See InstanceSummary.dashboard_port — same semantics.
+    #[serde(default)]
+    pub dashboard_port: u16,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesInfo>,
     #[serde(default)]

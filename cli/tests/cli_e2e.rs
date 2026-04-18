@@ -340,11 +340,13 @@ fn test_all_commands_help() {
 
 #[test]
 fn test_config_proxy_test_no_proxy() {
-    // Should succeed with info message when no proxy configured
-    let (code, event) = run_json(&["config", "proxy-test"]);
-    // Either succeeds (no proxy = info) or fails (no config)
+    // Should succeed with info message when no proxy configured.
+    // We only assert on the *event type* here — the exit code is
+    // intentionally ignored because it varies by whether a config.toml
+    // exists on the test machine (nonzero if no config, zero with one).
+    let (_code, event) = run_json(&["config", "proxy-test"]);
     let t = event["type"].as_str().unwrap_or("");
-    assert!(t == "info" || t == "error", "proxy-test should emit info or error, got: {}", t);
+    assert!(t == "info" || t == "error", "proxy-test should emit info or error, got: {t}");
 }
 
 #[test]

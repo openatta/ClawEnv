@@ -15,9 +15,12 @@ use anyhow::Result;
 pub fn silent_cmd(program: &str) -> tokio::process::Command {
     #[allow(unused_mut)]
     let mut cmd = tokio::process::Command::new(program);
+    // `creation_flags` is provided directly on `tokio::process::Command`
+    // (not via std's CommandExt trait) — no `use` import required here
+    // and importing std::os::windows::process::CommandExt actually fires
+    // unused_imports because nothing else in this function consumes it.
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
         if program.to_lowercase().contains("powershell") {
             cmd.args(["-ExecutionPolicy", "Bypass"]);
@@ -33,8 +36,9 @@ pub fn silent_cmd(program: &str) -> tokio::process::Command {
 /// For host: use `kill_by_name_host("openclaw gateway").await`
 pub fn kill_by_name_cmd(pattern: &str) -> String {
     // Pattern comes from desc.process_names() (TOML descriptor, trusted).
-    // Still escape to prevent accidental injection if pattern changes.
-    let esc = pattern.replace('\'', "'\\''");
+    // Different escaping per platform — unix double-single-quote vs
+    // powershell double-quote. Compute each inside its own cfg so the
+    // unused branch doesn't fire an unused_variable warning.
     #[cfg(target_os = "windows")]
     {
         let ps_esc = pattern.replace('\'', "''");
@@ -44,6 +48,7 @@ pub fn kill_by_name_cmd(pattern: &str) -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let esc = pattern.replace('\'', "'\\''");
         format!("pkill -9 -f '{esc}' 2>/dev/null || true")
     }
 }
@@ -51,7 +56,6 @@ pub fn kill_by_name_cmd(pattern: &str) -> String {
 /// Check if a process matching a pattern is running.
 /// Returns a shell command that echoes "running" or "stopped".
 pub fn check_process_cmd(pattern: &str) -> String {
-    let esc = pattern.replace('\'', "'\\''");
     #[cfg(target_os = "windows")]
     {
         let ps_esc = pattern.replace('\'', "''");
@@ -61,6 +65,7 @@ pub fn check_process_cmd(pattern: &str) -> String {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        let esc = pattern.replace('\'', "'\\''");
         format!("pgrep -f '{esc}' > /dev/null 2>&1 && echo running || echo stopped")
     }
 }

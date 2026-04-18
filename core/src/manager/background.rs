@@ -7,7 +7,6 @@
 //! Used by: install.rs, upgrade.rs
 
 use anyhow::Result;
-use tokio::sync::mpsc;
 
 use crate::sandbox::SandboxBackend;
 

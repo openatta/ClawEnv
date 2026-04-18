@@ -113,7 +113,18 @@ pub fn refresh_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
     if let Ok(config) = ConfigManager::load() {
         let any_running = config.instances().iter().any(|inst| {
-            let addr = format!("127.0.0.1:{}", inst.gateway.gateway_port);
+            // Probe whichever port is actually serving the UI: dashboard
+            // when it's been allocated (Hermes), else gateway (OpenClaw).
+            // Keep this in lockstep with instance_health in instance.rs —
+            // otherwise the tray and the UI's green/red dot would disagree
+            // and users would see "stopped" in tray while the UI says
+            // "running" (or vice versa).
+            let probe_port = if inst.gateway.dashboard_port != 0 {
+                inst.gateway.dashboard_port
+            } else {
+                inst.gateway.gateway_port
+            };
+            let addr = format!("127.0.0.1:{probe_port}");
             TcpStream::connect_timeout(
                 &addr.parse().unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap()),
                 Duration::from_secs(1),

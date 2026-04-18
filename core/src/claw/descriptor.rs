@@ -14,8 +14,10 @@ use serde::{Deserialize, Serialize};
 /// How a claw product is installed inside the sandbox.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PackageManager {
     /// Node.js / npm: `npm install -g <package>@<version>`
+    #[default]
     Npm,
     /// Python / pip: `pip install <package>==<version>` (PyPI package)
     Pip,
@@ -25,9 +27,6 @@ pub enum PackageManager {
     GitPip,
 }
 
-impl Default for PackageManager {
-    fn default() -> Self { Self::Npm }
-}
 
 /// Describes a specific claw product and how to interact with it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +69,20 @@ pub struct ClawDescriptor {
     /// Empty string means this claw has no gateway/server mode.
     #[serde(default)]
     pub gateway_cmd: String,
+    /// Command to start the **web dashboard** (management UI), with
+    /// `{port}` placeholder. Present only for claws that split UI from
+    /// API — OpenClaw serves both at gateway_port, Hermes splits them
+    /// (gateway = OpenAI-compatible API, dashboard = management UI).
+    /// Empty string means "no separate dashboard; UI lives at gateway_port".
+    #[serde(default)]
+    pub dashboard_cmd: String,
+    /// Port offset for the dashboard inside the instance's 20-port block.
+    /// e.g. 5 → dashboard runs at `gateway_port + 5`. Only consulted when
+    /// `dashboard_cmd` is non-empty. Allocated via `allocate_port` so
+    /// contention with an already-bound host port falls back gracefully
+    /// to the next free slot in the block.
+    #[serde(default)]
+    pub dashboard_port_offset: u16,
     /// Command to check version (e.g., "--version")
     pub version_cmd: String,
     /// Command to set API key, with `{key}` placeholder
@@ -124,6 +137,28 @@ impl ClawDescriptor {
             self.cli_binary,
             self.gateway_cmd.replace("{port}", &port.to_string())
         ))
+    }
+
+    /// Format the dashboard (web UI) start command. Returns None for
+    /// claws that don't have a separate dashboard — their UI lives at
+    /// the gateway port instead. See `dashboard_cmd` docs.
+    pub fn dashboard_start_cmd(&self, port: u16) -> Option<String> {
+        if self.dashboard_cmd.is_empty() {
+            return None;
+        }
+        Some(format!(
+            "{} {}",
+            self.cli_binary,
+            self.dashboard_cmd.replace("{port}", &port.to_string())
+        ))
+    }
+
+    /// True if this claw ships a standalone dashboard process. Callers
+    /// use this to decide whether to allocate a dashboard_port and
+    /// whether the "Open Control Panel" button should target the
+    /// dashboard vs. the gateway.
+    pub fn has_dashboard(&self) -> bool {
+        !self.dashboard_cmd.is_empty()
     }
 
     /// Format the version check command.
@@ -212,14 +247,21 @@ impl ClawDescriptor {
     }
 
     /// Process name patterns for kill commands.
-    /// Returns both "binary gateway" and "binary-gateway" to match
-    /// different process naming conventions.
-    /// Does NOT include the bare binary name to avoid killing unrelated processes.
+    /// Returns "binary gateway" / "binary-gateway" plus "binary dashboard"
+    /// when the claw has a separate dashboard process, so stop/restart
+    /// tears down both halves. Does NOT include the bare binary name to
+    /// avoid killing unrelated `hermes chat` / `openclaw auth` sessions
+    /// the user might have running.
     pub fn process_names(&self) -> Vec<String> {
-        vec![
+        let mut names = vec![
             format!("{} gateway", self.cli_binary),
             format!("{}-gateway", self.cli_binary),
-        ]
+        ];
+        if self.has_dashboard() {
+            names.push(format!("{} dashboard", self.cli_binary));
+            names.push(format!("{}-dashboard", self.cli_binary));
+        }
+        names
     }
 
     /// Whether MCP bridge scripts should use Python runtime (vs Node.js).
@@ -242,6 +284,12 @@ pub fn openclaw_descriptor() -> ClawDescriptor {
         sandbox_provision: vec![],
         cli_binary: "openclaw".into(),
         gateway_cmd: "gateway --port {port} --allow-unconfigured".into(),
+        // OpenClaw's UI is served by the same gateway process — no
+        // separate dashboard daemon. Leaving these empty tells the
+        // installer "don't allocate a dashboard_port, don't spawn a
+        // second process" and keeps the URL math simple.
+        dashboard_cmd: String::new(),
+        dashboard_port_offset: 0,
         version_cmd: "--version".into(),
         config_apikey_cmd: "config set apiKey '{key}'".into(),
         mcp_set_cmd: "mcp set {name} '{json}'".into(),

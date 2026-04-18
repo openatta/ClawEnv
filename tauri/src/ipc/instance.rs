@@ -25,6 +25,13 @@ pub struct InstanceInfo {
     pub version: String,
     pub gateway_port: u16,
     pub ttyd_port: u16,
+    /// Dashboard port for claws that split UI from gateway (Hermes).
+    /// 0 means "no dashboard; UI lives at gateway_port". Forwarded here
+    /// straight from `InstanceSummary::dashboard_port`; dropping this
+    /// field would force the frontend to fall back to gateway_port,
+    /// which is exactly the bug that made the Hermes "Open Control
+    /// Panel" button land on an empty page before v0.2.7.
+    pub dashboard_port: u16,
 }
 
 #[tauri::command]
@@ -44,6 +51,7 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
             version: s.version,
             gateway_port: s.gateway_port,
             ttyd_port: s.ttyd_port,
+            dashboard_port: s.dashboard_port,
         }
     }).collect();
 

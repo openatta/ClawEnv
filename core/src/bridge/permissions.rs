@@ -32,7 +32,7 @@ fn default_true() -> bool { true }
 
 fn default_shell_program() -> String {
     #[cfg(target_os = "windows")]
-    { return "powershell".into(); }
+    { "powershell".into() }
     #[cfg(not(target_os = "windows"))]
     { "bash".into() }
 }
@@ -191,16 +191,14 @@ impl BridgePermissions {
     /// Simple glob matching supporting `*` and `**`
     fn glob_match(path: &str, pattern: &str) -> bool {
         // Handle ** — matches any number of path segments
-        if pattern.ends_with("/**") {
-            let prefix = &pattern[..pattern.len() - 3];
+        if let Some(prefix) = pattern.strip_suffix("/**") {
             return path.starts_with(prefix);
         }
 
         // Handle trailing * (single segment match)
         if pattern.ends_with("/*") && !pattern.ends_with("/**") {
             let prefix = &pattern[..pattern.len() - 2];
-            if path.starts_with(prefix) {
-                let rest = &path[prefix.len()..];
+            if let Some(rest) = path.strip_prefix(prefix) {
                 // Must be a single segment (one `/` then no more `/`)
                 return rest.starts_with('/')
                     && rest[1..].find('/').is_none();
@@ -209,8 +207,7 @@ impl BridgePermissions {
         }
 
         // Handle patterns like ~/.env* — prefix match with trailing wildcard
-        if pattern.ends_with('*') {
-            let prefix = &pattern[..pattern.len() - 1];
+        if let Some(prefix) = pattern.strip_suffix('*') {
             return path.starts_with(prefix);
         }
 
@@ -222,7 +219,7 @@ impl BridgePermissions {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    
 
     #[test]
     fn test_deny_takes_priority() {

@@ -7,6 +7,10 @@ export type Instance = {
   version: string;
   gateway_port: number;
   ttyd_port: number;
+  // Web dashboard port for claws that split UI from gateway (Hermes).
+  // Optional because older config.toml files don't carry this field —
+  // serde::default on the Rust side → missing → undefined here.
+  dashboard_port?: number;
 };
 
 export type ClawType = {

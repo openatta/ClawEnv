@@ -33,8 +33,23 @@ mcp_runtime = "node"
 
 # Hermes Agent — self-improving AI agent by Nous Research
 # Python-based, git clone + uv install, sandbox-only (no native install)
-# Hermes has an OpenAI-compatible API Server (FastAPI/Uvicorn) via `hermes gateway`.
-# Requires API_SERVER_ENABLED=true in ~/.hermes/.env (configured by ClawEnv at install).
+#
+# Hermes splits UI and API across two processes (different from OpenClaw):
+#   - `hermes dashboard`    web management UI (React app bundled under /opt/hermes/web)
+#   - `hermes gateway run`  messaging bridge (Telegram / Discord / WhatsApp) — requires
+#                           user to configure a bot token first, so we do NOT auto-start
+#                           it (would just loop-fail in nohup). Users start it manually
+#                           after setup. `gateway_cmd` therefore stays empty.
+#
+# The dashboard ships its Web UI as source (/opt/hermes/web/*) and auto-builds it on
+# first launch via `npm install && npm run build`. Our install flow pre-builds it so
+# the user's first click doesn't stall for 3+ minutes — see core/src/manager/install.rs
+# Hermes-specific section.
+#
+# API_SERVER_ENABLED=true in ~/.hermes/.env enables the OpenAI-compatible API Server
+# which is hosted by the `hermes dashboard` process (same port as the UI) — no
+# separate daemon needed.
+#
 # Known issue: [web] extra has uv.lock bug (NousResearch/hermes-agent#9569),
 # fastapi/uvicorn installed explicitly as workaround.
 [[claw]]
@@ -49,7 +64,14 @@ pip_extras = "termux,messaging,web"
 pip_package = "hermes-agent"
 sandbox_provision = ["py3-pip", "py3-uv", "nodejs", "npm"]
 cli_binary = "hermes"
-gateway_cmd = "gateway --port {port}"
+gateway_cmd = ""                                              # no messaging auto-start
+# --host 127.0.0.1 (not 0.0.0.0): Hermes refuses 0.0.0.0 without --insecure
+# because the dashboard exposes API keys + config with weak auth. Lima,
+# WSL2 and Podman all forward 127.0.0.1-bound guest ports to 127.0.0.1 on
+# the host via their native tunnel, so loopback-only binding still works
+# end-to-end for us without widening the exposure surface.
+dashboard_cmd = "dashboard --port {port} --host 127.0.0.1 --no-open"
+dashboard_port_offset = 5                                     # dashboard at gateway_port+5
 version_cmd = "--version"
 config_apikey_cmd = "config set api_key '{key}'"
 mcp_set_cmd = "mcp add {name} --config '{json}'"

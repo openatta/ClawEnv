@@ -367,16 +367,61 @@ pub async fn install(
         SandboxType::Native => "127.0.0.1".into(),
     };
 
-    // Hermes API Server: configure .env + install fastapi/uvicorn workaround
-    if desc.uses_python_mcp() && !desc.gateway_cmd.is_empty() {
-        send(&tx, "Configuring Hermes API Server...", 76, InstallStage::StartOpenClaw).await;
-        // Enable API Server in ~/.hermes/.env (idempotent: check before appending)
+    // Hermes-specific provisioning: configure .env, install fastapi/uvicorn,
+    // fix up ownership of /opt/{id}, and pre-build the Web UI. Gated on
+    // `has_dashboard()` rather than "python_mcp && gateway_cmd non-empty"
+    // (the old check) because we've split UI out of gateway — Hermes now
+    // has empty gateway_cmd but a real dashboard_cmd.
+    if desc.has_dashboard() && desc.package_manager == crate::claw::descriptor::PackageManager::GitPip {
+        send(&tx, "Configuring Hermes API Server...", 74, InstallStage::StartOpenClaw).await;
+        // Enable API Server in ~/.hermes/.env (idempotent: check before appending).
+        // The API Server lives inside `hermes dashboard`, so this env flag
+        // is effectively a dashboard-feature toggle.
         backend.exec(&format!(
             "mkdir -p ~/.{id}; grep -q 'API_SERVER_ENABLED' ~/.{id}/.env 2>/dev/null || printf 'API_SERVER_ENABLED=true\\nAPI_SERVER_KEY=clawenv-local\\n' >> ~/.{id}/.env",
             id = desc.id
         )).await?;
-        // Workaround: [web] extra uv.lock bug (NousResearch/hermes-agent#9569)
+        // Workaround: [web] extra uv.lock bug (NousResearch/hermes-agent#9569).
+        // Without fastapi+uvicorn the dashboard's API Server half fails to
+        // bind — silently, no log. Install via pip --break-system-packages
+        // to route around uv.lock's resolver bug.
         backend.exec("pip install --break-system-packages fastapi \"uvicorn[standard]\" 2>/dev/null || true").await?;
+
+        // Fix ownership: git_pip clones into /opt/{id} as root during the
+        // background install (sudo wrapper), but the dashboard auto-runs
+        // `npm install && npm run build` in web/ as the sandbox user on
+        // first launch — which then EACCES's on /opt/{id}/web/node_modules.
+        // Chown the whole tree to the sandbox user so both the pre-build
+        // below and any later `hermes dashboard` rebuilds work.
+        send(&tx, "Fixing permissions on dashboard source...", 75, InstallStage::StartOpenClaw).await;
+        backend.exec(&format!(
+            "sudo chown -R $(id -u):$(id -g) /opt/{id} 2>/dev/null || chown -R $(id -u):$(id -g) /opt/{id}",
+            id = desc.id
+        )).await?;
+
+        // Pre-build the dashboard Web UI so the user's first "Open Control
+        // Panel" click doesn't stall for several minutes behind npm
+        // install. Deliberately best-effort: if it fails we still install
+        // the claw — the dashboard will retry the build on first launch.
+        send(&tx, "Pre-building dashboard Web UI (one-time, ~2 min)...", 76, InstallStage::StartOpenClaw).await;
+        let build_cmd = format!(
+            "cd /opt/{id}/web && npm install --no-audit --no-fund --loglevel=error \
+             && npm run build",
+            id = desc.id
+        );
+        match backend.exec(&build_cmd).await {
+            Ok(_) => {
+                tracing::info!("Hermes dashboard Web UI pre-built");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Hermes dashboard Web UI pre-build failed (non-fatal — will retry at \
+                     first launch): {e}"
+                );
+                send(&tx, "Web UI pre-build skipped (will build on first launch)", 77,
+                     InstallStage::StartOpenClaw).await;
+            }
+        }
     }
 
     // MCP plugins (Bridge + HIL skill + HW Notify)
@@ -490,6 +535,23 @@ if p.exists():
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
     }
 
+    // Start the web dashboard as an independent process for claws that
+    // split UI/API across two daemons (Hermes). Lima/WSL/Podman port-
+    // forwards are set up when the sandbox was created — see the
+    // GatewayConfig construction below for the port. Written to its own
+    // log so debugging dashboard problems doesn't mean wading through
+    // gateway output (which for Hermes is empty anyway).
+    if desc.has_dashboard() {
+        let dashboard_port = allocate_port(opts.gateway_port, desc.dashboard_port_offset);
+        if let Some(dashboard_cmd) = desc.dashboard_start_cmd(dashboard_port) {
+            send(&tx, "Starting dashboard (web UI)...", 89, InstallStage::StartOpenClaw).await;
+            backend.exec(&format!(
+                "nohup {dashboard_cmd} > /tmp/clawenv-dashboard.log 2>&1 &"
+            )).await?;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
+    }
+
     // ---- Post-install verification ----
     send(&tx, "Verifying installation...", 90, InstallStage::StartOpenClaw).await;
     let verify = backend.exec(&format!("which {} 2>/dev/null", desc.cli_binary)).await
@@ -516,6 +578,13 @@ if p.exists():
             gateway_port: opts.gateway_port,
             ttyd_port,
             bridge_port: allocate_port(opts.gateway_port, 2),
+            // Allocate a dashboard port iff this claw has a standalone
+            // dashboard process (currently Hermes only). `0` tells
+            // start_instance + the UI "no dashboard" so the flow is
+            // unchanged for OpenClaw.
+            dashboard_port: if desc.has_dashboard() {
+                allocate_port(opts.gateway_port, desc.dashboard_port_offset)
+            } else { 0 },
             webchat_enabled: true,
             channels: Default::default(),
         },
@@ -650,14 +719,14 @@ mod tests {
     fn test_allocate_port_basic() {
         // allocate_port tries base+offset, returns it if free
         let port = allocate_port(3000, 1);
-        assert!(port >= 3001 && port <= 3019, "should be in block: {port}");
+        assert!((3001..=3019).contains(&port), "should be in block: {port}");
     }
 
     #[test]
     fn test_allocate_port_range() {
         // allocate_port(base, offset) should return within the 20-port block
         let port = allocate_port(50000, 2);
-        assert!(port >= 50002 && port <= 50019, "should be in block: {port}");
+        assert!((50002..=50019).contains(&port), "should be in block: {port}");
     }
 
     #[test]
