@@ -157,12 +157,14 @@ jobs:
 
       # Bundle manifest unit tests — file-format correctness, synthetic
       # payloads, serde drift guard. Fast (~0.05s).
-      # `run: |` (block scalar) — the `::` module-path separators make
-      # YAML flow-scalar parsers unhappy.
+      # `cargo test` takes exactly one TESTNAME positional, so we invoke
+      # it twice (the module-path `::` made flow-scalar YAML unhappy
+      # AND made cargo reject the second arg as unexpected).
       - name: Bundle manifest unit tests
         shell: bash
         run: |
-          cargo test -p clawenv-core --lib export:: sandbox::sandbox_type_tests
+          cargo test -p clawenv-core --lib export::
+          cargo test -p clawenv-core --lib sandbox::sandbox_type_tests
 
       # Bundle contract e2e — CLI import rejects manifest-less /
       # future-schema / wrong-backend bundles. No live instance required,
@@ -235,6 +237,14 @@ jobs:
     name: Release bundle (${{ matrix.label }})
     needs: test
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    # contents:write is needed so softprops/action-gh-release@v2 can
+    # upload assets to an existing GH release. The default GITHUB_TOKEN
+    # on workflow_dispatch + push-to-main is contents:read, which 403s
+    # on any release-modification API call ("Resource not accessible by
+    # integration"). Tag-push workflows already get write by default,
+    # so this is for completeness.
+    permissions:
+      contents: write
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
