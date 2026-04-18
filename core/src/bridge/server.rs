@@ -746,9 +746,15 @@ async fn hw_ws_connection(mut socket: WebSocket, state: SharedState, device_id: 
                     Err(_) => break,
                 }
             }
-            // Handle incoming messages from hw client
+            // Handle incoming messages from hw client.
+            // Clippy 1.95+ suggests collapsing the inner `if` into a
+            // match guard — but `data` is `axum::body::Bytes` (no Copy)
+            // so it can't be moved inside a guard (E0507). Keep the
+            // nested form with an explicit allow + reason.
             msg = socket.recv() => {
                 match msg {
+                    #[allow(clippy::collapsible_match, clippy::collapsible_if,
+                            reason = "pattern guard can't move `data`; see E0507")]
                     Some(Ok(Message::Ping(data))) => {
                         if socket.send(Message::Pong(data)).await.is_err() {
                             break;

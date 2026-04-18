@@ -126,11 +126,11 @@ impl GitRelease {
         }
         #[cfg(target_os = "linux")]
         {
-            return match arch {
+            match arch {
                 "aarch64" => Ok(("ubuntu-arm64", self.sha256_linux_arm64.as_str())),
                 "x86_64"  => Ok(("ubuntu-x64",   self.sha256_linux_x86_64.as_str())),
                 other => anyhow::bail!("Unsupported Linux architecture: {other}"),
-            };
+            }
         }
         #[cfg(target_os = "windows")]
         { let _ = arch; anyhow::bail!("Git on Windows is shipped via MinGit, not dugite-native"); }

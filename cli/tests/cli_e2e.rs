@@ -170,13 +170,18 @@ fn test_install_bad_step() {
 #[test]
 fn test_install_step_prereq_native() {
     // Native prereq checks ClawEnv's own Node.js (~/.clawenv/node/).
-    // May need to download if not present — accept any non-crash exit.
-    let (code, event) = run_json(&["install", "--mode", "native", "--step", "prereq"]);
+    // May need to download if not present, and the download can fail on
+    // CI runners (GitHub-hosted Windows in particular: rate limits,
+    // transient network, mirror quirks). The test is really only
+    // asserting "the CLI's prereq subcommand emits a structured event"
+    // — not "the prereq actually succeeded". A structured `error` event
+    // is a valid outcome; an unstructured panic (no parseable JSON, no
+    // `type` field) is the real failure we're guarding against.
+    let (_code, event) = run_json(&["install", "--mode", "native", "--step", "prereq"]);
     let event_type = event["type"].as_str().unwrap_or("");
-    // Success if node exists, or if it attempted download (may fail without network)
     assert!(
-        code == 0 || event_type == "info" || event_type == "progress",
-        "prereq should not crash, got code={code} event={event_type}"
+        matches!(event_type, "info" | "progress" | "complete" | "error"),
+        "prereq should emit a structured CLI event, got {event_type:?} (full event: {event})"
     );
 }
 
