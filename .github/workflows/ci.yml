@@ -12,6 +12,11 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Tag to attach release-bundle artifacts to (e.g. v0.2.7). Leave empty to skip upload — artifacts will only be available as workflow-level downloads.'
+        required: false
+        default: ''
 
 env:
   CARGO_TERM_COLOR: always
@@ -152,9 +157,12 @@ jobs:
 
       # Bundle manifest unit tests — file-format correctness, synthetic
       # payloads, serde drift guard. Fast (~0.05s).
+      # `run: |` (block scalar) — the `::` module-path separators make
+      # YAML flow-scalar parsers unhappy.
       - name: Bundle manifest unit tests
         shell: bash
-        run: cargo test -p clawenv-core --lib export:: sandbox::sandbox_type_tests
+        run: |
+          cargo test -p clawenv-core --lib export:: sandbox::sandbox_type_tests
 
       # Bundle contract e2e — CLI import rejects manifest-less /
       # future-schema / wrong-backend bundles. No live instance required,
@@ -206,23 +214,49 @@ jobs:
         run: file target/aarch64-unknown-linux-musl/release/clawcli
 
   # ============================================================
-  # Tauri GUI check — tags / manual only (expensive: webkit2gtk,
-  # full Tauri build deps on three OSes).
+  # Release bundle — full `cargo tauri build` on the 3 primary
+  # host architectures we ship to. Subsumes the old "tauri-check"
+  # job (a plain `cargo check` is redundant once this actually
+  # links + bundles). Expensive, so still gated on tags + manual.
+  #
+  # Triggers:
+  #   - push of tag v* → auto-attaches to that release
+  #   - workflow_dispatch with `release_tag=vX.Y.Z` → attaches
+  #     artifacts to that tag's release (late-uploads)
+  #   - workflow_dispatch without release_tag → builds only,
+  #     artifacts available via the workflow-run download UI
+  #
+  # Matrix is intentionally minimal:
+  #   macos-latest  = arm64  (Apple Silicon — covers M1/M2/M3)
+  #   windows-latest = x86_64 (ARM64 Windows users build locally)
+  #   ubuntu-latest  = x86_64 (ARM Linux users build locally)
   # ============================================================
-  tauri-check:
-    name: Tauri Check (${{ matrix.os }})
+  release-bundle:
+    name: Release bundle (${{ matrix.label }})
     needs: test
     if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, windows-latest, ubuntu-latest]
+        include:
+          - os: macos-latest
+            label: macos-arm64
+          - os: windows-latest
+            label: windows-x64
+          - os: ubuntu-latest
+            label: linux-x64
     steps:
       - uses: actions/checkout@v4
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
@@ -237,8 +271,51 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-tauri-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-tauri-
+          key: ${{ runner.os }}-release-bundle-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-release-bundle-
 
-      - name: Check Tauri
-        run: cargo check -p clawgui
+      # tauri-cli is not a workspace member; fetch the binary once.
+      # `--locked` is intentionally omitted — the tauri-cli crate doesn't
+      # ship a Cargo.lock, so `--locked` here would error.
+      - name: Install tauri-cli
+        run: cargo install tauri-cli --version '^2'
+
+      - name: npm install
+        run: npm ci --no-audit --no-fund
+
+      - name: cargo tauri build
+        run: cargo tauri build
+
+      # Workflow-level upload so users can still grab artifacts even when
+      # no release_tag was provided (CI run → Actions tab → Artifacts).
+      # Glob covers every Tauri output the three matrix rows can produce;
+      # `if-no-files-found: error` fires if a platform produces nothing
+      # (indicates a broken build even if the Cargo step exited 0).
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: clawenv-${{ matrix.label }}
+          if-no-files-found: error
+          path: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+
+      # Attach to the GH release — either the tag being pushed, or an
+      # explicit tag passed to workflow_dispatch. Missing-file patterns
+      # are OK (a matrix row only produces its platform's subset), so
+      # `fail_on_unmatched_files: false`.
+      - name: Attach to GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.release_tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || inputs.release_tag }}
+          files: |
+            target/release/bundle/dmg/*.dmg
+            target/release/bundle/msi/*.msi
+            target/release/bundle/nsis/*-setup.exe
+            target/release/bundle/deb/*.deb
+            target/release/bundle/appimage/*.AppImage
+          fail_on_unmatched_files: false
