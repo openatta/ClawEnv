@@ -2,6 +2,7 @@ use clawenv_core::api::UpdateCheckResponse;
 use tauri::Emitter;
 
 use crate::cli_bridge::{self, CliEvent};
+use crate::ipc::emit::{emit_instance_changed, InstanceAction, InstanceChanged};
 
 #[tauri::command]
 pub async fn check_instance_update(name: String) -> Result<UpdateCheckResponse, String> {
@@ -19,6 +20,7 @@ pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_versio
     }
 
     let app_handle = app.clone();
+    let instance_name = name.clone();
     tokio::spawn(async move {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<CliEvent>(32);
 
@@ -38,6 +40,10 @@ pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_versio
             Ok(v) => {
                 let ver = v.as_str().unwrap_or("unknown");
                 let _ = app_handle.emit("upgrade-complete", ver);
+                emit_instance_changed(
+                    &app_handle,
+                    InstanceChanged::simple(InstanceAction::Upgrade, &instance_name),
+                );
             }
             Err(e) => {
                 let _ = app_handle.emit("upgrade-failed", &e.to_string());

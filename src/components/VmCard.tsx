@@ -2,7 +2,7 @@ import { createSignal, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 
 type SandboxVm = {
-  name: string;
+  name: string;            // sandbox_id (e.g. "clawenv-a1b2c3d4e5f6") — not the user instance name
   status: string;
   cpus: string;
   memory: string;
@@ -10,6 +10,7 @@ type SandboxVm = {
   dir_size: string;
   managed: boolean;
   ttyd_port?: number;
+  instance_name?: string;  // user-chosen name from config.toml (managed VMs only)
 };
 
 /** Format size: "4294967296"->"4.0 GB", "4GiB"->"4 GB", "100GiB"->"100 GB" */
@@ -42,9 +43,12 @@ export default function VmCard(props: {
   const [showConfig, setShowConfig] = createSignal(false);
   const [chromiumInstalled, setChromiumInstalled] = createSignal<boolean | null>(null);
 
-  // Check chromium status when VM is running and managed
+  // Check chromium status when VM is running and managed. Use the user-chosen
+  // instance_name (backend SandboxVmInfo populates this via config.sandbox_id
+  // matching); falling back to the stripped name as a last resort if backend
+  // didn't supply it (orphan VM or stale schema).
   if (props.vm.managed) {
-    const name = props.vm.name.replace(/^clawenv-/, "");
+    const name = props.vm.instance_name ?? props.vm.name.replace(/^clawenv-/i, "");
     invoke<boolean>("check_chromium_installed", { name }).then(
       (v) => setChromiumInstalled(v),
       () => setChromiumInstalled(null)
@@ -59,8 +63,13 @@ export default function VmCard(props: {
   const statusColor = () => isRunning() ? "bg-green-500" : "bg-gray-500";
   const borderColor = () => props.vm.managed ? "border-green-700/30" : "border-gray-700";
 
-  // Strip "clawenv-" prefix for IPC calls that expect instance name
-  const instanceName = () => props.vm.name.replace(/^clawenv-/, "");
+  // User-chosen instance name for IPC calls that expect `instance.name`.
+  // Stripping "clawenv-" from vm.name (the sandbox_id) does NOT work because
+  // sandbox_id contains an auto-generated hash, not the user name — backend
+  // populates `instance_name` from config.sandbox_id matching. Fallback to the
+  // stripped form so orphan VMs still get best-effort behaviour.
+  const instanceName = () =>
+    props.vm.instance_name ?? props.vm.name.replace(/^clawenv-/i, "");
 
   async function doAction(action: string) {
     setActionLoading(action);
@@ -80,10 +89,13 @@ export default function VmCard(props: {
     setConfirmDelete(false);
     setActionLoading("delete");
     try {
-      // If managed, also delete the associated OC instance config
-      if (props.vm.managed) {
-        try { await invoke("delete_instance", { name: instanceName() }); } catch { /* may already be gone */ }
-      }
+      // For managed VMs the backend's sandbox_vm_action("delete") now
+      // transparently delegates to delete_instance_with_progress, which
+      // stops the VM, deletes files, removes the instance from config.toml,
+      // and emits the full event chain (instances-changed + instance-changed).
+      // So a single call here is enough — no more piecemeal delete_instance
+      // + sandbox_vm_action sequencing on the frontend (which could leave
+      // orphan config entries if the second call failed).
       await invoke("sandbox_vm_action", { vmName: props.vm.name, action: "delete" });
       props.onRefresh();
     } catch (e) {

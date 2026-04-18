@@ -182,6 +182,50 @@ async fn main() -> Result<()> {
         clawenv_core::config::proxy::inject_proxy_env(&config.config().clawenv.proxy);
     }
 
+    // Pin LIMA_HOME to ~/.clawenv/lima so any limactl invocation uses the
+    // private data directory instead of the system default ~/.lima.
+    #[cfg(target_os = "macos")]
+    clawenv_core::sandbox::init_lima_env();
+
+    // Pin Podman's XDG_DATA_HOME / XDG_RUNTIME_DIR to ~/.clawenv/podman-*
+    // so all containers/images/volumes/db live inside our private tree,
+    // matching Lima and WSL. CLI and GUI both must init so either entry
+    // point sees the same storage.
+    #[cfg(target_os = "linux")]
+    clawenv_core::sandbox::init_podman_env();
+
+    // Parent-death watchdog. macOS lacks Linux's PR_SET_PDEATHSIG, so the
+    // clawgui sidecar (this process) can outlive a force-quit parent and
+    // leave orphan limactl/hostagent/VM processes running. Poll getppid()
+    // every second; when the parent becomes init (PID 1), SIGTERM our whole
+    // process group so limactl children wind down with us.
+    #[cfg(unix)]
+    {
+        let initial_ppid = unsafe { libc::getppid() };
+        if initial_ppid > 1 {
+            tokio::spawn(async move {
+                let mut ticker = tokio::time::interval(std::time::Duration::from_secs(1));
+                ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    ticker.tick().await;
+                    let ppid = unsafe { libc::getppid() };
+                    if ppid == 1 {
+                        eprintln!("clawcli: parent ({initial_ppid}) died — terminating process group");
+                        // Send SIGTERM to our entire process group. limactl
+                        // handles this gracefully (stops VM + hostagent) and
+                        // we'll receive it ourselves to exit cleanly.
+                        unsafe { libc::killpg(libc::getpgrp(), libc::SIGTERM); }
+                        // Hard kill after a grace window in case anyone
+                        // ignored SIGTERM.
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        unsafe { libc::killpg(libc::getpgrp(), libc::SIGKILL); }
+                        std::process::exit(130);
+                    }
+                }
+            });
+        }
+    }
+
     let result = run(cli.command, &out).await;
 
     match result {
@@ -420,33 +464,118 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
         // ====== Export ======
         Commands::Export { name, output } => {
+            use clawenv_core::sandbox::SandboxType;
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
             let backend = clawenv_core::manager::instance::backend_for_instance(inst)?;
-
-            std::fs::create_dir_all(&output)?;
             let claw_reg = clawenv_core::claw::ClawRegistry::load();
             let desc = claw_reg.get(&inst.claw_type);
 
             out.emit(CliEvent::Info { message: format!("Exporting '{name}'...") });
-
             let version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
             out.emit(CliEvent::Info { message: format!("{}: {}", desc.display_name, version.trim()) });
 
-            backend.stop().await.ok();
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            // Route by backend. Previously this unconditionally called the
+            // Alpine packaging script via `bash`, which (a) doesn't know how
+            // to package Native-mode installs and (b) on Windows dispatches
+            // to `bash.exe` → WSL and fails with an opaque "WSL not
+            // installed" error. Native mode instead tars the private
+            // ~/.clawenv/{node,git,native} tree directly.
+            match inst.sandbox_type {
+                SandboxType::Native => {
+                    let home = dirs::home_dir()
+                        .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
+                    let clawenv = home.join(".clawenv");
 
-            let status = tokio::process::Command::new("bash")
-                .args(["tools/package-alpine.sh", &name, &output])
-                .status().await?;
+                    // Enforce the bundle-self-containment rule: both node
+                    // and git must be privately installed. Otherwise the
+                    // tarball is useless on machines without system node/git.
+                    for sub in ["node", "git", "native"] {
+                        if !clawenv.join(sub).exists() {
+                            anyhow::bail!(
+                                "Cannot export native bundle: ~/.clawenv/{} is missing. \
+                                 Re-run the installer to make sure node + git + native \
+                                 are all privately installed.",
+                                sub
+                            );
+                        }
+                    }
 
-            backend.start().await.ok();
+                    // Stop any running gateway so we tar a quiescent state;
+                    // start it back afterwards regardless of export success.
+                    backend.stop().await.ok();
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
-            if status.success() {
-                out.emit(CliEvent::Complete { message: format!("Exported to {output}/") });
-            } else {
-                anyhow::bail!("Export failed");
+                    // Use --output literally as the target file path. An
+                    // earlier iteration tried to be helpful by appending a
+                    // default filename when `--output` looked like a dir,
+                    // but `PathBuf::is_dir()` returns true for any path that
+                    // happens to exist as a directory (e.g. left over from
+                    // an earlier failed run), which silently nested the
+                    // tarball one level deeper than the user asked. Refuse
+                    // to overwrite an existing directory — fail loudly so
+                    // the user can clean up or pick a different path.
+                    let out_path = std::path::PathBuf::from(&output);
+                    if out_path.is_dir() {
+                        anyhow::bail!(
+                            "Refusing to export: --output '{}' is a directory. \
+                             Pass a full .tar.gz filename.",
+                            out_path.display()
+                        );
+                    }
+                    if let Some(parent) = out_path.parent() {
+                        if !parent.as_os_str().is_empty() {
+                            std::fs::create_dir_all(parent)?;
+                        }
+                    }
+
+                    // Windows' built-in tar.exe (BSD tar + gzip). `-C clawenv`
+                    // so archive paths are "node/..", "git/..", "native/.."
+                    // and a receiving machine can untar directly into its own
+                    // ~/.clawenv/ to restore the bundle.
+                    let status = tokio::process::Command::new("tar")
+                        .args(["czf",
+                               &out_path.to_string_lossy(),
+                               "-C", &clawenv.to_string_lossy(),
+                               "node", "git", "native"])
+                        .status().await;
+
+                    // Always try to restart the gateway, even on export failure
+                    backend.start().await.ok();
+
+                    match status {
+                        Ok(s) if s.success() => {
+                            out.emit(CliEvent::Complete {
+                                message: format!("Exported to {}", out_path.display())
+                            });
+                        }
+                        Ok(s) => anyhow::bail!("tar exited with status {:?}", s.code()),
+                        Err(e) => anyhow::bail!("failed to run tar: {e}"),
+                    }
+                }
+                _ => {
+                    // Sandbox (Lima / WSL / Podman) — keeps the existing
+                    // bash-based packaging script, which knows each backend's
+                    // VM/container export idiom. `--output` is treated as a
+                    // directory by that script.
+                    std::fs::create_dir_all(&output)?;
+
+                    backend.stop().await.ok();
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+                    let status = tokio::process::Command::new("bash")
+                        .args(["tools/package-alpine.sh", &name, &output])
+                        .status().await?;
+
+                    backend.start().await.ok();
+
+                    if status.success() {
+                        out.emit(CliEvent::Complete { message: format!("Exported to {output}/") });
+                    } else {
+                        anyhow::bail!("Export failed");
+                    }
+                }
             }
         }
 
@@ -710,7 +839,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
                     #[cfg(target_os = "macos")]
                     {
-                        let output = tokio::process::Command::new("limactl")
+                        let output = tokio::process::Command::new(clawenv_core::sandbox::limactl_bin())
                             .args(["list", "--format", "{{.Name}}\t{{.Status}}\t{{.CPUs}}\t{{.Memory}}\t{{.Disk}}"])
                             .output().await;
                         if let Ok(o) = output {
@@ -723,6 +852,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         disk: p[4].into(), dir_size: "-".into(),
                                         managed: p[0].starts_with("clawenv-"),
                                         ttyd_port: None,
+                                        instance_name: None,
                                     });
                                 }
                             }
@@ -744,6 +874,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         disk: p.get(2).unwrap_or(&"-").to_string(), dir_size: "-".into(),
                                         managed: p[0].starts_with("clawenv-"),
                                         ttyd_port: None,
+                                        instance_name: None,
                                     });
                                 }
                             }
@@ -793,6 +924,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                             disk: "-".into(), dir_size: "-".into(),
                                             managed: name.starts_with("ClawEnv") || name.starts_with("clawenv"),
                                             ttyd_port: None,
+                                            instance_name: None,
                                         });
                                     }
                                 }
@@ -801,13 +933,17 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         // If WSL not installed, vms stays empty — no phantom entries
                     }
 
-                    // Fill ttyd_port for managed instances from config
+                    // Fill ttyd_port AND instance_name for managed VMs by matching
+                    // VM name against each instance's sandbox_id (= VM name). The
+                    // old code stripped "clawenv-" and matched by instance.name,
+                    // which silently failed because sandbox_id contains an auto-
+                    // generated hash, not the user-chosen name.
                     let config = ConfigManager::load()?;
                     for vm in &mut vms {
                         if vm.managed {
-                            let inst_name = vm.name.trim_start_matches("clawenv-").trim_start_matches("ClawEnv-");
-                            if let Some(inst) = config.instances().iter().find(|i| i.name == inst_name) {
+                            if let Some(inst) = config.instances().iter().find(|i| i.sandbox_id == vm.name) {
                                 vm.ttyd_port = Some(inst.gateway.ttyd_port);
+                                vm.instance_name = Some(inst.name.clone());
                             }
                         }
                     }
@@ -845,7 +981,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     // Launch interactive shell — must use std::process (not tokio) to inherit stdio
                     let status = match inst.sandbox_type {
                         clawenv_core::sandbox::SandboxType::LimaAlpine => {
-                            std::process::Command::new("limactl")
+                            std::process::Command::new(clawenv_core::sandbox::limactl_bin())
                                 .args(["shell", &format!("clawenv-{name}")])
                                 .status()?
                         }

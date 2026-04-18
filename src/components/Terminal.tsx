@@ -32,6 +32,12 @@ export default function SandboxTerminal(props: Props) {
   let containerRef: HTMLDivElement | undefined;
   let term: Terminal | undefined;
   let ws: WebSocket | undefined;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+  let connected = false;   // set true after a successful onopen — suppresses reconnect-on-close
+  let disposed = false;    // set true on cleanup — halts the retry loop
+  const MAX_ATTEMPTS = 4;  // total tries (1 initial + 3 retries)
+  const BACKOFF_MS = [0, 800, 2000, 4000]; // per-attempt delay before connecting
+
   const [status, setStatus] = createSignal("Connecting...");
   const [error, setError] = createSignal("");
 
@@ -39,7 +45,6 @@ export default function SandboxTerminal(props: Props) {
     const port = props.ttydPort ?? 7681;
     const wsUrl = `ws://127.0.0.1:${port}/ws`;
     const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
 
     try {
       term = new Terminal({
@@ -63,51 +68,18 @@ export default function SandboxTerminal(props: Props) {
         setTimeout(() => fitAddon.fit(), 50);
       }
 
-      setStatus(`Connecting to ${wsUrl}...`);
-      ws = new WebSocket(wsUrl, ["tty"]);
-      ws.binaryType = "arraybuffer";
-
-      ws.onopen = () => {
-        setStatus(`Connected (localhost:${port})`);
-        // ttyd handshake: first message must be JSON with AuthToken + terminal size
-        if (term && ws) {
-          const handshake = JSON.stringify({
-            AuthToken: "",
-            columns: term.cols,
-            rows: term.rows,
-          });
-          ws.send(encoder.encode(handshake));
-        }
-      };
-
-      ws.onmessage = (ev) => {
-        if (!term) return;
-        const data = new Uint8Array(ev.data as ArrayBuffer);
-        if (data.length < 1) return;
-        const cmd = data[0];
-        const payload = data.slice(1);
-
-        if (cmd === CMD_OUTPUT) {
-          term.write(payload);
-        }
-        // cmd === 0x31: SET_WINDOW_TITLE — ignore
-        // cmd === 0x32: SET_PREFERENCES — ignore
-      };
-
-      // Send keyboard input
+      // Sending input + resize need to target the *currently open* ws, not
+      // whichever ws was first assigned. Indirect through the outer `ws`
+      // closure variable so a successful reconnect after retry picks up here.
       term.onData((input: string) => {
-        if (ws && ws.readyState === WebSocket.OPEN) {
-          if (typeof input === "string") {
-            const encoded = encoder.encode(input);
-            const msg = new Uint8Array(1 + encoded.length);
-            msg[0] = CMD_INPUT;
-            msg.set(encoded, 1);
-            ws.send(msg);
-          }
+        if (ws && ws.readyState === WebSocket.OPEN && typeof input === "string") {
+          const encoded = encoder.encode(input);
+          const msg = new Uint8Array(1 + encoded.length);
+          msg[0] = CMD_INPUT;
+          msg.set(encoded, 1);
+          ws.send(msg);
         }
       });
-
-      // Send resize
       term.onResize(({ cols, rows }) => {
         if (ws && ws.readyState === WebSocket.OPEN) {
           const json = JSON.stringify({ columns: cols, rows: rows });
@@ -119,15 +91,67 @@ export default function SandboxTerminal(props: Props) {
         }
       });
 
-      ws.onerror = () => {
-        setError(`Cannot connect to terminal on port ${port}. Is the instance running?`);
-        setStatus("Error");
-      };
+      // Connect with retries. After a Stop/Start, ttyd may take a beat to come
+      // back up inside the VM (we restart it on start_instance), and Lima's
+      // port forward is only primed after the guest port starts listening.
+      // A single-shot connect fails in that window; backoff-retry covers it.
+      const connectAttempt = (idx: number) => {
+        if (disposed) return;
+        setStatus(`Connecting to ${wsUrl}${idx > 0 ? ` (retry ${idx}/${MAX_ATTEMPTS - 1})` : ""}...`);
+        ws = new WebSocket(wsUrl, ["tty"]);
+        ws.binaryType = "arraybuffer";
 
-      ws.onclose = () => {
-        setStatus("Disconnected");
-        term?.writeln("\r\n\x1b[31mConnection closed\x1b[0m");
+        ws.onopen = () => {
+          connected = true;
+          setError("");
+          setStatus(`Connected (localhost:${port})`);
+          if (term && ws) {
+            const handshake = JSON.stringify({
+              AuthToken: "",
+              columns: term.cols,
+              rows: term.rows,
+            });
+            ws.send(encoder.encode(handshake));
+          }
+        };
+
+        ws.onmessage = (ev) => {
+          if (!term) return;
+          const data = new Uint8Array(ev.data as ArrayBuffer);
+          if (data.length < 1) return;
+          const cmd = data[0];
+          const payload = data.slice(1);
+          if (cmd === CMD_OUTPUT) term.write(payload);
+        };
+
+        ws.onerror = () => {
+          // onerror fires before onclose; let onclose handle the retry.
+          if (!connected) setStatus(`Connect failed (attempt ${idx + 1}/${MAX_ATTEMPTS})`);
+        };
+
+        ws.onclose = () => {
+          if (disposed) return;
+          if (connected) {
+            // We had a live session that dropped — don't auto-retry, treat
+            // as a normal user/server-initiated close.
+            setStatus("Disconnected");
+            term?.writeln("\r\n\x1b[31mConnection closed\x1b[0m");
+            return;
+          }
+          // Never connected — backoff and retry.
+          const next = idx + 1;
+          if (next >= MAX_ATTEMPTS) {
+            setError(
+              `Cannot connect to terminal on port ${port} after ${MAX_ATTEMPTS} attempts. ` +
+              `Is the instance running? Try stopping and starting it.`
+            );
+            setStatus("Failed");
+            return;
+          }
+          retryTimer = setTimeout(() => connectAttempt(next), BACKOFF_MS[next]);
+        };
       };
+      connectAttempt(0);
 
       const observer = new ResizeObserver(() => setTimeout(() => fitAddon.fit(), 10));
       if (containerRef) observer.observe(containerRef);
@@ -139,6 +163,8 @@ export default function SandboxTerminal(props: Props) {
   });
 
   onCleanup(() => {
+    disposed = true;
+    if (retryTimer) clearTimeout(retryTimer);
     ws?.close();
     term?.dispose();
   });

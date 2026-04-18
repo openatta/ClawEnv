@@ -41,10 +41,15 @@ impl<'a> Default for BackgroundScriptOpts<'a> {
             done_file: "/tmp/clawenv-bg.done",
             script_file: "/tmp/clawenv-bg.sh",
             pct_range: (25, 80),
-            max_idle_secs: 600,
+            max_idle_secs: 1200,
         }
     }
 }
+
+/// Interval (seconds) between heartbeat lines written to the log from the VM
+/// wrapper. Any value shorter than `max_idle_secs` prevents the idle kill path
+/// from tripping while the real command is still alive but silent.
+const HEARTBEAT_INTERVAL_SECS: u64 = 30;
 
 /// Progress callback: (message, percent).
 pub type ProgressFn = Box<dyn Fn(String, u8) + Send>;
@@ -75,10 +80,22 @@ pub async fn run_background_script(
         cmd = opts.cmd,
     )).await?;
 
-    // Launch in background
+    // Launch in background with a sibling heartbeat writer. The heartbeat
+    // appends a timestamped line to the log file every HEARTBEAT_INTERVAL_SECS
+    // while the real command is alive — so a silent npm phase (lockfile write,
+    // cleanup after a failed optional postinstall) doesn't trip the poller's
+    // idle kill. When the main command exits, the heartbeat loop exits too.
     let sudo_prefix = if opts.sudo { "sudo " } else { "" };
+    let hb = HEARTBEAT_INTERVAL_SECS;
     backend.exec(&format!(
-        "nohup sh -c '{sudo_prefix}sh {script} > {log} 2>&1; echo $? > {done}' > /dev/null 2>&1 &"
+        "nohup sh -c '({sudo_prefix}sh {script} > {log} 2>&1; echo $? > {done}) & \
+         CMD_PID=$!; \
+         hb_elapsed=0; \
+         while kill -0 $CMD_PID 2>/dev/null; do \
+           sleep {hb}; \
+           hb_elapsed=$((hb_elapsed + {hb})); \
+           echo \"[heartbeat ${{hb_elapsed}}s] still running\" >> {log}; \
+         done' > /dev/null 2>&1 &"
     )).await?;
 
     // Poll for completion

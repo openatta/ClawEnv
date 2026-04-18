@@ -130,6 +130,12 @@ pub struct SandboxVmInfo {
     /// ttyd port for terminal access (only for managed instances)
     #[serde(default)]
     pub ttyd_port: Option<u16>,
+    /// User-chosen instance name in config.toml. The VM `name` field holds the
+    /// `sandbox_id` (an auto-generated `clawenv-<hash>`), which does NOT equal
+    /// the instance name — callers that need to invoke instance-scoped IPCs
+    /// (install_chromium, export_sandbox, delete_instance) must use this.
+    #[serde(default)]
+    pub instance_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

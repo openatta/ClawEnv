@@ -81,10 +81,24 @@ impl SandboxBackend for NativeBackend {
     }
 
     async fn exec(&self, cmd: &str) -> Result<String> {
+        // Mirror Lima/Podman/Wsl behaviour: surface stderr in the error on
+        // non-zero exit so callers see the actual failure reason (previously
+        // only the stdout was returned and exit code was ignored, making
+        // native-mode install failures opaque).
         let out = self.shell.cmd(cmd)
             .current_dir(&self.install_dir)
             .output()
             .await?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            anyhow::bail!(
+                "command failed (exit {:?}): {}\nstdout: {}\nstderr: {}",
+                out.status.code(), cmd,
+                stdout.chars().take(500).collect::<String>(),
+                stderr.chars().take(500).collect::<String>()
+            );
+        }
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
@@ -101,14 +115,25 @@ impl SandboxBackend for NativeBackend {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
         let mut output = String::new();
+        // Collect stderr tail in-memory so we can include it in the error
+        // message on non-zero exit. tx still receives every stderr line live
+        // (streams to the UI as before).
+        let stderr_buf: std::sync::Arc<tokio::sync::Mutex<String>> =
+            std::sync::Arc::new(tokio::sync::Mutex::new(String::new()));
 
         if let Some(out) = stdout {
             let mut reader = BufReader::new(out).lines();
             let stderr_tx = tx.clone();
+            let stderr_buf_c = stderr_buf.clone();
             let stderr_task = if let Some(err) = stderr {
                 Some(tokio::spawn(async move {
                     let mut reader = BufReader::new(err).lines();
                     while let Ok(Some(line)) = reader.next_line().await {
+                        {
+                            let mut buf = stderr_buf_c.lock().await;
+                            buf.push_str(&line);
+                            buf.push('\n');
+                        }
                         let _ = stderr_tx.send(line).await;
                     }
                 }))
@@ -125,7 +150,14 @@ impl SandboxBackend for NativeBackend {
 
         let status = child.wait().await?;
         if !status.success() {
-            anyhow::bail!("command failed (exit {:?}): {}", status.code(), cmd);
+            let err_tail = {
+                let b = stderr_buf.lock().await;
+                b.chars().rev().take(800).collect::<String>().chars().rev().collect::<String>()
+            };
+            anyhow::bail!(
+                "command failed (exit {:?}): {}\nstderr tail:\n{}",
+                status.code(), cmd, err_tail
+            );
         }
         Ok(output)
     }
@@ -148,5 +180,9 @@ impl SandboxBackend for NativeBackend {
 
     fn supports_rename(&self) -> bool { false }
     fn supports_resource_edit(&self) -> bool { false }
-    fn supports_port_edit(&self) -> bool { true }
+    // Native has no VM port-forward layer — config.toml carries the port
+    // number and the gateway binary binds it directly. There's nothing for
+    // edit_port_forwards to do, so returning true misled the UI into
+    // showing a port-edit action that silently no-oped.
+    fn supports_port_edit(&self) -> bool { false }
 }

@@ -130,8 +130,15 @@ impl ManagedShell {
     }
 
     /// Spawn a truly detached background process.
-    /// Windows: PowerShell Start-Process (creates process outside job object)
-    /// Unix: nohup via sh
+    /// Windows: write a one-shot `.bat` wrapper (path env + node invocation +
+    ///          log redirection), then `powershell Start-Process` the .bat
+    ///          with `-WindowStyle Hidden`. Using a file instead of inline
+    ///          ArgumentList sidesteps PowerShell's positional-parameter
+    ///          parsing which chokes on `--flag=value` args inside the
+    ///          argument list. The .bat explicitly redirects stdin from NUL
+    ///          and stdout/stderr to the log, so the node child gets a clean
+    ///          stdio setup even when the outer cmd window is hidden.
+    /// Unix: nohup via sh.
     pub async fn spawn_detached(
         &self,
         cli_binary: &str,
@@ -140,39 +147,63 @@ impl ManagedShell {
     ) -> Result<()> {
         #[cfg(target_os = "windows")]
         {
-            let log_str = log_path.to_string_lossy().replace('\'', "''");
-            let path_str = self.path().replace('\'', "''");
+            if let Some(parent) = log_path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
 
-            // Find JS entry point for direct node.exe execution (bypasses .ps1/.cmd)
-            let ps_cmd = if let Some(entry) = self.find_claw_entry(cli_binary) {
+            let bat_line = if let Some(entry) = self.find_claw_entry(cli_binary) {
                 let node = self.node_bin();
-                let node_str = node.to_string_lossy().replace('\'', "''");
-                let entry_str = entry.to_string_lossy().replace('\'', "''");
-                let args_str = args.join(" ");
                 format!(
-                    "$env:PATH = '{path_str}'; \
-                     Start-Process -WindowStyle Hidden -FilePath '{node_str}' \
-                     -ArgumentList '--disable-warning=ExperimentalWarning \"{entry_str}\" {args_str}' \
-                     -RedirectStandardOutput '{log_str}' -RedirectStandardError '{log_str}.err'"
+                    "\"{node}\" --disable-warning=ExperimentalWarning \"{entry}\" {args} < NUL > \"{log}\" 2>&1\r\n",
+                    node = node.display(),
+                    entry = entry.display(),
+                    args = args.join(" "),
+                    log = log_path.display()
                 )
             } else {
-                // Fallback: Start-Process cmd.exe /c
-                let full_cmd = format!("{} {}", cli_binary, args.join(" "));
                 format!(
-                    "$env:PATH = '{path_str}'; \
-                     Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' \
-                     -ArgumentList '/c {full_cmd} > \"{log_str}\" 2>&1'"
+                    "{cli} {args} < NUL > \"{log}\" 2>&1\r\n",
+                    cli = cli_binary,
+                    args = args.join(" "),
+                    log = log_path.display()
                 )
             };
 
+            // Temp .bat next to the install dir. Overwritten each spawn so the
+            // file reflects the current invocation (useful for debugging with
+            // `type spawn.bat`). Keeping it local-to-install avoids %TEMP%
+            // cleanup oddities on multi-user machines.
+            let bat_path = self.install_dir.join(".clawenv-spawn.bat");
+            let bat_body = format!(
+                "@echo off\r\nSET PATH={path};%PATH%\r\n{line}",
+                path = self.path(),
+                line = bat_line,
+            );
+            std::fs::write(&bat_path, bat_body)?;
+
+            // PowerShell Start-Process — the bat handles all redirection, so
+            // no -RedirectStandardOutput/Error is passed (that flag is
+            // separately buggy for long-running hidden children on Windows).
+            // Gateway readiness takes ~20s to reach the "listening" state on
+            // Windows ARM64; the outer start_instance health-check must give
+            // it enough time.
+            let bat_ps = bat_path.to_string_lossy().replace('\'', "''");
+            let ps_cmd = format!(
+                "Start-Process -WindowStyle Hidden -FilePath '{bat_ps}' | Out-Null"
+            );
+
             let status = super::process::silent_cmd("powershell")
-                .args(["-Command", &ps_cmd])
+                .args(["-NoProfile", "-Command", &ps_cmd])
                 .current_dir(&self.install_dir)
                 .status()
                 .await?;
 
             if !status.success() {
-                anyhow::bail!("Failed to spawn {cli_binary} via Start-Process");
+                anyhow::bail!(
+                    "Failed to spawn {cli_binary} via PowerShell Start-Process. \
+                     See gateway log at {}",
+                    log_path.display()
+                );
             }
         }
         #[cfg(not(target_os = "windows"))]

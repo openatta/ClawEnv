@@ -143,8 +143,16 @@ export default function App() {
               defaultInstanceName={s.instanceName}
               clawType={s.clawType}
               onComplete={async () => {
-                // Notify main window to refresh
-                await emit("instances-changed");
+                // Notify the main window so Home / ClawPage pick up the new
+                // instance. The backend's install_openclaw IPC also emits
+                // `instance-changed` on success (belt-and-braces); this
+                // frontend emit is the fallback path so even a future refactor
+                // that drops the backend emit keeps the UI in sync. Shape
+                // mirrors tauri/src/ipc/emit.rs::InstanceChanged.
+                await emit("instance-changed", {
+                  action: "install",
+                  instance: s.instanceName,
+                });
                 // Close this install window
                 getCurrentWindow().close();
               }}

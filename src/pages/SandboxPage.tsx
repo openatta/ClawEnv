@@ -8,7 +8,7 @@ import VmCard from "../components/VmCard";
 import { t } from "../i18n";
 
 type SandboxVm = {
-  name: string;
+  name: string;            // sandbox_id (e.g. "clawenv-a1b2c3d4e5f6") — NOT the user instance name
   status: string;
   cpus: string;
   memory: string;
@@ -16,6 +16,7 @@ type SandboxVm = {
   dir_size: string;
   managed: boolean;
   ttyd_port?: number;
+  instance_name?: string;  // user-chosen instance name in config.toml (only set for managed VMs)
 };
 
 export default function SandboxPage() {
@@ -43,6 +44,19 @@ export default function SandboxPage() {
       setHilInstance(ev.payload.instance);
       setHilUrl(ev.payload.novnc_url);
     });
+    // Export failure arrives asynchronously — the IPC already returned Ok
+    // (dialog closed, task spawned), but compression or stop/start might fail
+    // deep in the task. Without this listener the user would see nothing.
+    const unExportFail = await listen<string>("export-failed", (ev) => {
+      setShowExport(false);
+      setExportError(String(ev.payload));
+    });
+    const unExportDone = await listen<string>("export-complete", (ev) => {
+      // Keep ExportProgress visible (it has its own "Done" state) — only
+      // stash the output path for future UI hooks. Surface as transient toast.
+      console.info("Export complete:", ev.payload);
+    });
+
     // Bridge-originated HIL: hil-skill called /api/hil/request
     const un2 = await listen<string>("hil-bridge-request", async (ev) => {
       try {
@@ -55,7 +69,7 @@ export default function SandboxPage() {
         }
       } catch { /* ignore parse errors */ }
     });
-    onCleanup(() => { un1(); un2(); });
+    onCleanup(() => { un1(); un2(); unExportFail(); unExportDone(); });
   });
 
   async function startBrowserInteractive(instanceName: string) {
@@ -108,12 +122,22 @@ export default function SandboxPage() {
 
   // Export state
   const [showExport, setShowExport] = createSignal(false);
+  const [exportError, setExportError] = createSignal("");
 
   async function handleExport(instanceName: string) {
     try {
+      setExportError("");
+      // invoke returns as soon as the backend has spawned the async task and
+      // the save-file dialog closed. Real success/failure arrives via the
+      // export-complete / export-failed events handled below.
       await invoke("export_sandbox", { name: instanceName });
       setShowExport(true);
-    } catch { /* cancelled or error */ }
+    } catch (e) {
+      // Most common reason here is the user cancelling the save dialog —
+      // silent. Any other error we want to surface.
+      const msg = String(e);
+      if (msg && !/cancel/i.test(msg)) setExportError(msg);
+    }
   }
 
   async function refresh() {
@@ -243,6 +267,16 @@ export default function SandboxPage() {
       {/* Export progress */}
       <Show when={showExport()}>
         <ExportProgress isNative={false} onClose={() => setShowExport(false)} />
+      </Show>
+
+      {/* Export error toast — exposes async failures that the spawn-based
+          export IPC can't return through its Ok() return value. */}
+      <Show when={exportError()}>
+        <div class="fixed bottom-4 right-4 max-w-md bg-red-900 border border-red-600 text-red-100 text-xs rounded px-3 py-2 shadow-lg z-50">
+          <div class="font-semibold mb-1">{t("导出失败 / Export failed", "Export failed")}</div>
+          <div class="break-words">{exportError()}</div>
+          <button class="mt-1 underline" onClick={() => setExportError("")}>{t("关闭", "Dismiss")}</button>
+        </div>
       </Show>
 
       {/* noVNC HIL Panel */}

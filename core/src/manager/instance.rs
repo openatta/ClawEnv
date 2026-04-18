@@ -80,35 +80,21 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     let desc = registry.get(&instance.claw_type);
     let port = instance.gateway.gateway_port;
 
-    // Helper: check if a port is listening
-    async fn is_port_listening(backend: &dyn crate::sandbox::SandboxBackend, port: u16, is_native: bool) -> bool {
-        if is_native {
-            // Native: direct Rust TCP connect (no shell, no PowerShell)
-            std::net::TcpStream::connect_timeout(
-                &format!("127.0.0.1:{port}").parse().unwrap(),
-                std::time::Duration::from_secs(1),
-            ).is_ok()
-        } else {
-            // Sandbox: netstat inside VM
-            let cmd = format!("netstat -tlnp 2>/dev/null | grep -q ':{port} ' && echo yes || echo no");
-            backend.exec(&cmd).await.unwrap_or_default().trim().contains("yes")
-        }
-    }
-
-    // Start ttyd (sandbox only) — check by port, not by pgrep
+    // Start ttyd (sandbox only). Always pkill first: after a VM restart the old
+    // ttyd pid is dead but the port-listen probe can race with Lima's port
+    // forwarder coming up, making us skip the launch and leaving the terminal
+    // button broken. Unconditional pkill → launch is cheap and eliminates the
+    // race — spurious "no such process" from pkill is silenced with `|| true`.
     if instance.sandbox_type != SandboxType::Native {
         let ttyd_port = instance.gateway.ttyd_port;
-        if !is_port_listening(backend.as_ref(), ttyd_port, false).await {
-            // Kill any stale ttyd first
-            backend.exec("pkill -9 ttyd 2>/dev/null || true").await.ok();
-            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            backend.exec(&format!(
-                "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
-            )).await?;
-            tracing::info!("ttyd started on 0.0.0.0:{ttyd_port}");
-        } else {
-            tracing::info!("ttyd already listening on {ttyd_port}, skipping");
-        }
+        backend.exec("pkill -9 ttyd 2>/dev/null || true").await.ok();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        backend.exec(&format!(
+            "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
+        )).await?;
+        // Tiny settle so port-forward becomes active before the UI pokes it.
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        tracing::info!("ttyd (re)started on 0.0.0.0:{ttyd_port}");
     }
 
     // Always kill stale gateway before starting — ensures clean state
@@ -157,8 +143,15 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         }
     }
 
-    // Wait for gateway to become responsive (up to 15s)
-    for i in 0..6 {
+    // Wait for gateway to become responsive.
+    //
+    // Native Windows takes ~18-22s end-to-end: node startup + openclaw
+    // ready (5 plugins) + channels/sidecars + HTTP listener bind. The old
+    // 13s ceiling (3+2+2+2+2+2) timed out before the gateway port opened,
+    // making the check report "gateway failed" even though it was still
+    // coming up. New budget: 3 + 11*2 = 25s worst case before we declare
+    // failure and snapshot the log.
+    for i in 0..12 {
         tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 3 } else { 2 }).into()).await;
 
         if instance.sandbox_type == SandboxType::Native {

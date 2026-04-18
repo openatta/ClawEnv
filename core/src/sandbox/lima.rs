@@ -6,6 +6,112 @@ use tokio::sync::mpsc;
 
 use super::{SandboxBackend, SandboxOpts, ResourceStats, InstallMode, ImageSource};
 
+/// Private Lima data directory. VM images, sockets, and state live here
+/// so clawenv never touches the system's `~/.lima`.
+pub fn lima_home() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".clawenv/lima")
+}
+
+/// Absolute path to the private `limactl` binary installed by `ensure_prerequisites`.
+pub fn limactl_bin() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".clawenv/bin/limactl")
+}
+
+/// Initialise Lima env for this process. Must be called once at startup so every
+/// spawned `limactl` child inherits `LIMA_HOME` and uses the private data dir.
+pub fn init_lima_env() {
+    let home = lima_home();
+    let _ = std::fs::create_dir_all(&home);
+    std::env::set_var("LIMA_HOME", &home);
+}
+
+/// Pinned Lima release metadata, loaded from the bundled TOML file.
+/// Version bumps are done by editing `assets/lima/lima-release.toml` — no Rust
+/// code change required.
+struct LimaRelease {
+    version: String,
+    sha256_arm64: String,
+    sha256_x86_64: String,
+    url_templates: Vec<String>,
+}
+
+impl LimaRelease {
+    fn load() -> Result<Self> {
+        let toml_src = include_str!("../../../assets/lima/lima-release.toml");
+        let table: toml::Table = toml_src.parse()
+            .map_err(|e| anyhow!("lima-release.toml is invalid: {e}"))?;
+
+        let version = table.get("version").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("lima-release.toml missing `version`"))?
+            .to_string();
+        let sha = table.get("sha256").and_then(|v| v.as_table())
+            .ok_or_else(|| anyhow!("lima-release.toml missing [sha256] table"))?;
+        let sha256_arm64 = sha.get("darwin-arm64").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("lima-release.toml missing sha256.darwin-arm64"))?
+            .to_string();
+        let sha256_x86_64 = sha.get("darwin-x86_64").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow!("lima-release.toml missing sha256.darwin-x86_64"))?
+            .to_string();
+
+        let url_templates: Vec<String> = table.get("urls")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if url_templates.is_empty() {
+            anyhow::bail!("lima-release.toml must list at least one download URL in `urls`");
+        }
+
+        Ok(Self { version, sha256_arm64, sha256_x86_64, url_templates })
+    }
+
+    /// Render URL templates by substituting {version} and {filename}.
+    fn render_urls(&self, filename: &str) -> Vec<String> {
+        self.url_templates.iter()
+            .map(|t| t.replace("{version}", &self.version).replace("{filename}", filename))
+            .collect()
+    }
+}
+
+/// Try each URL in order, verifying sha256 against the expected value.
+/// Returns the first URL whose download matches the checksum. Any HTTP error,
+/// body read failure, or checksum mismatch moves on to the next URL.
+async fn download_with_fallback(urls: &[String], expected_sha256: &str) -> Result<Vec<u8>> {
+    let mut last_err: Option<String> = None;
+    for url in urls {
+        tracing::info!("Trying {url}");
+        match reqwest::get(url).await {
+            Err(e) => { last_err = Some(format!("{url}: request failed: {e}")); continue; }
+            Ok(resp) if !resp.status().is_success() => {
+                last_err = Some(format!("{url}: HTTP {}", resp.status()));
+                continue;
+            }
+            Ok(resp) => {
+                match resp.bytes().await {
+                    Err(e) => { last_err = Some(format!("{url}: body read failed: {e}")); continue; }
+                    Ok(bytes) => {
+                        let actual = sha256_hex(&bytes);
+                        if actual == expected_sha256 {
+                            tracing::info!("Downloaded from {url} ({} bytes, sha256 OK)", bytes.len());
+                            return Ok(bytes.to_vec());
+                        }
+                        last_err = Some(format!(
+                            "{url}: checksum mismatch (expected {expected_sha256}, got {actual})"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    anyhow::bail!(
+        "All download URLs failed. Last error: {}",
+        last_err.as_deref().unwrap_or("(no URLs tried)")
+    )
+}
+
 pub struct LimaBackend {
     vm_name: String,
 }
@@ -24,8 +130,10 @@ impl LimaBackend {
 
     /// Run limactl and capture stdout (for commands that exit quickly like list, shell)
     async fn limactl(&self, args: &[&str]) -> Result<String> {
-        let out = Command::new("limactl")
+        let out = Command::new(limactl_bin())
             .args(args)
+            .env("LIMA_HOME", lima_home())
+            .kill_on_drop(true)
             .output()
             .await?;
         if !out.status.success() {
@@ -35,18 +143,49 @@ impl LimaBackend {
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
     }
 
-    /// Run limactl without capturing output (for long-running commands like start)
-    /// Lima's hostagent inherits pipes and keeps them open, so .output() would hang.
+    /// Run limactl without capturing output (for long-running commands like start).
+    /// Lima's hostagent inherits pipes and keeps them open, so we can't use
+    /// `.output()` or a piped stderr — both would hang. Instead we route stderr
+    /// to a temp log file and read the tail only when the command fails, so
+    /// users get the real diagnostic message rather than a bare exit code.
     async fn limactl_run(&self, args: &[&str]) -> Result<()> {
-        let status = Command::new("limactl")
+        let log_path = std::env::temp_dir().join(format!(
+            "clawenv-limactl-{}-{}.log",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let log_file = std::fs::File::create(&log_path)
+            .map_err(|e| anyhow!("cannot create limactl log file {}: {e}", log_path.display()))?;
+
+        let status = Command::new(limactl_bin())
             .args(args)
+            .env("LIMA_HOME", lima_home())
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::from(log_file))
+            .kill_on_drop(true)
             .status()
             .await?;
+
         if !status.success() {
-            anyhow::bail!("limactl {} failed (exit code {:?})", args.join(" "), status.code());
+            let tail = read_log_tail(&log_path, 4000).await;
+            let _ = tokio::fs::remove_file(&log_path).await;
+            let hint = vm_log_hint(&self.vm_name);
+            if tail.trim().is_empty() {
+                anyhow::bail!(
+                    "limactl {} failed (exit code {:?}){hint}",
+                    args.join(" "), status.code()
+                );
+            } else {
+                anyhow::bail!(
+                    "limactl {} failed (exit code {:?}):\n{}{hint}",
+                    args.join(" "), status.code(), tail.trim()
+                );
+            }
         }
+        let _ = tokio::fs::remove_file(&log_path).await;
         Ok(())
     }
 
@@ -132,6 +271,97 @@ fn sha256_hex(data: &[u8]) -> String {
     hex::encode(hash)
 }
 
+/// Read the last `max_bytes` of a file as a lossy UTF-8 string. Returns empty
+/// on any IO error — the caller decides how to present that.
+async fn read_log_tail(path: &Path, max_bytes: usize) -> String {
+    match tokio::fs::read(path).await {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(max_bytes);
+            String::from_utf8_lossy(&bytes[start..]).to_string()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// Build a hint pointing at Lima's own hostagent logs under `$LIMA_HOME/<vm>/`
+/// when those files exist — those usually contain the root cause when `limactl
+/// start` fails mid-provision (cloud-init crash, networking, mount errors).
+fn vm_log_hint(vm_name: &str) -> String {
+    let vm_dir = lima_home().join(vm_name);
+    if !vm_dir.exists() {
+        return String::new();
+    }
+    let candidates = ["ha.stderr.log", "serial.log", "console.log"];
+    let existing: Vec<String> = candidates.iter()
+        .filter(|f| vm_dir.join(f).exists())
+        .map(|f| vm_dir.join(f).display().to_string())
+        .collect();
+    if existing.is_empty() {
+        String::new()
+    } else {
+        format!("\n\nSee Lima logs for more detail:\n  {}", existing.join("\n  "))
+    }
+}
+
+/// Locate the VM directory (the one holding `lima.yaml`) inside an extracted
+/// tarball, supporting both new (`root/lima/<vm>/`) and old (`root/<vm>/`)
+/// export layouts.
+async fn find_vm_dir_in_layout(root: &Path) -> Result<Option<PathBuf>> {
+    // New layout: look under root/lima/*
+    let lima_sub = root.join("lima");
+    if lima_sub.is_dir() {
+        let mut entries = tokio::fs::read_dir(&lima_sub).await?;
+        while let Some(entry) = entries.next_entry().await? {
+            if entry.path().join("lima.yaml").exists() {
+                return Ok(Some(entry.path()));
+            }
+        }
+    }
+    // Old layout: any direct child of root containing lima.yaml
+    let mut entries = tokio::fs::read_dir(root).await?;
+    while let Some(entry) = entries.next_entry().await? {
+        if entry.path().join("lima.yaml").exists() {
+            return Ok(Some(entry.path()));
+        }
+    }
+    Ok(None)
+}
+
+/// Rewrite absolute host paths in the imported VM's `lima.yaml`. The exporter's
+/// workspace path (e.g. `/Users/alice/.clawenv/workspaces/foo`) is replaced
+/// with this host's workspace path derived from the target vm_name, and that
+/// directory is created so the mount survives first boot.
+///
+/// The trailing `-<vm_name>` segment is stripped if the vm_name follows the
+/// `clawenv-<instance>` convention, so the mount lands under
+/// `~/.clawenv/workspaces/<instance>/`.
+async fn rewrite_lima_yaml_for_host(vm_dir: &Path, vm_name: &str) -> Result<()> {
+    let yaml_path = vm_dir.join("lima.yaml");
+    if !yaml_path.exists() {
+        return Ok(());
+    }
+    let content = tokio::fs::read_to_string(&yaml_path).await?;
+
+    let instance_name = vm_name.strip_prefix("clawenv-").unwrap_or(vm_name);
+    let home = dirs::home_dir().ok_or_else(|| anyhow!("Cannot find home directory"))?;
+    let new_workspace = home.join(".clawenv/workspaces").join(instance_name);
+    tokio::fs::create_dir_all(&new_workspace).await?;
+
+    let rewritten: String = content.lines().map(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("location:") && line.contains(".clawenv/workspaces") {
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            format!("{indent}location: \"{}\"", new_workspace.display())
+        } else {
+            line.to_string()
+        }
+    }).collect::<Vec<_>>().join("\n");
+
+    tokio::fs::write(&yaml_path, rewritten).await?;
+    Ok(())
+}
+
 #[async_trait]
 impl SandboxBackend for LimaBackend {
     fn name(&self) -> &str {
@@ -139,8 +369,13 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn is_available(&self) -> Result<bool> {
-        let result = Command::new("limactl")
+        let bin = limactl_bin();
+        if !bin.exists() {
+            return Ok(false);
+        }
+        let result = Command::new(&bin)
             .args(["--version"])
+            .env("LIMA_HOME", lima_home())
             .output()
             .await;
         Ok(result.map(|o| o.status.success()).unwrap_or(false))
@@ -151,70 +386,65 @@ impl SandboxBackend for LimaBackend {
             return Ok(());
         }
 
-        tracing::info!("Lima not found, attempting to install...");
-
-        // Strategy 1: Try Homebrew (if available)
-        let has_brew = Command::new("which")
-            .arg("brew")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .await
-            .map(|s| s.success())
-            .unwrap_or(false);
-
-        if has_brew {
-            tracing::info!("Homebrew found, installing Lima via brew...");
-            let status = Command::new("brew")
-                .args(["install", "lima"])
-                .status()
-                .await?;
-            if status.success() {
-                return Ok(());
-            }
-            tracing::warn!("Homebrew install failed, trying direct download...");
-        }
-
-        // Strategy 2: Direct binary download from GitHub releases
-        tracing::info!("Downloading Lima binary directly from GitHub...");
-        let arch = match std::env::consts::ARCH {
-            "aarch64" => "aarch64",
-            "x86_64" => "x86_64",
+        let release = LimaRelease::load()?;
+        let (arch_tag, expected_sha) = match std::env::consts::ARCH {
+            "aarch64" => ("arm64", release.sha256_arm64.as_str()),
+            "x86_64" => ("x86_64", release.sha256_x86_64.as_str()),
             other => anyhow::bail!("Unsupported architecture for Lima: {other}"),
         };
 
-        let url = format!(
-            "https://github.com/lima-vm/lima/releases/latest/download/lima-{arch}-apple-darwin.tar.gz"
-        );
+        let filename = format!("lima-{ver}-Darwin-{arch_tag}.tar.gz", ver = release.version);
+        let urls = release.render_urls(&filename);
 
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
-        let install_dir = format!("{home}/.local");
-        tokio::fs::create_dir_all(&install_dir).await?;
+        tracing::info!("Installing private Lima {} into ~/.clawenv/ ...", release.version);
 
-        // Download and extract
-        let status = Command::new("sh")
-            .args(["-c", &format!(
-                "curl -fsSL '{url}' | tar xz -C '{install_dir}'"
-            )])
+        let clawenv_root = dirs::home_dir()
+            .ok_or_else(|| anyhow!("Cannot find home directory"))?
+            .join(".clawenv");
+        tokio::fs::create_dir_all(&clawenv_root).await?;
+
+        let cache_dir = clawenv_root.join("cache");
+        tokio::fs::create_dir_all(&cache_dir).await?;
+        let tarball = cache_dir.join(&filename);
+
+        let bytes = download_with_fallback(&urls, expected_sha).await?;
+        tokio::fs::write(&tarball, &bytes).await
+            .map_err(|e| anyhow!("Writing Lima tarball to cache failed: {e}"))?;
+
+        // Lima tarball layout is `./bin/limactl` + `./share/lima/...`, so extracting
+        // at ~/.clawenv/ puts the binary at ~/.clawenv/bin/limactl exactly.
+        let status = Command::new("tar")
+            .args([
+                "xzf",
+                &tarball.to_string_lossy(),
+                "-C",
+                &clawenv_root.to_string_lossy(),
+            ])
             .status()
             .await?;
-
         if !status.success() {
+            anyhow::bail!("Failed to extract Lima tarball at {}", tarball.display());
+        }
+
+        let bin = limactl_bin();
+        if !bin.exists() {
             anyhow::bail!(
-                "Failed to install Lima. Please install manually:\n\
-                 - macOS: brew install lima\n\
-                 - Or download from: https://github.com/lima-vm/lima/releases"
+                "Lima tarball extracted but {} is missing — unexpected archive layout",
+                bin.display()
             );
         }
 
-        // Add to current process PATH so subsequent limactl calls work immediately
-        let bin_path = format!("{install_dir}/bin");
-        let current_path = std::env::var("PATH").unwrap_or_default();
-        if !current_path.contains(&bin_path) {
-            std::env::set_var("PATH", format!("{bin_path}:{current_path}"));
-            tracing::info!("Lima installed to {bin_path}, added to PATH");
-        }
+        // Best-effort: clear macOS quarantine attribute from the extracted tree
+        // so Gatekeeper doesn't prompt on first launch. Non-fatal on failure —
+        // curl-fetched tarballs don't set the attribute in the first place.
+        let _ = Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine", &clawenv_root.to_string_lossy()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
 
+        tracing::info!("Lima {} installed at {}", release.version, bin.display());
         Ok(())
     }
 
@@ -240,7 +470,11 @@ impl SandboxBackend for LimaBackend {
                 let cdp_port = crate::manager::install::allocate_port(gateway_port, 3);
                 let vnc_ws_port = crate::manager::install::allocate_port(gateway_port, 4);
 
-                let mut rendered = template
+                // The provision script carries its own multi-mirror fallback
+                // chain; USER_ALPINE_MIRROR is just its highest-priority entry.
+                // Leaving it empty is fine — the script falls through to the
+                // canonical Fastly CDN and then to mainland-China mirrors.
+                let rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
                     .replace("{GATEWAY_PORT}", &gateway_port.to_string())
                     .replace("{TTYD_PORT}", &ttyd_port.to_string())
@@ -248,15 +482,7 @@ impl SandboxBackend for LimaBackend {
                     .replace("{CDP_PORT}", &cdp_port.to_string())
                     .replace("{VNC_WS_PORT}", &vnc_ws_port.to_string())
                     .replace("{PROXY_SCRIPT}", &opts.proxy_script)
-                    .replace("{MIRRORS_SCRIPT}", "");
-
-                // Replace Alpine image download URLs if a custom mirror is configured
-                if !opts.alpine_mirror.is_empty() {
-                    rendered = rendered.replace(
-                        "https://dl-cdn.alpinelinux.org/alpine",
-                        &opts.alpine_mirror,
-                    );
-                }
+                    .replace("{USER_ALPINE_MIRROR}", opts.alpine_mirror.trim_end_matches('/'));
 
                 // Write rendered template
                 let templates_dir = Self::templates_dir()?;
@@ -297,7 +523,8 @@ impl SandboxBackend for LimaBackend {
     async fn exec(&self, cmd: &str) -> Result<String> {
         // --workdir /tmp prevents Lima from trying to cd to host CWD (which may not exist in VM)
         let args = ["shell", "--workdir", "/tmp", &self.vm_name, "--", "sh", "-c", cmd];
-        let (stdout, stderr, rc) = super::exec_helper::exec("limactl", &args).await?;
+        let bin = limactl_bin();
+        let (stdout, stderr, rc) = super::exec_helper::exec(&bin.to_string_lossy(), &args).await?;
         if rc != 0 {
             anyhow::bail!("exec failed (exit {rc}): {cmd}\nstdout: {}\nstderr: {}",
                 stdout.chars().take(500).collect::<String>(),
@@ -308,7 +535,8 @@ impl SandboxBackend for LimaBackend {
 
     async fn exec_with_progress(&self, cmd: &str, tx: &mpsc::Sender<String>) -> Result<String> {
         let args = ["shell", "--workdir", "/tmp", &self.vm_name, "--", "sh", "-c", cmd];
-        let (output, rc) = super::exec_helper::exec_with_progress("limactl", &args, tx).await?;
+        let bin = limactl_bin();
+        let (output, rc) = super::exec_helper::exec_with_progress(&bin.to_string_lossy(), &args, tx).await?;
         if rc != 0 {
             anyhow::bail!("command failed (exit {rc}): {cmd}");
         }
@@ -385,17 +613,22 @@ impl SandboxBackend for LimaBackend {
             anyhow::bail!("Image file not found: {}", path.display());
         }
 
-        let lima_base = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?
-            .join(".lima");
+        let lima_base = lima_home();
+        tokio::fs::create_dir_all(&lima_base).await?;
         let vm_dir = lima_base.join(&self.vm_name);
 
         if vm_dir.exists() {
-            anyhow::bail!("Lima instance '{}' already exists at {}", self.vm_name, vm_dir.display());
+            anyhow::bail!(
+                "Lima VM directory already exists at {}. Delete the existing instance \
+                 first, or choose a different instance name when importing.",
+                vm_dir.display()
+            );
         }
 
-        // Extract to a temp directory first to avoid conflicts with existing VMs
-        let tmp_dir = lima_base.join(format!("_import_tmp_{}", std::process::id()));
+        let clawenv_root = dirs::home_dir()
+            .ok_or_else(|| anyhow!("Cannot find home directory"))?
+            .join(".clawenv");
+        let tmp_dir = clawenv_root.join(format!("_import_tmp_{}", std::process::id()));
         tokio::fs::create_dir_all(&tmp_dir).await?;
 
         let status = tokio::process::Command::new("tar")
@@ -407,29 +640,56 @@ impl SandboxBackend for LimaBackend {
             anyhow::bail!("Failed to extract Lima image from {}", path.display());
         }
 
-        // Find the extracted directory (should contain lima.yaml)
-        let mut extracted_path = None;
-        let mut entries = tokio::fs::read_dir(&tmp_dir).await?;
-        while let Some(entry) = entries.next_entry().await? {
-            if entry.path().join("lima.yaml").exists() {
-                extracted_path = Some(entry.path());
-                break;
-            }
-        }
-
-        let src = match extracted_path {
+        // Two supported layouts:
+        //   New: tarball root has `lima/<vm>/lima.yaml` + `bin/limactl` + `share/lima/`
+        //   Old: tarball root has `<vm>/lima.yaml`
+        // Find the directory holding lima.yaml in either layout.
+        let src = match find_vm_dir_in_layout(&tmp_dir).await? {
             Some(p) => p,
             None => {
                 tokio::fs::remove_dir_all(&tmp_dir).await.ok();
-                anyhow::bail!("Extracted archive does not contain a Lima VM (no lima.yaml found)");
+                anyhow::bail!(
+                    "Extracted archive does not contain a Lima VM (no lima.yaml found in \
+                     either tarball-root/<vm>/ or tarball-root/lima/<vm>/)."
+                );
             }
         };
 
-        // Move to final location with target vm_name
+        // Move VM to final location with the target vm_name.
         tokio::fs::rename(&src, &vm_dir).await?;
+
+        // New-layout bonus: if the tarball ships a Lima toolchain, seed our
+        // private install only when the host doesn't already have one.
+        let tmp_lima_bin = tmp_dir.join("bin").join("limactl");
+        if tmp_lima_bin.exists() && !limactl_bin().exists() {
+            let bin_dir = clawenv_root.join("bin");
+            tokio::fs::create_dir_all(&bin_dir).await?;
+            tokio::fs::rename(&tmp_lima_bin, bin_dir.join("limactl")).await.ok();
+        }
+        let tmp_share_lima = tmp_dir.join("share").join("lima");
+        let host_share_lima = clawenv_root.join("share").join("lima");
+        if tmp_share_lima.exists() && !host_share_lima.exists() {
+            tokio::fs::create_dir_all(clawenv_root.join("share")).await?;
+            tokio::fs::rename(&tmp_share_lima, &host_share_lima).await.ok();
+        }
+
         tokio::fs::remove_dir_all(&tmp_dir).await.ok();
 
-        // Start the imported VM
+        // Rewrite absolute host paths in lima.yaml (mount locations) so the
+        // imported VM targets this host's workspaces dir instead of the
+        // exporter's home. Non-fatal if the file is unreadable — limactl start
+        // will surface any real config problem.
+        rewrite_lima_yaml_for_host(&vm_dir, &self.vm_name).await.ok();
+
+        // Best-effort quarantine clear in case the tarball came through a
+        // download that attached the attribute.
+        let _ = Command::new("xattr")
+            .args(["-dr", "com.apple.quarantine", &vm_dir.to_string_lossy()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+
         self.limactl(&["start", &self.vm_name]).await?;
         Ok(())
     }
@@ -471,4 +731,24 @@ impl SandboxBackend for LimaBackend {
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
     fn supports_port_edit(&self) -> bool { true }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    // Guards against a TOML layout regression: if `urls` is placed after
+    // `[sha256]` it becomes `sha256.urls` and download fails at runtime.
+    #[test]
+    fn release_toml_parses_with_top_level_urls() {
+        let r = LimaRelease::load().expect("lima-release.toml must parse");
+        assert!(!r.version.is_empty(), "version missing");
+        assert_eq!(r.sha256_arm64.len(), 64, "arm64 sha256 must be hex-64");
+        assert_eq!(r.sha256_x86_64.len(), 64, "x86_64 sha256 must be hex-64");
+        assert!(!r.url_templates.is_empty(), "urls must be a top-level array");
+
+        let urls = r.render_urls("lima-x.y.z-Darwin-arm64.tar.gz");
+        assert!(urls[0].contains(&r.version), "template {{version}} substitution failed");
+        assert!(urls[0].contains("lima-x.y.z-Darwin-arm64.tar.gz"), "template {{filename}} substitution failed");
+    }
 }

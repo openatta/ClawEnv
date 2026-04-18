@@ -224,7 +224,7 @@ fn test_claw_types_all_have_required_fields() {
     let (code, event) = run_json(&["claw-types"]);
     assert_eq!(code, 0);
     let types = event["data"]["claw_types"].as_array().unwrap();
-    assert!(types.len() >= 3, "should have at least 3 claw types (openclaw, nanoclaw, hermes)");
+    assert!(types.len() >= 2, "should have at least 2 claw types (openclaw, hermes)");
 
     for ct in types {
         let id = ct["id"].as_str().unwrap_or("???");

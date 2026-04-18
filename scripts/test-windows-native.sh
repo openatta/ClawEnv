@@ -20,8 +20,15 @@ if [ -f "$SCRIPT_DIR/../.env" ]; then
 fi
 WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
-WIN_PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
-WIN_CLI="$WIN_PROJECT\\target\\debug\\clawcli.exe"
+# WIN_PROJECT is configured in .env (default: clawenv user's home + /ClawEnv).
+# Uses forward slashes so bash's env-file parser doesn't eat backslash escapes;
+# Windows cmd accepts "/" in `cd` / path arguments fine.
+WIN_PROJECT="${WIN_PROJECT:-C:/Users/$WIN_USER/ClawEnv}"
+# Prefer release build (the GUI bundles release CLI as sidecar); fall back to
+# debug if only that exists. Both use forward slashes for consistency.
+WIN_CLI_RELEASE="$WIN_PROJECT/target/release/clawcli.exe"
+WIN_CLI_DEBUG="$WIN_PROJECT/target/debug/clawcli.exe"
+WIN_CLI="$WIN_CLI_RELEASE"
 WIN_ENV="set PATH=%PATH%;C:\\Program Files\\nodejs;C:\\Program Files\\Git\\cmd;C:\\Users\\$WIN_USER\\.cargo\\bin&&"
 
 echo "========================================"
@@ -36,11 +43,13 @@ if ! ssh -o ConnectTimeout=5 "$WIN_USER@$WIN_HOST" "echo ok" 2>&1 | grep -q "ok"
     exit 1
 fi
 
-# Sync & build
-echo "  Syncing code..."
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && \"C:\\Program Files\\Git\\cmd\\git.exe\" pull" 2>&1 | tail -2
-echo "  Building CLI..."
-ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd $WIN_PROJECT && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawcli" 2>&1 | tail -2
+# Sync & build. We push the local tree directly via tar pipe (see
+# win-remote.sh sync) instead of `git pull` — no commits required — and
+# build release so we exercise the same binary the GUI sidecar uses.
+echo "  Syncing code (tar pipe over SSH)..."
+bash "$SCRIPT_DIR/win-remote.sh" sync 2>&1 | tail -2
+echo "  Building CLI (release)..."
+ssh "$WIN_USER@$WIN_HOST" "${WIN_ENV} cd \"$WIN_PROJECT\" && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe build -p clawcli --release" 2>&1 | tail -2
 
 # ================================================================
 section "A. System Exploration"

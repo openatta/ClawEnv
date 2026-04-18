@@ -94,7 +94,7 @@ pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
                 }
             }
             SandboxType::LimaAlpine => {
-                let vm_dir = home.join(".lima").join(&inst.sandbox_id);
+                let vm_dir = clawenv_core::sandbox::lima_home().join(&inst.sandbox_id);
                 if !vm_dir.exists() {
                     issues.push(serde_json::json!({
                         "instance": inst.name, "type": "missing_vm",
@@ -115,6 +115,25 @@ pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
             "message": "Orphan native directory exists but no native instance in config",
             "fixable": true,
         }));
+    }
+
+    // Detect legacy Lima VMs left in the system default ~/.lima/ from older
+    // clawenv builds (before LIMA_HOME was pinned to ~/.clawenv/lima).
+    let legacy_lima = home.join(".lima");
+    if legacy_lima.exists() {
+        if let Ok(mut rd) = std::fs::read_dir(&legacy_lima) {
+            let has_clawenv_vm = rd.any(|e| e.ok()
+                .and_then(|e| e.file_name().into_string().ok())
+                .map(|n| n.starts_with("clawenv-"))
+                .unwrap_or(false));
+            if has_clawenv_vm {
+                issues.push(serde_json::json!({
+                    "instance": "(legacy)", "type": "legacy_lima_home",
+                    "message": "Legacy Lima VMs found in ~/.lima/. clawenv now stores VMs under ~/.clawenv/lima/. Move or delete the old directory.",
+                    "fixable": false,
+                }));
+            }
+        }
     }
 
     Ok(serde_json::json!({

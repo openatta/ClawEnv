@@ -6,10 +6,10 @@ mod exec_helper;
 #[cfg(test)]
 pub mod mock;
 
-pub use lima::LimaBackend;
+pub use lima::{LimaBackend, init_lima_env, lima_home, limactl_bin};
 pub use native::NativeBackend;
 pub use wsl::WslBackend;
-pub use podman::PodmanBackend;
+pub use podman::{PodmanBackend, init_podman_env, podman_data_home, podman_runtime_home};
 
 use anyhow::Result;
 use async_trait::async_trait;

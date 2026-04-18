@@ -17,6 +17,7 @@ export default function LiteMain(props: Props) {
   const [health, setHealth] = createSignal("unreachable");
   const [opModal, setOpModal] = createSignal<{ op: "start" | "stop" | "restart" } | null>(null);
   const [showExport, setShowExport] = createSignal(false);
+  const [exportError, setExportError] = createSignal("");
   const [showDelete, setShowDelete] = createSignal(false);
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [gatewayToken, setGatewayToken] = createSignal("");
@@ -33,10 +34,18 @@ export default function LiteMain(props: Props) {
     } catch { setHealth("unreachable"); }
   }
 
-  onMount(() => {
+  onMount(async () => {
     refreshHealth();
     const timer = setInterval(refreshHealth, 8000);
-    onCleanup(() => clearInterval(timer));
+    // Mirror the main app's fix: export_sandbox / export_native_bundle
+    // return Ok as soon as the dialog closes, and the real success/failure
+    // arrives asynchronously via events. Without listening to export-failed
+    // the user clicks "Export" and sees nothing if stop/tar/compress fails.
+    const unFail = await listen<string>("export-failed", (ev) => {
+      setShowExport(false);
+      setExportError(String(ev.payload));
+    });
+    onCleanup(() => { clearInterval(timer); unFail(); });
   });
 
   // Token fetch
@@ -59,7 +68,16 @@ export default function LiteMain(props: Props) {
 
   async function doExport() {
     const cmd = isNative() ? "export_native_bundle" : "export_sandbox";
-    try { await invoke(cmd, { name: inst().name }); setShowExport(true); } catch {}
+    setExportError("");
+    try {
+      await invoke(cmd, { name: inst().name });
+      setShowExport(true);
+    } catch (e) {
+      // Dialog-cancel throws here too; filter those out so we only surface
+      // real failures (mirrors main app's SandboxPage.handleExport).
+      const msg = String(e);
+      if (msg && !/cancel/i.test(msg)) setExportError(msg);
+    }
   }
 
   const healthColor = () => isRunning() ? "bg-green-500" : health() === "stopped" ? "bg-gray-500" : "bg-red-500";
@@ -153,6 +171,17 @@ export default function LiteMain(props: Props) {
 
       <Show when={showExport()}>
         <ExportProgress isNative={isNative()} onClose={() => setShowExport(false)} />
+      </Show>
+
+      {/* Export error toast — ported from main app's SandboxPage so Lite
+          users also see backend failures that the async spawn-based export
+          IPC can't return through its synchronous Ok() response. */}
+      <Show when={exportError()}>
+        <div class="fixed bottom-4 right-4 max-w-md bg-red-900 border border-red-600 text-red-100 text-xs rounded px-3 py-2 shadow-lg z-50">
+          <div class="font-semibold mb-1">{t("导出失败", "Export failed")}</div>
+          <div class="break-words">{exportError()}</div>
+          <button class="mt-1 underline" onClick={() => setExportError("")}>{t("关闭", "Dismiss")}</button>
+        </div>
       </Show>
 
       <Show when={showDelete}>

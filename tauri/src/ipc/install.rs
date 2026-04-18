@@ -4,9 +4,23 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 
 use crate::cli_bridge::{self, CliEvent};
+use crate::ipc::emit::{emit_instance_changed, InstanceAction, InstanceChanged};
 
 /// Guard against concurrent installs — only one install at a time.
 static INSTALL_RUNNING: AtomicBool = AtomicBool::new(false);
+
+/// RAII guard that resets `INSTALL_RUNNING` on drop. A previous iteration
+/// set the flag on entry and cleared it at the end of the happy path — if
+/// any code in the async task panicked (tokio catches panics but the
+/// trailing `store(false)` still got skipped), the flag stayed `true`
+/// forever, leaving the user permanently blocked from starting another
+/// install. A drop guard runs no matter how the scope exits.
+struct InstallRunningGuard;
+impl Drop for InstallRunningGuard {
+    fn drop(&mut self) {
+        INSTALL_RUNNING.store(false, Ordering::SeqCst);
+    }
+}
 
 #[tauri::command]
 pub async fn install_openclaw(
@@ -27,6 +41,9 @@ pub async fn install_openclaw(
 
     let ct = claw_type.unwrap_or_else(|| "openclaw".into());
     let mode = if use_native { "native" } else { "sandbox" };
+    // Keep the instance name around for the post-install instance-changed
+    // emit — `instance_name` itself is moved into the CLI args vec below.
+    let instance_name_for_emit = instance_name.clone();
 
     // Build CLI args
     let mut args = vec![
@@ -53,6 +70,9 @@ pub async fn install_openclaw(
 
     let app_handle = app.clone();
     tokio::spawn(async move {
+        // Guard released when this task exits, via any path (normal return,
+        // early return, panic caught by tokio's spawn, task cancel).
+        let _guard = InstallRunningGuard;
         let (tx, mut rx) = tokio::sync::mpsc::channel::<CliEvent>(32);
 
         // Forward CLI events to Tauri frontend
@@ -84,6 +104,18 @@ pub async fn install_openclaw(
         match result {
             Ok(_) => {
                 let _ = app_handle.emit("install-complete", ());
+                // Canonical state-sync event. The install runs in an isolated
+                // WebviewWindow, so the main window doesn't inspect config.toml
+                // on its own — MainLayout's `instance-changed` listener is the
+                // single code path that refreshes `instances()` and makes the
+                // newly-installed entry appear in Home / ClawPage. The separate
+                // front-end emit in App.tsx on window close is belt-and-braces;
+                // this backend emit is the authoritative one that can't be
+                // accidentally skipped if the install window is force-closed.
+                emit_instance_changed(
+                    &app_handle,
+                    InstanceChanged::simple(InstanceAction::Install, &instance_name_for_emit),
+                );
                 crate::tray::send_notification(
                     &app_handle,
                     "Install Complete",
@@ -100,7 +132,7 @@ pub async fn install_openclaw(
                 );
             }
         }
-        INSTALL_RUNNING.store(false, Ordering::SeqCst);
+        // _guard drops here and resets INSTALL_RUNNING — no manual store needed.
     });
 
     Ok(())

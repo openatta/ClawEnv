@@ -97,12 +97,21 @@ export default function InstallWizard(props: {
     installMcpBridge: installMcpBridge(),
   });
 
-  // Key to force remount of StepProgress on retry
-  const [progressKey, setProgressKey] = createSignal(0);
+  // Key to force remount of StepProgress on retry. Starts at 1 so Show/keyed
+  // actually renders on first entry — progressKey() must be truthy.
+  const [progressKey, setProgressKey] = createSignal(1);
 
   function goToStep(s: number) {
+    // Bump progressKey BEFORE transitioning into step 6. Otherwise StepProgress
+    // mounts with the old key value, runs startInstall once, then sees the key
+    // change a microtask later and runs startInstall again — the second call
+    // collides with the backend INSTALL_RUNNING guard and surfaces as a
+    // spurious "Installation already in progress" error in the stage UI.
+    if (s === 6) {
+      setInstallError("");          // clear the old failure so Retry UI shows progress, not the error
+      setProgressKey(k => k + 1);   // bump key → createEffect reruns startInstall
+    }
     setStep(s);
-    if (s === 6) setProgressKey(k => k + 1); // remount to restart install
   }
 
   async function handleComplete() {
@@ -196,13 +205,17 @@ export default function InstallWizard(props: {
             <StepApiKey apiKey={apiKey} onApiKeyChange={setApiKey} clawDisplayName={clawDisplayName()} />
           )}
           {step() === 6 && (
-            <span style={{ display: "contents" }} data-key={progressKey()}>
-              <StepProgress
-                state={buildInstallState()} stages={INSTALL_STAGES()}
-                onComplete={() => setStep(7)}
-                onError={(msg) => setInstallError(msg)}
-              />
-            </span>
+            // StepProgress stays mounted across retries; incrementing
+            // progressKey() re-fires its internal createEffect, which restarts
+            // the install. We deliberately avoid <Show keyed> here — that
+            // pattern sometimes lost the install-progress listener under
+            // Tauri+Solid timing (registration raced the first emitted event).
+            <StepProgress
+              state={buildInstallState()} stages={INSTALL_STAGES()}
+              retryTrigger={progressKey}
+              onComplete={() => setStep(7)}
+              onError={(msg) => setInstallError(msg)}
+            />
           )}
 
           {/* Step 7: Complete (inline — simple enough) */}

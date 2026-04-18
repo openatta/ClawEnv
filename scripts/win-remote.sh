@@ -23,7 +23,10 @@ fi
 
 WIN_HOST="${WIN_HOST:-192.168.64.7}"
 WIN_USER="${WIN_USER:-clawenv}"
-PROJECT="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv"
+# Project path on the Windows box — configured in .env as WIN_PROJECT.
+# Default: %USERPROFILE%\ClawEnv (clawenv user's home).
+WIN_PROJECT="${WIN_PROJECT:-C:\\Users\\$WIN_USER\\ClawEnv}"
+PROJECT="$WIN_PROJECT"
 CARGO="C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe"
 
 # All tools must be in PATH for every SSH session (Node, Git, MSVC, LLVM, Cargo)
@@ -69,6 +72,37 @@ case "$CMD" in
     run)
         win_run "$*"
         ;;
+    sync)
+        # Mirror the local source tree into $WIN_PROJECT on the Windows box via
+        # a tar pipe over SSH. rsync isn't available natively on Windows and
+        # Git-for-Windows's rsync.exe isn't shipped; tar over SSH is the next
+        # best thing. We use Windows' built-in `tar.exe` (system32, BSD tar
+        # with gzip support built in) so we don't depend on a separate gzip.
+        # Git-for-Windows tar would try to `exec gzip` which isn't on PATH.
+        # Excludes heavy / machine-specific dirs (target, node_modules, dist,
+        # .git). First run creates the target dir; subsequent runs overwrite.
+        echo "=== Sync local source → $PROJECT on Windows ==="
+        LOCAL_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+        TAR_BIN='C:\\Windows\\System32\\tar.exe'
+        # Create target dir if missing. Use cmd mkdir (accepts forward slashes).
+        ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
+            "if not exist \"$PROJECT\" mkdir \"$PROJECT\"" 2>&1 | grep -v "post-quantum" || true
+        # Stream a gzip'd tar over SSH. BSD tar on Windows auto-detects gzip.
+        # Set COPYFILE_DISABLE=1 so macOS's bsdtar doesn't serialize extended
+        # attributes as separate `./._name` entries — Windows reads those as
+        # regular files and chokes on the non-UTF-8 AppleDouble header
+        # (e.g. "failed to read file 'capabilities\._default.json'").
+        (cd "$LOCAL_ROOT" && COPYFILE_DISABLE=1 tar czf - \
+            --exclude='./target' \
+            --exclude='./node_modules' \
+            --exclude='./dist' \
+            --exclude='./.git' \
+            --exclude='.DS_Store' \
+            --exclude='._*' \
+            .) | ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
+            "cd \"$PROJECT\" && $TAR_BIN -xzf -" 2>&1 | grep -v "post-quantum" || true
+        echo "Done. Source synced to $PROJECT"
+        ;;
     help|*)
         echo "Usage: bash scripts/win-remote.sh <command>"
         echo ""
@@ -78,6 +112,7 @@ case "$CMD" in
         echo "  build    Run cargo tauri build"
         echo "  dev      Run cargo tauri dev"
         echo "  pull     Git pull latest code"
+        echo "  sync     Tar-stream local source (excluding target/node_modules/.git) to $WIN_PROJECT"
         echo "  npm      Run npm command (e.g., npm install)"
         echo "  shell    Open interactive SSH session"
         echo "  run      Run arbitrary command"

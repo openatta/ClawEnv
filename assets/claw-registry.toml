@@ -1,7 +1,7 @@
 # ClawEnv — Built-in Claw Product Registry
 #
 # Products that ClawEnv can independently install and manage inside a sandbox.
-# Supports npm-based (OpenClaw, NanoClaw) and pip-based (Hermes Agent) products.
+# Supports npm-based (OpenClaw) and pip-based (Hermes Agent) products.
 #
 # Products NOT listed here (documented in docs/13-claw-registry.md):
 #   - OpenClaw wrappers distributed as desktop installers (AutoClaw, QClaw, EasyClaw)
@@ -27,26 +27,6 @@ mcp_set_cmd = "mcp set {name} '{json}'"
 default_port = 3000
 supports_mcp = true
 supports_browser = true
-has_gateway_ui = true
-supports_native = true
-mcp_runtime = "node"
-
-# NanoClaw — security-focused OpenClaw alternative (Docker container isolation)
-# npm install from git clone, CLI binary confirmed
-[[claw]]
-id = "nanoclaw"
-display_name = "NanoClaw"
-logo = "🔒"
-package_manager = "npm"
-npm_package = "nanoclaw"
-cli_binary = "nanoclaw"
-gateway_cmd = "start --port {port}"
-version_cmd = "--version"
-config_apikey_cmd = "config set apiKey '{key}'"
-mcp_set_cmd = ""
-default_port = 3000
-supports_mcp = false
-supports_browser = false
 has_gateway_ui = true
 supports_native = true
 mcp_runtime = "node"

@@ -6,6 +6,48 @@ use tokio::sync::mpsc;
 
 use super::{ImageSource, InstallMode, SandboxBackend, SandboxOpts, ResourceStats};
 
+/// Where Podman keeps its container storage when driven by ClawEnv. Mirrors
+/// the Lima LIMA_HOME pattern — we pin all three sandbox backends under
+/// `~/.clawenv/<backend>/` so users (and uninstall) see one data root.
+///
+/// Podman itself doesn't have a dedicated "PODMAN_HOME" env var; it follows
+/// the XDG base-dir spec. Setting `XDG_DATA_HOME` to this parent (which
+/// contains `containers/`) points Podman's storage/graph/volumes/db at our
+/// private tree. `XDG_RUNTIME_DIR` similarly controls the socket/pid dir.
+pub fn podman_data_home() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".clawenv/podman-data")
+}
+
+pub fn podman_runtime_home() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("/tmp"))
+        .join(".clawenv/podman-run")
+}
+
+/// Initialise Podman env for this process. Call once at startup so every
+/// spawned `podman` child inherits `XDG_DATA_HOME` / `XDG_RUNTIME_DIR` and
+/// uses the private data directories instead of the system-default
+/// `~/.local/share/containers` and `$XDG_RUNTIME_DIR/podman`.
+pub fn init_podman_env() {
+    let data = podman_data_home();
+    let run = podman_runtime_home();
+    let _ = std::fs::create_dir_all(&data);
+    // runtime dir must be mode 0700 — Podman refuses to start otherwise.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let _ = std::fs::DirBuilder::new().mode(0o700).recursive(true).create(&run);
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = std::fs::create_dir_all(&run);
+    }
+    std::env::set_var("XDG_DATA_HOME", &data);
+    std::env::set_var("XDG_RUNTIME_DIR", &run);
+}
+
 pub struct PodmanBackend {
     container_name: String,
     image_tag: String,

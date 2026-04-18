@@ -53,7 +53,150 @@ pub async fn has_git() -> bool {
     clawenv_git_bin().exists()
 }
 
-/// Install Git portable to ~/.clawenv/git/. Never depends on system git.
+
+/// Pinned dugite-native Git release metadata, loaded from the bundled TOML.
+/// Version bumps happen by editing `assets/git/git-release.toml` — no code
+/// change required.
+#[allow(dead_code)] // some per-platform sha256 fields are only read under matching #[cfg]
+struct GitRelease {
+    tag: String,                  // dugite release tag, e.g. "2.53.0-3" — URL path
+    upstream_version: String,     // upstream git version, e.g. "2.53.0" — filename
+    commit: String,
+    url_templates: Vec<String>,
+    sha256_macos_arm64: String,
+    sha256_macos_x86_64: String,
+    sha256_linux_arm64: String,
+    sha256_linux_x86_64: String,
+}
+
+impl GitRelease {
+    fn load() -> Result<Self> {
+        let src = include_str!("../../../../assets/git/git-release.toml");
+        let t: toml::Table = src.parse()
+            .map_err(|e| anyhow::anyhow!("git-release.toml invalid: {e}"))?;
+        let tag = t.get("tag").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `tag`"))?.to_string();
+        let upstream_version = t.get("upstream_version").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `upstream_version`"))?.to_string();
+        let commit = t.get("commit").and_then(|v| v.as_str())
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `commit`"))?.to_string();
+        let url_templates: Vec<String> = t.get("urls")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default();
+        if url_templates.is_empty() {
+            anyhow::bail!("git-release.toml must list at least one URL in top-level `urls`");
+        }
+        let sha = t.get("sha256").and_then(|v| v.as_table())
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing [sha256] table"))?;
+        let get_sha = |k: &str| sha.get(k).and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing sha256.{k}"));
+        Ok(Self {
+            tag,
+            upstream_version,
+            commit,
+            url_templates,
+            sha256_macos_arm64:  get_sha("macos-arm64")?,
+            sha256_macos_x86_64: get_sha("macos-x86_64")?,
+            sha256_linux_arm64:  get_sha("linux-arm64")?,
+            sha256_linux_x86_64: get_sha("linux-x86_64")?,
+        })
+    }
+
+    /// Resolve (platform_tag, expected_sha256) for the current host, or bail
+    /// if the target isn't supported (e.g. unknown arch).
+    fn current_platform(&self) -> Result<(&'static str, &str)> {
+        let arch = std::env::consts::ARCH;
+        #[cfg(target_os = "macos")]
+        {
+            return match arch {
+                "aarch64" => Ok(("macOS-arm64", self.sha256_macos_arm64.as_str())),
+                "x86_64"  => Ok(("macOS-x64",   self.sha256_macos_x86_64.as_str())),
+                other => anyhow::bail!("Unsupported macOS architecture: {other}"),
+            };
+        }
+        #[cfg(target_os = "linux")]
+        {
+            return match arch {
+                "aarch64" => Ok(("ubuntu-arm64", self.sha256_linux_arm64.as_str())),
+                "x86_64"  => Ok(("ubuntu-x64",   self.sha256_linux_x86_64.as_str())),
+                other => anyhow::bail!("Unsupported Linux architecture: {other}"),
+            };
+        }
+        #[cfg(target_os = "windows")]
+        { let _ = arch; anyhow::bail!("Git on Windows is shipped via MinGit, not dugite-native"); }
+    }
+
+    fn render_urls(&self, platform: &str) -> Vec<(String, String)> {
+        // dugite asset filename uses upstream git version (e.g. "2.53.0"),
+        // not the release tag ("2.53.0-3") — that's a dugite-specific
+        // distinction. URL path in turn uses the release tag.
+        let filename = format!(
+            "dugite-native-v{ver}-{commit}-{platform}.tar.gz",
+            ver = self.upstream_version, commit = self.commit, platform = platform,
+        );
+        self.url_templates.iter().map(|tmpl| {
+            let u = tmpl
+                .replace("{tag}",              &self.tag)
+                .replace("{upstream_version}", &self.upstream_version)
+                .replace("{commit}",           &self.commit)
+                .replace("{platform}",         platform)
+                .replace("{filename}",         &filename);
+            (u, filename.clone())
+        }).collect()
+    }
+}
+
+#[cfg(test)]
+mod git_release_tests {
+    use super::GitRelease;
+
+    // Regression guard: dugite-native's release tag (e.g. "2.53.0-3") carries
+    // a build-counter suffix that is NOT present in asset filenames ("2.53.0").
+    // Conflating the two produces URLs like /download/v2.53.0-3/dugite-...-
+    // v2.53.0-3-f49d009-macOS-arm64.tar.gz which 404 on the server.
+    #[test]
+    fn release_toml_renders_dugite_url_correctly() {
+        let release = GitRelease::load().expect("git-release.toml must parse");
+        assert!(!release.tag.is_empty(), "tag must not be empty");
+        assert!(!release.upstream_version.is_empty(), "upstream_version must not be empty");
+        assert!(!release.commit.is_empty(), "commit must not be empty");
+        assert_eq!(release.sha256_macos_arm64.len(), 64);
+
+        let urls = release.render_urls("macOS-arm64");
+        assert!(!urls.is_empty(), "urls array must have at least one entry");
+        let (url, filename) = &urls[0];
+
+        // Path must carry the full release tag…
+        assert!(
+            url.contains(&format!("/download/v{}/", release.tag)),
+            "URL path should use release tag 'v{}' but got: {url}",
+            release.tag
+        );
+        // …while the asset filename uses only the upstream git version.
+        assert!(
+            filename.contains(&format!("v{}-", release.upstream_version)),
+            "filename should use upstream_version 'v{}' but got: {filename}",
+            release.upstream_version
+        );
+        // And must NOT embed the tag's build-counter suffix inside the filename,
+        // which was the exact regression that produced 404s.
+        assert!(
+            !filename.contains(&release.tag) || release.tag == release.upstream_version,
+            "filename must not contain the full dugite tag '{}' — that was the 404 bug. \
+             Got: {filename}",
+            release.tag
+        );
+        assert!(filename.ends_with("-macOS-arm64.tar.gz"));
+    }
+}
+
+/// Install Git portable to ~/.clawenv/git/. Never depends on system git —
+/// downloads a pinned binary release, verifies its sha256, and extracts.
+/// The extracted tree is self-contained (bin/git + libexec/git-core + share/)
+/// so bundle exports on this machine can be imported on any peer machine of
+/// the same OS/arch without requiring system git on the target.
 async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     let git_dir = clawenv_git_dir();
     let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
@@ -93,60 +236,101 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
         }
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        send(tx, "Downloading Git for macOS...", 6, InstallStage::EnsurePrerequisites).await;
-        let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "x86_64" };
-        // git-manpages-free: standalone portable git built for macOS
-        let url = format!(
-            "https://github.com/nicknisi/git-for-mac/releases/latest/download/git-macos-{arch}.tar.gz"
-        );
-        let tar_path = parent.join("git.tar.gz");
+        let release = GitRelease::load()?;
+        let (platform, expected_sha) = release.current_platform()?;
+        let urls = release.render_urls(platform);
+        let (_url, filename) = urls.first()
+            .ok_or_else(|| anyhow::anyhow!("git-release.toml produced no URLs"))?;
 
-        let status = tokio::process::Command::new("curl")
-            .args(["-fSL", "-o", &tar_path.to_string_lossy(), &url])
-            .status().await?;
+        send(tx, &format!("Downloading portable Git ({platform})..."), 6, InstallStage::EnsurePrerequisites).await;
 
-        if !status.success() {
-            // Fallback: try git-scm.com universal binary
-            let url2 = "https://sourceforge.net/projects/git-osx-installer/files/latest/download";
-            let _ = tokio::process::Command::new("curl")
-                .args(["-fSL", "-o", &tar_path.to_string_lossy(), "-L", url2])
-                .status().await;
-        }
+        // Fetch each URL in order, verifying sha256. Uses the same resilient
+        // download pattern as the Lima installer.
+        let bytes = download_git_tarball(&urls, expected_sha).await?;
 
         send(tx, "Extracting Git...", 8, InstallStage::EnsurePrerequisites).await;
+        let tar_path = parent.join(filename);
+        tokio::fs::write(&tar_path, &bytes).await?;
+
+        // Dugite's tarball layout is a flat ./bin/ ./libexec/ ./share/ root
+        // (no leading top-level directory), so extract straight into git_dir.
         let _ = tokio::fs::remove_dir_all(&git_dir).await;
         tokio::fs::create_dir_all(&git_dir).await?;
-        tokio::process::Command::new("tar")
-            .args(["xzf", &tar_path.to_string_lossy(), "--strip-components=1", "-C", &git_dir.to_string_lossy()])
+        let status = tokio::process::Command::new("tar")
+            .args(["xzf", &tar_path.to_string_lossy(), "-C", &git_dir.to_string_lossy()])
             .status().await?;
-        tokio::fs::remove_file(&tar_path).await.ok();
+        if let Err(e) = tokio::fs::remove_file(&tar_path).await {
+            tracing::warn!("cleanup: failed to remove git tarball cache {}: {e}",
+                tar_path.display());
+        }
+        if !status.success() {
+            anyhow::bail!("Failed to extract git tarball into {}", git_dir.display());
+        }
 
-        // If portable git doesn't have expected structure, create bin/ symlink to system git as last resort
-        if !clawenv_git_bin().exists() {
-            tokio::fs::create_dir_all(git_dir.join("bin")).await?;
-            // Try to find any git binary in extracted dir
-            let find = tokio::process::Command::new("find")
-                .args([&git_dir.to_string_lossy().to_string(), "-name", "git", "-type", "f"])
-                .output().await;
-            if let Ok(out) = find {
-                let found = String::from_utf8_lossy(&out.stdout);
-                if let Some(path) = found.lines().next() {
-                    let _ = tokio::fs::symlink(path, git_dir.join("bin").join("git")).await;
-                }
+        // Best-effort quarantine clear on macOS so Gatekeeper doesn't prompt.
+        #[cfg(target_os = "macos")]
+        {
+            match tokio::process::Command::new("xattr")
+                .args(["-dr", "com.apple.quarantine", &git_dir.to_string_lossy()])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status().await
+            {
+                Err(e) => tracing::warn!("xattr quarantine clear failed to spawn: {e}"),
+                Ok(s) if !s.success() => tracing::warn!(
+                    "xattr quarantine clear exited with {:?} on {} — Gatekeeper may \
+                     prompt on first git invocation",
+                    s.code(), git_dir.display()
+                ),
+                Ok(_) => {}
             }
         }
-    }
 
-    #[cfg(target_os = "linux")]
-    {
-        send(tx, "Git not found. Please install: sudo apt install git", 8, InstallStage::EnsurePrerequisites).await;
-        anyhow::bail!("Git is required but not installed. Run: sudo apt install git (Ubuntu/Debian) or sudo dnf install git (Fedora)");
+        if !clawenv_git_bin().exists() {
+            anyhow::bail!(
+                "Private git binary missing after extract: expected {}",
+                clawenv_git_bin().display()
+            );
+        }
     }
 
     send(tx, "Git installed", 9, InstallStage::EnsurePrerequisites).await;
     Ok(())
+}
+
+/// Try each mirror URL in order, return the first response whose bytes match
+/// the expected sha256. Mirrors checksum-mismatches to the next candidate so
+/// a compromised mirror can't inject bad binaries — identical shape to the
+/// Lima downloader.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+async fn download_git_tarball(urls: &[(String, String)], expected_sha256: &str) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    let mut last_err: Option<String> = None;
+    for (url, _filename) in urls {
+        tracing::info!("Trying git tarball URL: {url}");
+        match reqwest::get(url).await {
+            Err(e) => { last_err = Some(format!("{url}: {e}")); continue; }
+            Ok(r) if !r.status().is_success() => {
+                last_err = Some(format!("{url}: HTTP {}", r.status())); continue;
+            }
+            Ok(r) => match r.bytes().await {
+                Err(e) => { last_err = Some(format!("{url}: body read: {e}")); continue; }
+                Ok(bytes) => {
+                    let hex = hex::encode(Sha256::digest(&bytes));
+                    if hex == expected_sha256 {
+                        return Ok(bytes.to_vec());
+                    }
+                    last_err = Some(format!("{url}: checksum mismatch"));
+                }
+            }
+        }
+    }
+    anyhow::bail!(
+        "All git download URLs failed. Last error: {}",
+        last_err.as_deref().unwrap_or("(no URLs tried)")
+    )
 }
 
 /// Node binary path inside ClawEnv's private Node.js.

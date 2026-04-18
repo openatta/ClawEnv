@@ -44,9 +44,38 @@ provision:
   script: |
     #!/bin/sh
     {PROXY_SCRIPT}
-    {MIRRORS_SCRIPT}
-    apk update
-    apk add --no-cache git curl bash nodejs npm ttyd openssh build-base python3 procps
+
+    # One try-cycle per Alpine mirror: set repos, apk update, apk add.
+    # Individual commands get hard timeouts so a slow/flaky mirror (dl-cdn
+    # Fastly 5xx, a single hung package download, proxy stalls) can never
+    # freeze the whole provision step — we just move to the next mirror.
+    # `set -e` is intentionally *not* enabled: the fallback chain depends on
+    # failures being caught via `&&` short-circuiting, not aborting the script.
+    PACKAGES="git curl bash nodejs npm ttyd openssh build-base python3 procps"
+
+    try_install() {
+      m="$1"
+      ALPINE_VER=$(cat /etc/alpine-release 2>/dev/null | cut -d. -f1,2)
+      echo "[provision] trying $m"
+      echo "$m/v$ALPINE_VER/main" > /etc/apk/repositories
+      echo "$m/v$ALPINE_VER/community" >> /etc/apk/repositories
+      timeout 60  apk update              2>>/tmp/apk.err && \
+      timeout 600 apk add --no-cache $PACKAGES 2>>/tmp/apk.err
+    }
+
+    SUCCESS=""
+    USER_MIRROR="{USER_ALPINE_MIRROR}"
+    [ -n "$USER_MIRROR" ] && try_install "$USER_MIRROR" && SUCCESS=1
+    [ -z "$SUCCESS" ] && try_install "https://dl-cdn.alpinelinux.org/alpine" && SUCCESS=1
+    [ -z "$SUCCESS" ] && try_install "https://mirrors.tuna.tsinghua.edu.cn/alpine" && SUCCESS=1
+    [ -z "$SUCCESS" ] && try_install "https://mirrors.aliyun.com/alpine" && SUCCESS=1
+    [ -z "$SUCCESS" ] && try_install "https://mirror.sjtu.edu.cn/alpine" && SUCCESS=1
+    if [ -z "$SUCCESS" ]; then
+      echo "ERROR: no Alpine mirror could complete update + add" >&2
+      tail -60 /tmp/apk.err >&2 2>/dev/null || true
+      exit 1
+    fi
+
     ssh-keygen -A
     # Allow clawenv user to npm install -g without sudo
     mkdir -p /usr/local/lib/node_modules /usr/local/bin

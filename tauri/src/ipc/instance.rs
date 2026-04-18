@@ -6,6 +6,7 @@ use serde::Serialize;
 use tauri::{Emitter, Manager, webview::WebviewWindowBuilder};
 
 use crate::cli_bridge;
+use crate::ipc::emit::{emit_instance_changed, InstanceAction, InstanceChanged};
 
 #[tauri::command]
 pub async fn detect_launch_state() -> Result<clawenv_core::launcher::LaunchState, String> {
@@ -80,14 +81,16 @@ pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<St
 }
 
 #[tauri::command]
-pub async fn start_instance(name: String) -> Result<(), String> {
+pub async fn start_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["start", &name]).await.map_err(|e| e.to_string())?;
+    emit_instance_changed(&app, InstanceChanged::simple(InstanceAction::Start, &name));
     Ok(())
 }
 
 #[tauri::command]
-pub async fn stop_instance(name: String) -> Result<(), String> {
+pub async fn stop_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["stop", &name]).await.map_err(|e| e.to_string())?;
+    emit_instance_changed(&app, InstanceChanged::simple(InstanceAction::Stop, &name));
     Ok(())
 }
 
@@ -104,7 +107,10 @@ pub async fn stop_all_instances() -> Result<(), String> {
 #[tauri::command]
 pub async fn delete_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["uninstall", "--name", &name]).await.map_err(|e| e.to_string())?;
-    let _ = app.emit("instances-changed", ());
+    // `instance-changed` is the canonical state-sync event; the legacy
+    // `instances-changed` (plural) is no longer emitted — MainLayout converged
+    // its refresh logic onto `instance-changed`.
+    emit_instance_changed(&app, InstanceChanged::deleted(&name));
     Ok(())
 }
 
@@ -170,34 +176,45 @@ pub async fn delete_instance_with_progress(app: tauri::AppHandle, name: String) 
     emit("update_config", "done", "Done");
 
     let _ = app.emit("delete-complete", ());
-    let _ = app.emit("instances-changed", ());
+    // Single canonical event for state sync. DeleteProgress.tsx already got
+    // its own `delete-complete` above; `instance-changed` drives list/tab/
+    // health refresh in MainLayout.
+    emit_instance_changed(&app, InstanceChanged::deleted(&name));
     Ok(())
 }
 
 #[tauri::command]
-pub async fn rename_instance(old_name: String, new_name: String) -> Result<(), String> {
+pub async fn rename_instance(app: tauri::AppHandle, old_name: String, new_name: String) -> Result<(), String> {
     cli_bridge::run_cli(&["rename", &old_name, &new_name]).await.map_err(|e| e.to_string())?;
+    emit_instance_changed(&app, InstanceChanged::renamed(&old_name, &new_name));
     Ok(())
 }
 
 #[tauri::command]
 pub async fn edit_instance_resources(
+    app: tauri::AppHandle,
     name: String,
     cpus: Option<u32>,
     memory_mb: Option<u32>,
     disk_gb: Option<u32>,
 ) -> Result<(), String> {
-    let mut args = vec!["edit".to_string(), name];
+    let mut args = vec!["edit".to_string(), name.clone()];
     if let Some(c) = cpus { args.extend(["--cpus".into(), c.to_string()]); }
     if let Some(m) = memory_mb { args.extend(["--memory".into(), m.to_string()]); }
     if let Some(d) = disk_gb { args.extend(["--disk".into(), d.to_string()]); }
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     cli_bridge::run_cli(&refs).await.map_err(|e| e.to_string())?;
+    // Changes only take effect after the VM/process restarts — surface that to the user.
+    emit_instance_changed(
+        &app,
+        InstanceChanged::simple(InstanceAction::EditResources, &name).with_needs_restart(true),
+    );
     Ok(())
 }
 
 #[tauri::command]
 pub async fn edit_instance_ports(
+    app: tauri::AppHandle,
     name: String,
     gateway_port: u16,
     ttyd_port: u16,
@@ -207,6 +224,10 @@ pub async fn edit_instance_ports(
         "--gateway-port", &gateway_port.to_string(),
         "--ttyd-port", &ttyd_port.to_string(),
     ]).await.map_err(|e| e.to_string())?;
+    emit_instance_changed(
+        &app,
+        InstanceChanged::simple(InstanceAction::EditPorts, &name).with_needs_restart(true),
+    );
     Ok(())
 }
 

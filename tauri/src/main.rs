@@ -19,6 +19,25 @@ fn main() {
         )
         .init();
 
+    // Inject proxy env vars from config so reqwest and child processes
+    // (git, npm, curl) inherit them — without this the GUI cannot download
+    // Lima / Node / Git behind a corporate or GFW proxy.
+    if let Ok(config) = clawenv_core::config::ConfigManager::load() {
+        clawenv_core::config::proxy::inject_proxy_env(&config.config().clawenv.proxy);
+    }
+
+    // Pin LIMA_HOME to ~/.clawenv/lima so every spawned limactl uses the
+    // private data directory instead of the system default ~/.lima.
+    #[cfg(target_os = "macos")]
+    clawenv_core::sandbox::init_lima_env();
+
+    // Pin Podman's XDG_DATA_HOME / XDG_RUNTIME_DIR to ~/.clawenv/podman-*
+    // so container storage, volumes, db and the runtime socket all live
+    // inside our tree — parity with Lima (macOS) and WSL (Windows, which
+    // already imports distros under ~/.clawenv/wsl/).
+    #[cfg(target_os = "linux")]
+    clawenv_core::sandbox::init_podman_env();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
@@ -247,10 +266,20 @@ fn main() {
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {
-            // Close button hides the window instead of quitting — app stays in tray
+            // Close button hides the MAIN window instead of quitting — so the
+            // app can keep running from the system tray. Secondary windows
+            // (install wizard, etc.) get normal close behaviour; silently
+            // hiding them turned subsequent "Add instance" clicks into no-ops
+            // because open_install_window's `get_webview_window(label)` kept
+            // returning the hidden window.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let _ = window.hide();
-                api.prevent_close();
+                if window.label() == "main" {
+                    let _ = window.hide();
+                    api.prevent_close();
+                }
+                // Other windows: let the default destroy path run, so the next
+                // Add click builds a fresh window instead of focusing a hidden
+                // ghost with the same label.
             }
         })
         .build(tauri::generate_context!())

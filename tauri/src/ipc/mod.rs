@@ -1,5 +1,6 @@
 mod bridge;
 pub mod claw;
+pub mod emit;
 mod export;
 mod install;
 mod instance;

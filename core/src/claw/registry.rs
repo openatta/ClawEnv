@@ -62,10 +62,16 @@ impl ClawRegistry {
         ids
     }
 
-    /// List all descriptors.
+    /// List all descriptors. OpenClaw is pinned to the front as the reference
+    /// implementation; all others follow in alphabetical order.
     pub fn list_all(&self) -> Vec<&ClawDescriptor> {
         let mut descs: Vec<&ClawDescriptor> = self.descriptors.values().collect();
-        descs.sort_by(|a, b| a.id.cmp(&b.id));
+        descs.sort_by(|a, b| match (a.id.as_str(), b.id.as_str()) {
+            ("openclaw", "openclaw") => std::cmp::Ordering::Equal,
+            ("openclaw", _) => std::cmp::Ordering::Less,
+            (_, "openclaw") => std::cmp::Ordering::Greater,
+            _ => a.id.cmp(&b.id),
+        });
         descs
     }
 

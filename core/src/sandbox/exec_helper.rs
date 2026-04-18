@@ -17,9 +17,11 @@ const READ_TIMEOUT_SECS: u64 = 120;
 
 /// Idle timeout for `exec_with_progress()` — if no stdout/stderr line arrives
 /// for this long, the process is considered stalled and is killed.
-/// 10 minutes is generous enough for slow networks (npm download, apk fetch)
-/// while catching truly hung processes.
-const IDLE_TIMEOUT_SECS: u64 = 600;
+/// 20 minutes covers slow networks, npm postinstall hangs after optional-dep
+/// failures, and silent npm phases (lockfile write, bin-linking) while still
+/// catching truly hung processes. Background-script runs also emit a 30-second
+/// heartbeat, so this ceiling is mostly a safety net.
+const IDLE_TIMEOUT_SECS: u64 = 1200;
 
 /// Read from an async reader with a timeout.
 async fn read_with_timeout(mut reader: impl AsyncReadExt + Unpin, secs: u64) -> String {
@@ -167,7 +169,12 @@ pub async fn exec_with_progress(
     Ok((output, code))
 }
 
-#[cfg(test)]
+// These tests invoke Unix shell primitives (`echo`, `sh -c …`) directly as
+// standalone binaries — on Windows `echo` is a cmd builtin (not on PATH as an
+// executable) and `sh` doesn't exist outside of MSYS/Git-Bash. Gate the whole
+// module to unix; a separate cross-platform smoke test lives in core's
+// top-level tests module (`test_exec_echo_on_current_platform`).
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 

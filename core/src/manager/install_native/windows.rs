@@ -35,14 +35,21 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
 
     send(tx, "Extracting Node.js (this may take a moment)...", 18, InstallStage::EnsurePrerequisites).await;
 
-    // Kill any node/openclaw processes that might lock files
+    // Kill any node/openclaw processes that might lock files before the
+    // extract step tries to replace them. Log failures instead of swallowing:
+    // if the PowerShell call itself can't spawn (e.g. blocked by policy) we
+    // want that surfaced — the extract step downstream would just silently
+    // fail with "file locked" otherwise.
     let kill_cmd = "Get-Process -ErrorAction SilentlyContinue | \
         Where-Object { $_.ProcessName -like '*openclaw*' -or $_.ProcessName -like '*node*' } | \
         Where-Object { $_.Id -ne $PID } | \
         Stop-Process -Force -ErrorAction SilentlyContinue";
-    crate::platform::process::silent_cmd("powershell")
+    if let Err(e) = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", kill_cmd])
-        .status().await.ok();
+        .status().await
+    {
+        tracing::warn!("pre-install kill of node/openclaw processes failed to spawn: {e}");
+    }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
 
     // Clean temp/backup dirs

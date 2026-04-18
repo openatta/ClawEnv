@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, For, Show, onMount, onCleanup, createEffect, on } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import type { Instance, ClawType, UpgradeInfo } from "../../types";
@@ -7,6 +7,7 @@ import DeleteProgress from "../../components/DeleteProgress";
 import ConfigModal from "./ConfigModal";
 import UpgradeModal from "./UpgradeModal";
 import { t } from "../../i18n";
+import { useApp } from "../../context";
 
 export default function ClawPage(props: {
   clawType: ClawType;
@@ -71,12 +72,20 @@ export default function ClawPage(props: {
 
   async function fetchToken(name?: string) {
     const n = name || activeTab();
+    if (!n) return;
     try {
       const token = await invoke<string>("get_gateway_token", { name: n });
       setGatewayToken(token);
     } catch { setGatewayToken(""); }
   }
   fetchToken();
+
+  // MainLayout bumps tokenEpoch after a start/restart — the VM's gateway
+  // regenerates its token file on startup, so any cached value is now stale.
+  // `on()` with `defer: true` skips the synchronous first run (we fetched
+  // above) and only refetches on actual changes.
+  const app = useApp();
+  createEffect(on(() => app.tokenEpoch(), () => { void fetchToken(); }, { defer: true }));
 
   async function doAction(action: string) {
     setActionLoading(`${action}:${activeTab()}`);

@@ -1,6 +1,6 @@
 //! Claw product descriptor — defines how to install, run, and manage a specific claw variant.
 //!
-//! Each claw product (OpenClaw, Hermes Agent, NanoClaw, etc.) has different:
+//! Each claw product (OpenClaw, Hermes Agent, etc.) has different:
 //!   - Package managers (npm, pip) and install commands
 //!   - CLI binary names and command syntax
 //!   - Default ports

@@ -8,6 +8,12 @@ export type AppContextType = {
   clawTypes: Accessor<ClawType[]>;
   refreshInstances: () => void;
   openInstallWindow: (clawType?: string) => void;
+  /**
+   * Monotonic counter bumped whenever a cached gateway token should be
+   * considered stale (e.g. after a start/restart regenerates the token file).
+   * Pages that cache tokens watch this via createEffect and refetch.
+   */
+  tokenEpoch: Accessor<number>;
 };
 
 export const AppContext = createContext<AppContextType>();

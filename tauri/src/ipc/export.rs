@@ -163,14 +163,19 @@ async fn do_sandbox_export(app: &tauri::AppHandle, name: &str, output: &str) -> 
 
     // Stage 2: Count files
     emit_stage(app, "count", "active", 0, "Counting files...");
-    let source_dir = match inst.sandbox_type {
+    let total = match inst.sandbox_type {
         SandboxType::LimaAlpine => {
-            let home = std::env::var("HOME").unwrap_or_default();
-            std::path::PathBuf::from(format!("{}/.lima/{}", home, vm_name))
+            // Lima bundle = VM directory + limactl binary + share/lima templates,
+            // so the receiving side doesn't need to install Lima separately.
+            let clawenv_root = dirs::home_dir().unwrap_or_default().join(".clawenv");
+            let mut n = count_files(&clawenv_root.join("lima").join(vm_name)).await;
+            let bin = clawenv_root.join("bin").join("limactl");
+            if bin.exists() { n += 1; }
+            n += count_files(&clawenv_root.join("share").join("lima")).await;
+            n
         }
-        _ => std::path::PathBuf::from("."),
+        _ => count_files(&std::path::PathBuf::from(".")).await,
     };
-    let total = count_files(&source_dir).await;
     emit_stage(app, "count", "done", 100, &format!("{total} files"));
 
     if EXPORT_CANCELLED.load(Ordering::Relaxed) {
@@ -182,14 +187,27 @@ async fn do_sandbox_export(app: &tauri::AppHandle, name: &str, output: &str) -> 
     emit_stage(app, "compress", "active", 0, "Starting compression...");
     match inst.sandbox_type {
         SandboxType::LimaAlpine => {
-            let lima_dir = format!("{}/.lima", std::env::var("HOME").unwrap_or_default());
-            let excludes = ["*.sock", "*.pid", "*.log", "cidata.iso"];
+            // Export is rooted at ~/.clawenv so a receiving clawgui can untar
+            // into its own ~/.clawenv and get a ready-to-run VM + Lima toolchain.
+            let clawenv_root = dirs::home_dir().unwrap_or_default().join(".clawenv");
+            let vm_rel = format!("lima/{vm_name}");
+            // Keep cidata.iso: it holds cloud-init seed data required for a
+            // fresh receiver machine to finish provisioning on first boot.
+            // Sockets / pidfiles / logs are transient runtime artefacts —
+            // they're safe to strip.
+            let excludes = ["*.sock", "*.pid", "*.log"];
             let mut cmd = clawenv_core::platform::process::silent_cmd("tar");
-            cmd.arg("-czvf").arg(output).arg("-C").arg(&lima_dir);
+            cmd.arg("-czvf").arg(output).arg("-C").arg(&clawenv_root);
             for ex in &excludes {
-                cmd.arg("--exclude").arg(&format!("{vm_name}/{ex}"));
+                cmd.arg("--exclude").arg(&format!("{vm_rel}/{ex}"));
             }
-            cmd.arg(vm_name);
+            cmd.arg(&vm_rel);
+            if clawenv_root.join("bin").join("limactl").exists() {
+                cmd.arg("bin/limactl");
+            }
+            if clawenv_root.join("share").join("lima").exists() {
+                cmd.arg("share/lima");
+            }
             cmd.stdout(std::process::Stdio::null()).stderr(std::process::Stdio::piped());
 
             let mut child = cmd.spawn().map_err(|e| format!("tar failed: {e}"))?;
@@ -304,12 +322,27 @@ async fn do_native_export(app: &tauri::AppHandle, output: &str) -> Result<(), St
     let home = dirs::home_dir().unwrap_or_default();
     let clawenv = home.join(".clawenv");
 
+    // Refuse to produce a half-packaged bundle. The bundle is meant to run
+    // on a fresh machine with no system git / node — if either private
+    // install is missing, a receiver would either crash silently or pick up
+    // whatever happens to live on their system, breaking the portability
+    // contract. Surface a clear error now instead.
+    let required = [
+        ("node",   "Private Node.js is missing at ~/.clawenv/node/. Run the installer again; it downloads a pinned node build."),
+        ("git",    "Private Git is missing at ~/.clawenv/git/. Run the installer again; it downloads a pinned dugite-native git build."),
+        ("native", "No claw product is installed at ~/.clawenv/native/. Install at least one claw before exporting."),
+    ];
+    for (name, msg) in required {
+        if !clawenv.join(name).exists() {
+            return Err(msg.to_string());
+        }
+    }
+
     // Stage 1: Count files
     emit_stage(app, "count", "active", 0, "Counting files...");
     let mut total = 0u64;
     for sub in ["node", "git", "native"] {
-        let d = clawenv.join(sub);
-        if d.exists() { total += count_files(&d).await; }
+        total += count_files(&clawenv.join(sub)).await;
     }
     emit_stage(app, "count", "done", 100, &format!("{total} files"));
 
@@ -317,12 +350,11 @@ async fn do_native_export(app: &tauri::AppHandle, output: &str) -> Result<(), St
         return Err("Export cancelled".into());
     }
 
-    // Stage 2: Compress with verbose progress
+    // Stage 2: Compress with verbose progress. All three dirs are required —
+    // validated above, so no more conditional inclusion (which silently
+    // produced broken bundles before).
     emit_stage(app, "compress", "active", 0, "Starting compression...");
-    let mut items: Vec<&str> = Vec::new();
-    if clawenv.join("node").exists() { items.push("node"); }
-    if clawenv.join("git").exists() { items.push("git"); }
-    items.push("native");
+    let items: Vec<&str> = vec!["node", "git", "native"];
 
     tar_with_progress(
         app, output,

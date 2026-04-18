@@ -202,7 +202,6 @@ mod descriptor_tests {
     fn all_builtin_claws_have_valid_commands() {
         //       id,          binary,       port, apikey, mcp
         assert_claw_commands("openclaw",   "openclaw",   3000, true,  true);
-        assert_claw_commands("nanoclaw",   "nanoclaw",   3000, true,  false);
         assert_claw_commands("hermes",     "hermes",     3000, true,  true);
     }
 
@@ -254,19 +253,24 @@ mod registry_tests {
         let reg = ClawRegistry::load();
         let ids = reg.list_ids();
         assert!(ids.contains(&"openclaw"), "missing openclaw");
-        assert!(ids.contains(&"nanoclaw"), "missing nanoclaw");
         assert!(ids.contains(&"hermes"), "missing hermes");
-        assert!(ids.len() >= 3, "expected at least 3 builtin claws, got {}", ids.len());
+        assert!(ids.len() >= 2, "expected at least 2 builtin claws, got {}", ids.len());
+    }
+
+    #[test]
+    fn registry_list_all_puts_openclaw_first() {
+        let reg = ClawRegistry::load();
+        let all = reg.list_all();
+        assert!(!all.is_empty(), "registry should not be empty");
+        assert_eq!(all[0].id, "openclaw", "openclaw must be listed first");
     }
 
     #[test]
     fn registry_get_returns_correct_descriptor() {
         let reg = ClawRegistry::load();
-        let d = reg.get("nanoclaw");
-        assert_eq!(d.id, "nanoclaw");
-        assert_eq!(d.display_name, "NanoClaw");
-        assert_eq!(d.npm_package, "nanoclaw");
-        assert_eq!(d.default_port, 3000);
+        let d = reg.get("hermes");
+        assert_eq!(d.id, "hermes");
+        assert_eq!(d.display_name, "Hermes Agent");
     }
 
     #[test]
