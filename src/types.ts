@@ -4,6 +4,10 @@ export type Instance = {
   display_name: string;
   logo: string;
   sandbox_type: string;
+  /** Sandbox VM id — `clawenv-<hash>` for managed VMs, `"native"` for
+   *  native installs. Optional for backwards compatibility with older
+   *  config.toml files that didn't serialize it. */
+  sandbox_id?: string;
   version: string;
   gateway_port: number;
   ttyd_port: number;

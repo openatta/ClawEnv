@@ -402,6 +402,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             gateway_port: inst.gateway.gateway_port,
                             ttyd_port: inst.gateway.ttyd_port,
                             dashboard_port: inst.gateway.dashboard_port,
+                            sandbox_id: inst.sandbox_id.clone(),
                         });
                     }
                     let resp = ListResponse { instances };

@@ -4,6 +4,32 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.10 — 2026-04-19
+
+SSH robustness + UI linkage. Follow-up fixes against v0.2.9 proxy install.
+
+**Fixes**:
+- `apply_to_sandbox` / `clear_sandbox` merge 4 separate `backend.exec`
+  calls into a single heredoc-fed shell invocation. Previously Lima's SSH
+  ControlMaster right after VM boot got hammered and occasionally killed
+  the 2nd or 3rd exec with `kex_exchange_identification: Connection reset
+  by peer`. One exec = one SSH roundtrip, no warmup-window race.
+- `background::run_background_script` same treatment — setup + launch
+  merged into one exec, wrapped in retry.
+- New `proxy_resolver::exec_with_retry(backend, cmd, label)` — exponential
+  backoff (1s → 3s → 9s) specifically for SSH-level transients (exit 255,
+  `Connection reset`, `kex_exchange_identification`, etc). Non-transient
+  errors propagate immediately. Used by apply_to_sandbox, clear_sandbox,
+  and background_setup.
+
+**UI — claw ↔ VM linkage**:
+- `SandboxPage` VmCard header now shows the claw instance name prominently
+  with the sandbox_id as a grey secondary label (managed VMs only).
+- `ClawPage` info table has a new "VM" row with the sandbox_id for non-
+  native instances. Native claws (sandbox_id = "native") hide the row.
+- `Instance` TS type gains optional `sandbox_id` field; `InstanceSummary`
+  API response carries `sandbox_id` for frontend correlation.
+
 ## v0.2.9 — 2026-04-19
 
 Hotfix for a regression introduced in v0.2.8's Phase 2 refactor. All three

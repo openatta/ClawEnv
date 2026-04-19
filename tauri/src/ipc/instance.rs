@@ -22,6 +22,10 @@ pub struct InstanceInfo {
     pub display_name: String,
     pub logo: String,
     pub sandbox_type: String,
+    /// Sandbox VM id (`clawenv-<hash>` for managed VMs, `"native"` for
+    /// native installs). Surfaces in the ClawPage info table so users
+    /// can correlate claws ↔ VM cards on SandboxPage.
+    pub sandbox_id: String,
     pub version: String,
     pub gateway_port: u16,
     pub ttyd_port: u16,
@@ -48,6 +52,7 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
             display_name: desc.display_name.clone(),
             logo: desc.logo.clone(),
             sandbox_type: s.sandbox_type,
+            sandbox_id: s.sandbox_id,
             version: s.version,
             gateway_port: s.gateway_port,
             ttyd_port: s.ttyd_port,

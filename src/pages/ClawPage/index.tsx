@@ -328,6 +328,9 @@ export default function ClawPage(props: {
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Type</td><td>{dn()}</td></tr>
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Version</td><td>{activeInstance()?.version}</td></tr>
                 <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Sandbox</td><td>{activeInstance()?.sandbox_type}</td></tr>
+                <Show when={activeInstance()?.sandbox_id && activeInstance()?.sandbox_id !== "native"}>
+                  <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">VM</td><td class="font-mono text-gray-400">{activeInstance()?.sandbox_id}</td></tr>
+                </Show>
                 <Show when={props.clawType.has_gateway_ui}>
                   <tr><td class="text-gray-400 pr-4 py-0.5 whitespace-nowrap">Gateway</td><td class="font-mono">http://127.0.0.1:{activeInstance()?.gateway_port}</td></tr>
                 </Show>

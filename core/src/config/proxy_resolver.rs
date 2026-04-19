@@ -345,27 +345,38 @@ pub async fn apply_to_sandbox(
     triple: &ProxyTriple,
     backend: &dyn SandboxBackend,
 ) -> Result<()> {
+    // Single heredoc-fed shell script. Previously this was 4 separate
+    // `backend.exec` calls (write proxy.sh → chmod → 2× npm config set),
+    // which hammered Lima's SSH ControlMaster right after VM boot and
+    // occasionally got `Connection reset by peer`. Merging into one exec
+    // removes three extra SSH round-trips from the critical path.
     let esc_dq = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let script = format!(
-        r#"export http_proxy="{}"
-export https_proxy="{}"
-export HTTP_PROXY="{}"
-export HTTPS_PROXY="{}"
-export no_proxy="{}"
-export NO_PROXY="{}"
-"#,
-        esc_dq(&triple.http), esc_dq(&triple.https),
-        esc_dq(&triple.http), esc_dq(&triple.https),
-        esc_dq(&triple.no_proxy), esc_dq(&triple.no_proxy),
-    );
-    backend.exec(&format!(
-        "cat > /etc/profile.d/proxy.sh << 'PROXYEOF'\n{script}PROXYEOF"
-    )).await?;
-    backend.exec("chmod +x /etc/profile.d/proxy.sh").await?;
-
     let esc_sq = |s: &str| s.replace('\'', "'\\''");
-    backend.exec(&format!("npm config set proxy '{}'", esc_sq(&triple.http))).await.ok();
-    backend.exec(&format!("npm config set https-proxy '{}'", esc_sq(&triple.https))).await.ok();
+    let http  = esc_dq(&triple.http);
+    let https = esc_dq(&triple.https);
+    let np    = esc_dq(&triple.no_proxy);
+    let http_sq = esc_sq(&triple.http);
+    let https_sq = esc_sq(&triple.https);
+
+    let combined = format!(
+        r#"set -e
+cat > /etc/profile.d/proxy.sh << 'PROXYEOF'
+export http_proxy="{http}"
+export https_proxy="{https}"
+export HTTP_PROXY="{http}"
+export HTTPS_PROXY="{https}"
+export no_proxy="{np}"
+export NO_PROXY="{np}"
+PROXYEOF
+chmod +x /etc/profile.d/proxy.sh
+# npm config can fail if npm isn't installed yet — tolerate it. The
+# post-boot `mirrors::apply_mirrors` (and install's apk step) writes
+# npm config once npm is present.
+npm config set proxy '{http_sq}' 2>/dev/null || true
+npm config set https-proxy '{https_sq}' 2>/dev/null || true
+"#);
+
+    exec_with_retry(backend, &combined, "apply_to_sandbox").await?;
 
     tracing::info!(
         target: "clawenv::proxy",
@@ -374,13 +385,58 @@ export NO_PROXY="{}"
     Ok(())
 }
 
-/// Clear proxy inside sandbox — `mode == "none"` path.
+/// Clear proxy inside sandbox — `mode == "none"` path. Also merged to a
+/// single exec for the same SSH-warmup-fragility reason as apply_to_sandbox.
 pub async fn clear_sandbox(backend: &dyn SandboxBackend) -> Result<()> {
-    backend.exec("rm -f /etc/profile.d/proxy.sh").await.ok();
-    backend.exec("npm config delete proxy 2>/dev/null || true").await.ok();
-    backend.exec("npm config delete https-proxy 2>/dev/null || true").await.ok();
+    let script = r#"rm -f /etc/profile.d/proxy.sh
+npm config delete proxy 2>/dev/null || true
+npm config delete https-proxy 2>/dev/null || true
+"#;
+    exec_with_retry(backend, script, "clear_sandbox").await.ok();
     tracing::info!(target: "clawenv::proxy", "clear_sandbox done");
     Ok(())
+}
+
+/// Wrapper around `backend.exec` that retries with exponential backoff
+/// on SSH-level transient errors (Lima's ControlMaster glitches right
+/// after VM boot). Distinct from command failures — if the script itself
+/// exits with non-zero, we don't retry that.
+///
+/// Retry pattern: 1s → 3s → 9s (total ~13s worst case before giving up).
+/// Errors considered transient: exit 255 + stderr matching SSH/connection
+/// noise. Anything else propagates immediately.
+pub async fn exec_with_retry(
+    backend: &dyn SandboxBackend,
+    cmd: &str,
+    label: &str,
+) -> Result<String> {
+    let delays_ms = [0u64, 1_000, 3_000, 9_000];
+    let mut last_err: Option<anyhow::Error> = None;
+    for (i, &d) in delays_ms.iter().enumerate() {
+        if d > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(d)).await;
+            tracing::debug!(target: "clawenv::proxy",
+                "exec_with_retry[{label}] attempt {} after {}ms backoff", i + 1, d);
+        }
+        match backend.exec(cmd).await {
+            Ok(out) => return Ok(out),
+            Err(e) => {
+                let msg = format!("{e}");
+                let transient = msg.contains("exit 255")
+                    || msg.contains("Connection reset")
+                    || msg.contains("kex_exchange_identification")
+                    || msg.contains("Connection refused")
+                    || msg.contains("ssh: connect");
+                if !transient {
+                    return Err(e);
+                }
+                tracing::warn!(target: "clawenv::proxy",
+                    "exec_with_retry[{label}] attempt {} transient error: {msg}", i + 1);
+                last_err = Some(e);
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| anyhow::anyhow!("{label}: retries exhausted")))
 }
 
 fn trace_resolved(t: &ProxyTriple, scope_label: &str) {

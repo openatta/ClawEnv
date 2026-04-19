@@ -109,15 +109,27 @@ export default function VmCard(props: {
 
   return (
     <div class={`bg-gray-800 rounded-lg p-3 border ${borderColor()}`}>
-      {/* Header row */}
+      {/* Header row — claw instance name is the primary label (what the
+          user chose at install time); sandbox_id is the grey secondary
+          label for debugging / correlating with `limactl list` output. */}
       <div class="flex items-center justify-between">
-        <div class="flex items-center gap-2">
+        <div class="flex items-center gap-2 flex-wrap">
           <div class={`w-2 h-2 rounded-full ${statusColor()}`} />
-          <span class="font-medium text-sm">{props.vm.name}</span>
-          {props.vm.managed ? (
-            <span class="text-[10px] px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded">managed</span>
+          {props.vm.managed && props.vm.instance_name ? (
+            <>
+              <span class="font-medium text-sm">{props.vm.instance_name}</span>
+              <span class="text-[10px] px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded">managed</span>
+              <span class="text-[10px] text-gray-500 font-mono" title={props.vm.name}>{props.vm.name}</span>
+            </>
           ) : (
-            <span class="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-400 rounded">external</span>
+            <>
+              <span class="font-medium text-sm">{props.vm.name}</span>
+              {props.vm.managed ? (
+                <span class="text-[10px] px-1.5 py-0.5 bg-green-900/50 text-green-400 rounded">managed</span>
+              ) : (
+                <span class="text-[10px] px-1.5 py-0.5 bg-gray-700 text-gray-400 rounded">external</span>
+              )}
+            </>
           )}
         </div>
         <span class="text-xs text-gray-400">{props.vm.status}</span>

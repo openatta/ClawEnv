@@ -23,6 +23,12 @@ pub struct InstanceSummary {
     /// (Hermes). Frontend opens `http://127.0.0.1:{dashboard_port || gateway_port}/`.
     #[serde(default)]
     pub dashboard_port: u16,
+    /// Sandbox VM id (`clawenv-<hash>` for managed VMs, `"native"` for
+    /// native installs). Exposed so the ClawPage info table can show
+    /// which Lima/WSL/Podman VM hosts this claw — makes correlation
+    /// with SandboxPage + `limactl list` output obvious.
+    #[serde(default)]
+    pub sandbox_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

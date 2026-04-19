@@ -70,32 +70,34 @@ pub async fn run_background_script(
     let script = opts.script_file;
     let (pct_start, pct_end) = opts.pct_range;
 
-    // Clean up any previous attempt
-    backend.exec(&format!("rm -f {log} {done} {script}")).await?;
-
-    // Write the script
-    backend.exec(&format!(
-        "cat > {script} << 'SCRIPTEOF'\n#!/bin/sh\nset -e\n{cmd}\nSCRIPTEOF\nchmod +x {script}",
-        cmd = opts.cmd,
-    )).await?;
-
-    // Launch in background with a sibling heartbeat writer. The heartbeat
-    // appends a timestamped line to the log file every HEARTBEAT_INTERVAL_SECS
-    // while the real command is alive — so a silent npm phase (lockfile write,
-    // cleanup after a failed optional postinstall) doesn't trip the poller's
-    // idle kill. When the main command exits, the heartbeat loop exits too.
+    // Merge the three pre-run setup commands (cleanup + write script +
+    // launch) into a SINGLE exec. Previously 3 separate SSH round-trips
+    // right after VM boot — Lima's ControlMaster warmup window sometimes
+    // killed the 2nd or 3rd with `Connection reset by peer`. Also wrap
+    // in retry-with-backoff for the same transient-ssh class.
     let sudo_prefix = if opts.sudo { "sudo " } else { "" };
     let hb = HEARTBEAT_INTERVAL_SECS;
-    backend.exec(&format!(
-        "nohup sh -c '({sudo_prefix}sh {script} > {log} 2>&1; echo $? > {done}) & \
-         CMD_PID=$!; \
-         hb_elapsed=0; \
-         while kill -0 $CMD_PID 2>/dev/null; do \
-           sleep {hb}; \
-           hb_elapsed=$((hb_elapsed + {hb})); \
-           echo \"[heartbeat ${{hb_elapsed}}s] still running\" >> {log}; \
-         done' > /dev/null 2>&1 &"
-    )).await?;
+    let setup_and_launch = format!(
+        r#"set -e
+rm -f {log} {done} {script}
+cat > {script} << 'SCRIPTEOF'
+#!/bin/sh
+set -e
+{cmd}
+SCRIPTEOF
+chmod +x {script}
+nohup sh -c '({sudo_prefix}sh {script} > {log} 2>&1; echo $? > {done}) & \
+    CMD_PID=$!; \
+    hb_elapsed=0; \
+    while kill -0 $CMD_PID 2>/dev/null; do \
+      sleep {hb}; \
+      hb_elapsed=$((hb_elapsed + {hb})); \
+      echo "[heartbeat ${{hb_elapsed}}s] still running" >> {log}; \
+    done' > /dev/null 2>&1 &
+"#,
+        cmd = opts.cmd,
+    );
+    crate::config::proxy_resolver::exec_with_retry(backend, &setup_and_launch, "background_setup").await?;
 
     // Poll for completion
     let mut last_lines = 0usize;
