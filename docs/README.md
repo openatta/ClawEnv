@@ -1,10 +1,8 @@
-# ClawEnv 文档索引
+# ClawEnv 文档索引（开发者）
 
-ClawEnv 项目的所有设计文档 (SSOT)。按主题分组，**编号不保证连续** — 文档编号稳定，个别编号空缺是因为老的文档被重构合并了。
+面向开发者/维护者的设计文档 (SSOT)。
 
-修改代码前应先读对应主题的 SSOT；修改 SSOT 的时候要同步落地到代码，避免文档/实现漂移。
-
-> 用户面向的说明文档在 [`README-zh.md`](README-zh.md)（中文）和仓库根的 [`README.md`](../README.md)（英文）。这一份是给 **开发者 / 维护者** 看的。
+> 用户面向的说明文档在 [`README-zh.md`](README-zh.md)（中文）和仓库根的 [`README.md`](../README.md)（英文）。
 
 ## 架构与总览
 
@@ -22,44 +20,22 @@ ClawEnv 项目的所有设计文档 (SSOT)。按主题分组，**编号不保证
 | 05 | [打包与分发](05-packaging.md) | 镜像制作、bundle 命名历史背景（v0.2.6+ 以 18 为准） |
 | 06 | [ClawEnv Lite](06-lite.md) | 面向终端用户的离线安装器 |
 
-## Claw 产品与硬件
+## 本地文档（未入 git）
 
-| # | 文档 | 内容 |
-|---|---|---|
-| 14 | [Claw 重打包分析](14-claw-repackaging-analysis.md) | 国内 Claw 产品 (OpenClaw / Hermes / ...) 打包关系调研 |
-| 16 | [硬件集成](16-hardware-integration.md) | 智能硬件设备对接 Agent 的架构与实施 |
+编号 ≥ 07 的设计稿、规格、测试手册、内部 playbook 等存放在本地 `docs/` 目录但**不追踪到 git**（通过 `.gitignore` 的 `docs/0[7-9]-*.md` / `docs/1[0-9]-*.md` / `docs/2[0-9]-*.md` 规则排除）。这些是演进中的工作笔记，按需读写，不对外发布。
 
-## 构建与跨平台
-
-| # | 文档 | 内容 |
-|---|---|---|
-| 15 | [Windows 交叉开发](15-cross-dev-windows.md) | 从 macOS SSH 远控 Windows ARM64 (UTM) 构建测试 |
-| 17 | [构建指南](17-build-guide.md) | 本地构建步骤（macOS / Windows） |
-
-## 协议与契约
-
-| # | 文档 | 内容 |
-|---|---|---|
-| 18 | [Bundle 格式规范](18-bundle-format.md) | export/import 的 `.tar.gz` 契约，manifest schema，wrap 结构，V1→V2 演进方案 |
-
-## 产品功能设计（草案）
-
-| # | 文档 | 内容 |
-|---|---|---|
-| 19 | [API Key 管理](19-api-key-management.md) | 安装后的 key 增删改 / Key Pool / 用量统计分期方案 |
-| 20 | [APP 包（Skills/Tools 集合）](20-app-package.md) | APP 包格式、注册中心、Claw 钩子、MVP→V3 路线 |
-| 21 | [可观测性 / 监控边界](21-observability.md) | 分发/安装/监控三大职责中的监控边界，7 个监控域 |
-| 22 | [AttaRun Bridge 集成](22-attarun-bridge.md) | bridge 独立 daemon、admin API、channel 模型、pairing、左侧导航 |
-| 23 | [代理架构](23-proxy-architecture.md) | 统一 ProxyResolver、Scope 三分、Mirror 基建、VM 代理归属 SandboxPage 的设计 SSOT |
+想查阅某份本地文档：直接 `ls docs/` 看一眼文件名。
 
 ## 约定
 
-- **编号**：01-xx 先按功能域分块（01-09 架构，10-19 协议/实现）。不强制连续，合并/废弃不回收编号。
-- **语言**：总体 bilingual。老文档英文为主，新文档（14 起）中文为主，少量混写。不强制翻译。
-- **SSOT 纪律**：代码注释可以说 "see docs/02-architecture.md"；docs 可以引用具体代码文件+行号。单向真理 — 冲突时以代码为准，然后立即更新文档。
-- **加新文档**：取下一个空编号，起描述性的 kebab-case slug，把条目加到本表。
+- **编号**：01-06 公开，07+ 本地。不强制连续，合并/废弃不回收编号。
+- **语言**：老文档英文为主，新文档（14 起）中文为主。
+- **SSOT 纪律**：代码注释可引用 `docs/NN-xxx.md`；冲突时以代码为准，然后立即更新文档。
+- **加新公开文档**：取下一个公开编号，把条目加到本表，**同时检查 `.gitignore` 不要误排除**。
+- **加新本地文档**：取 07+ 编号，`.gitignore` 自动覆盖，直接 `git status` 看不见即可。
 
 ## 文档之外的 SSOT
 
 - [`CLAUDE.md`](../CLAUDE.md) — AI 协作规则 + 技术栈速查。修改后 Claude 的所有 session 立即生效。
 - [`scripts/TEST-PLAN.md`](../scripts/TEST-PLAN.md) — 手工测试清单，发版前按这个跑。
+- [`tests/e2e/`](../tests/e2e/) — 端到端自动化测试脚本（CLI 驱动）。

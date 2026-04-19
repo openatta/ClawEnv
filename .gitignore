@@ -29,8 +29,14 @@ Thumbs.db
 .env
 .env.*
 docs/UTM.dmg
-docs/14-*.md
-docs/15-*.md
 test-results/
 test-export-*/
 test-bundle-*/
+
+# Docs: only 01-06 are public. Everything 07+ is local (working notes,
+# evolving designs, test specs, internal playbooks). Removed from git
+# tracking but files live on disk for dev reference.
+docs/0[7-9]-*.md
+docs/1[0-9]-*.md
+docs/2[0-9]-*.md
+docs/3[0-9]-*.md
