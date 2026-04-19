@@ -48,8 +48,15 @@ win_exec "powershell -NoProfile -Command \"Test-NetConnection -ComputerName ${MA
     && _ok "Windows can reach Mac mini-proxy at ${MAC_IP}:${E2E_PROXY_LISTEN}" \
     || { _fail "Windows cannot reach Mac mini-proxy at ${MAC_IP}:${E2E_PROXY_LISTEN} — Mac firewall?"; exit 5; }
 
-# Cleanup + ensure bundle dir.
-win_exec "mkdir \"%USERPROFILE%\\Desktop\\ClawEnv\" 2>NUL & $WIN_CLAWCLI --json uninstall --name $NAME 2>NUL" >/dev/null 2>&1 || true
+# Ensure bundle dir + clean slate. Same pre-existing-native handling as
+# scenario 05 — Windows allows only one native at a time.
+win_exec "mkdir \"%USERPROFILE%\\Desktop\\ClawEnv\" 2>NUL" >/dev/null 2>&1 || true
+existing=$(win_exec "$WIN_CLAWCLI --json list" 2>/dev/null | \
+    tr -d '\r' | grep '^{' | jq -r 'select(.type=="data") | .data.instances[]? | select(.sandbox_type=="Native") | .name' 2>/dev/null)
+for prev in $existing; do
+    echo "[06] pre-existing native instance '$prev' — uninstalling" >&2
+    win_exec "$WIN_CLAWCLI --json uninstall --name $prev" >/dev/null 2>&1 || true
+done
 
 # Wrap cli_win with proxy-env prefix — the Windows ENV_PREFIX path will
 # `set` these before clawcli runs in cmd.exe.
@@ -67,7 +74,7 @@ cli_win_with_proxy install --mode native --claw-type openclaw --version latest -
 expect_config_entry_win "$NAME"
 
 echo ">> [2/9] start + gateway check" >&2
-cli_win start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200_win "http://127.0.0.1:${PORT}/health" 60
 
 echo ">> [3/9] proxy diagnose reflects env-sourced proxy" >&2
@@ -90,7 +97,7 @@ cli_win_with_proxy install --mode native --claw-type openclaw --version latest -
 expect_config_entry_win "$NAME"
 
 echo ">> [7/9] start + curl" >&2
-cli_win start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200_win "http://127.0.0.1:${PORT}/health" 60
 
 echo ">> [8/9] final uninstall" >&2

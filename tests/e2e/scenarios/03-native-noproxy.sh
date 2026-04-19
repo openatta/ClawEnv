@@ -41,7 +41,7 @@ grep -A10 "^name = \"$NAME\"$" "$E2E_TEST_HOME/.clawenv/config.toml" | \
     || _fail "sandbox_type not native in config"
 
 echo ">> [3/9] start + gateway check" >&2
-cli start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200 "http://127.0.0.1:${PORT}/health" 45
 
 echo ">> [4/9] export native bundle" >&2
@@ -64,7 +64,7 @@ cli install \
 expect_config_entry "$NAME"
 
 echo ">> [7/9] start re-imported instance" >&2
-cli start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200 "http://127.0.0.1:${PORT}/health" 45
 
 echo ">> [8/9] final uninstall" >&2

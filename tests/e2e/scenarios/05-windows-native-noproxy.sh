@@ -29,17 +29,25 @@ WIN_BUNDLE="%USERPROFILE%\\Desktop\\ClawEnv\\${NAME}-$(date +%Y%m%d-%H%M%S).tar.
 
 e2e_assert_init
 
-# Ensure bundle dir exists + no leftover state.
-win_exec "mkdir \"%USERPROFILE%\\Desktop\\ClawEnv\" 2>NUL & $WIN_CLAWCLI --json uninstall --name $NAME 2>NUL" >/dev/null 2>&1 || true
+# Ensure bundle dir + clean slate. Windows only allows ONE native install
+# at a time (core/src/manager/install_native/mod.rs enforces this), so
+# any pre-existing native must go — even if it's called something other
+# than our test name. Parse the list, uninstall each. The test VM is
+# expected to be dedicated to E2E.
+win_exec "mkdir \"%USERPROFILE%\\Desktop\\ClawEnv\" 2>NUL" >/dev/null 2>&1 || true
+existing=$(win_exec "$WIN_CLAWCLI --json list" 2>/dev/null | \
+    tr -d '\r' | grep '^{' | jq -r 'select(.type=="data") | .data.instances[]? | select(.sandbox_type=="Native") | .name' 2>/dev/null)
+for prev in $existing; do
+    echo "[05] pre-existing native instance '$prev' — uninstalling" >&2
+    win_exec "$WIN_CLAWCLI --json uninstall --name $prev" >/dev/null 2>&1 || true
+done
 
 echo ">> [1/9] Windows install native '$NAME' on port $PORT" >&2
 cli_win install --mode native --claw-type openclaw --version latest --name "$NAME" --port "$PORT"
 expect_config_entry_win "$NAME"
 
-echo ">> [2/9] start" >&2
-cli_win start "$NAME"
-
-echo ">> [3/9] curl gateway /health from inside Windows" >&2
+echo ">> [2/9] curl gateway /health — install already auto-started it" >&2
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200_win "http://127.0.0.1:${PORT}/health" 60
 
 echo ">> [4/9] export native bundle" >&2
@@ -55,7 +63,7 @@ cli_win install --mode native --claw-type openclaw --version latest --name "$NAM
 expect_config_entry_win "$NAME"
 
 echo ">> [7/9] start re-imported + curl" >&2
-cli_win start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200_win "http://127.0.0.1:${PORT}/health" 60
 
 echo ">> [8/9] final uninstall" >&2

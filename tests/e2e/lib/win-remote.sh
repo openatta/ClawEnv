@@ -110,11 +110,11 @@ expect_http_200_win() {
     local timeout="${2:-60}"
     local deadline=$(($(date +%s) + timeout))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        # Windows curl syntax same as unix.
+        # cmd.exe treats bare `%` as variable-expansion trigger — pass the
+        # `%{http_code}` curl format through unscathed by using a
+        # PowerShell one-liner which doesn't have this quirk.
         local code
-        code=$(win_exec "curl -s -o NUL -w %{http_code} --max-time 3 $url" 2>/dev/null | tail -1)
-        # cmd sometimes echoes extra CR — strip.
-        code=$(echo "$code" | tr -d '\r\n')
+        code=$(win_exec "powershell -NoProfile -Command \"try { (Invoke-WebRequest -Uri '$url' -UseBasicParsing -TimeoutSec 3).StatusCode } catch { 0 }\"" 2>/dev/null | tail -1 | tr -d '\r\n ')
         if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
             _ok "HTTP $code from $url (via Windows)"
             return 0

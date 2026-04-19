@@ -38,7 +38,7 @@ expect_config_entry "$NAME"
 expect_limactl_running "clawenv-"
 
 echo ">> [2/9] start + gateway check" >&2
-cli start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200 "http://127.0.0.1:${PORT}/health" 90
 
 echo ">> [3/9] verify proxy diagnose output has proxy applied" >&2
@@ -67,7 +67,7 @@ cli install \
     --image "$BUNDLE"
 
 echo ">> [7/9] start + gateway check" >&2
-cli start "$NAME"
+# Install/import auto-starts the gateway — skip redundant start.
 expect_http_200 "http://127.0.0.1:${PORT}/health" 90
 
 echo ">> [8/9] final uninstall" >&2

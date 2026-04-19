@@ -38,10 +38,10 @@ cli install \
 expect_config_entry "$NAME"
 expect_limactl_running "clawenv-"
 
-echo ">> [2/9] start instance" >&2
-cli start "$NAME"
-
-echo ">> [3/9] curl gateway /health on port $PORT" >&2
+# Install auto-starts the gateway at 85% — explicit `start` would be
+# redundant and can race with the still-initialising process on some
+# backends (Windows native hits this). Go straight to curl.
+echo ">> [2/9] curl gateway /health on port $PORT (install already started it)" >&2
 expect_http_200 "http://127.0.0.1:${PORT}/health" 90
 
 echo ">> [4/9] export bundle to $BUNDLE" >&2
@@ -64,8 +64,9 @@ cli install \
     --image "$BUNDLE"
 expect_config_entry "$NAME"
 
-echo ">> [7/9] start re-imported instance" >&2
-cli start "$NAME"
+# Bundle re-install also auto-starts (install_from_bundle calls the
+# same `start_services` step). Just verify the gateway is live.
+echo ">> [7/9] verify re-imported gateway is up" >&2
 expect_http_200 "http://127.0.0.1:${PORT}/health" 90
 
 echo ">> [8/9] final uninstall" >&2
