@@ -345,11 +345,17 @@ pub async fn apply_to_sandbox(
     triple: &ProxyTriple,
     backend: &dyn SandboxBackend,
 ) -> Result<()> {
-    // Single heredoc-fed shell script. Previously this was 4 separate
-    // `backend.exec` calls (write proxy.sh → chmod → 2× npm config set),
-    // which hammered Lima's SSH ControlMaster right after VM boot and
-    // occasionally got `Connection reset by peer`. Merging into one exec
-    // removes three extra SSH round-trips from the critical path.
+    // Lima's `limactl shell` logs in as the unprivileged `clawenv` user,
+    // not root. `/etc/profile.d/proxy.sh` needs sudo to write. We stream
+    // the file body through `sudo tee` and `sudo chmod`; `npm config`
+    // stays non-sudo so the write lands in `/home/clawenv/.npmrc`
+    // (per-user), not root's npmrc which the running claw wouldn't read.
+    //
+    // The whole thing is ONE exec — previously 4 separate backend.exec
+    // calls hammered Lima's SSH ControlMaster right after VM boot and
+    // occasionally got `Connection reset by peer`. Fewer round-trips =
+    // less warmup-window race. Retry with backoff is the secondary
+    // safety net for the ones we can't deduplicate.
     let esc_dq = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
     let esc_sq = |s: &str| s.replace('\'', "'\\''");
     let http  = esc_dq(&triple.http);
@@ -360,7 +366,7 @@ pub async fn apply_to_sandbox(
 
     let combined = format!(
         r#"set -e
-cat > /etc/profile.d/proxy.sh << 'PROXYEOF'
+sudo tee /etc/profile.d/proxy.sh > /dev/null << 'PROXYEOF'
 export http_proxy="{http}"
 export https_proxy="{https}"
 export HTTP_PROXY="{http}"
@@ -368,10 +374,9 @@ export HTTPS_PROXY="{https}"
 export no_proxy="{np}"
 export NO_PROXY="{np}"
 PROXYEOF
-chmod +x /etc/profile.d/proxy.sh
-# npm config can fail if npm isn't installed yet — tolerate it. The
-# post-boot `mirrors::apply_mirrors` (and install's apk step) writes
-# npm config once npm is present.
+sudo chmod +x /etc/profile.d/proxy.sh
+# npm config is per-user — write to $HOME/.npmrc, not root's. Tolerate
+# npm missing (install runs apk add nodejs npm later in the flow).
 npm config set proxy '{http_sq}' 2>/dev/null || true
 npm config set https-proxy '{https_sq}' 2>/dev/null || true
 "#);
@@ -385,10 +390,10 @@ npm config set https-proxy '{https_sq}' 2>/dev/null || true
     Ok(())
 }
 
-/// Clear proxy inside sandbox — `mode == "none"` path. Also merged to a
-/// single exec for the same SSH-warmup-fragility reason as apply_to_sandbox.
+/// Clear proxy inside sandbox — `mode == "none"` path. Same
+/// sudo-for-root-files, non-sudo-for-npm pattern as apply_to_sandbox.
 pub async fn clear_sandbox(backend: &dyn SandboxBackend) -> Result<()> {
-    let script = r#"rm -f /etc/profile.d/proxy.sh
+    let script = r#"sudo rm -f /etc/profile.d/proxy.sh
 npm config delete proxy 2>/dev/null || true
 npm config delete https-proxy 2>/dev/null || true
 "#;

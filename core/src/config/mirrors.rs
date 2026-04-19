@@ -29,9 +29,12 @@ pub async fn apply_mirrors(backend: &dyn SandboxBackend, mirrors: &MirrorsConfig
     let repos = format!(
         "{alpine_base}/v{v_short}/main\n{alpine_base}/v{v_short}/community\n"
     );
+    // /etc/apk/repositories is root-owned; `limactl shell` default user is
+    // clawenv (NOPASSWD sudo available). Stream through `sudo tee` rather
+    // than `cat > /etc/...` to avoid Permission denied.
     backend
         .exec(&format!(
-            "cat > /etc/apk/repositories << 'REPOEOF'\n{repos}REPOEOF"
+            "sudo tee /etc/apk/repositories > /dev/null << 'REPOEOF'\n{repos}REPOEOF"
         ))
         .await?;
     tracing::info!("Alpine APK repositories set to {alpine_base}/v{v_short}");

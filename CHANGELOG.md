@@ -4,6 +4,25 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.11 — 2026-04-19
+
+Hotfix: `/etc/profile.d/proxy.sh` write was failing with Permission denied
+in all sandbox backends. Pre-existing latent bug: `limactl shell` /
+`wsl -d` / `podman exec` default to the unprivileged `clawenv` user, not
+root. v0.2.7 and earlier masked this because proxy was injected via the
+VM's provision YAML (which runs as root during boot); v0.2.8's unified
+resolver moved the write to post-boot `backend.exec`, exposing it.
+
+- `apply_to_sandbox` / `clear_sandbox` now stream the script through
+  `sudo tee` / use `sudo chmod` / `sudo rm` for root-owned files. Lima
+  cloud-init, WSL provision, and Podman Containerfile all grant the
+  clawenv user NOPASSWD sudo, so this works on all three backends.
+- `npm config set` stays non-sudo so per-user `.npmrc` in
+  `/home/clawenv/.npmrc` is what ends up getting written — sudoing npm
+  would write to root's config, which the running claw doesn't read.
+- `mirrors::apply_mirrors` had the same latent bug for
+  `/etc/apk/repositories` — also migrated to `sudo tee`.
+
 ## v0.2.10 — 2026-04-19
 
 SSH robustness + UI linkage. Follow-up fixes against v0.2.9 proxy install.
