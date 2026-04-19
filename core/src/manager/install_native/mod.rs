@@ -335,11 +335,9 @@ pub async fn install_native(
     config: &mut ConfigManager,
     tx: &mpsc::Sender<InstallProgress>,
 ) -> Result<()> {
-    // Native: single instance, fixed directory
-    let install_dir = dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".clawenv")
-        .join("native");
+    // Native: single instance, fixed directory. Honour CLAWENV_HOME so
+    // E2E tests can isolate the install into a scratch dir.
+    let install_dir = crate::config::clawenv_root().join("native");
     tokio::fs::create_dir_all(&install_dir).await?;
 
     // Dispatch: Bundle vs Online
