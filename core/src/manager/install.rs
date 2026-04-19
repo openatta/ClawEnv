@@ -379,6 +379,55 @@ pub async fn install(
         mirrors::apply_mirrors(backend.as_ref(), &mirrors_config).await?;
     }
 
+    // ---- Step 2a: Verify base packages are actually installed ----
+    // Cloud-init's `apk update && apk add` in the Lima provision YAML
+    // can fail silently when the host proxy isn't fully up at VM boot
+    // (Clash/Surge not started yet, transient connection refused, etc).
+    // Lima treats provision exit != 0 as "logged but VM still boots",
+    // leaving us with a broken base. Verify critical binaries post-boot
+    // and re-install if any are missing — apply_to_sandbox above wrote
+    // the current proxy, so this re-run happens with the right env.
+    //
+    // Only for sandbox backends that went through provision (Native
+    // doesn't have this problem since native Node/git come from our
+    // download helper, not apk). Podman's packages are baked into the
+    // image via Containerfile `RUN apk add` which happens during
+    // `podman build` with the host proxy already set via --build-arg,
+    // so skip Podman too.
+    if sandbox_type == SandboxType::LimaAlpine || sandbox_type == SandboxType::Wsl2Alpine {
+        send(&tx, "Verifying VM packages...", 40, InstallStage::CreateVm).await;
+        let check = backend.exec(
+            "command -v npm >/dev/null && command -v git >/dev/null && command -v curl >/dev/null && echo OK || echo MISSING"
+        ).await.unwrap_or_else(|_| "MISSING".into());
+        if !check.trim().ends_with("OK") {
+            tracing::warn!(target: "clawenv::proxy",
+                "base packages missing after provision — re-running apk add");
+            send(&tx, "Base packages missing — re-installing via proxy...", 40, InstallStage::CreateVm).await;
+            let base = "git curl bash nodejs npm ttyd openssh build-base python3 procps";
+            // Retry up to 3 times since network can still be flaky while
+            // the host proxy stabilises.
+            let mut last_err: Option<anyhow::Error> = None;
+            for attempt in 1..=3 {
+                match backend.exec(&format!(
+                    "sudo apk update 2>&1 && sudo apk add --no-cache {base} 2>&1"
+                )).await {
+                    Ok(_) => { last_err = None; break; }
+                    Err(e) => {
+                        tracing::warn!(target: "clawenv::proxy",
+                            "apk re-install attempt {attempt} failed: {e}");
+                        last_err = Some(e);
+                        if attempt < 3 {
+                            tokio::time::sleep(std::time::Duration::from_secs(3 * attempt as u64)).await;
+                        }
+                    }
+                }
+            }
+            if let Some(e) = last_err {
+                anyhow::bail!("Base package install failed after 3 retries: {e}");
+            }
+        }
+    }
+
     // ---- Step 2b: Install extra sandbox packages required by this claw type ----
     if !desc.sandbox_provision.is_empty() {
         let pkgs = desc.sandbox_provision.join(" ");

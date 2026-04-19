@@ -4,6 +4,29 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.12 — 2026-04-19
+
+Hotfix: post-boot verify-and-reinstall base packages when provision's
+apk silently fails.
+
+Symptom: user installs with system proxy → `[38%] VM created...` →
+`[40%] Installing OpenClaw...` → `[40%] [5s] /tmp/clawenv-install.sh:
+line 3: npm: not found` → `Installing OpenClaw failed (exit 127)`.
+
+Root cause: Lima cloud-init runs provision's `apk update && apk add
+$PACKAGES` very early in VM boot. If the host proxy (Clash/Surge/etc)
+isn't up YET at that exact moment, or there's a transient `Connection
+refused` during the 4-mirror fallback, apk fails silently for some or
+all packages — but Lima still reports the VM as running. Subsequent
+install step then fails on the first missing binary (npm).
+
+Fix: after `apply_to_sandbox` writes the persistent proxy config,
+verify critical binaries (`npm`, `git`, `curl`) are present. If any
+missing, re-run `sudo apk update && sudo apk add --no-cache <base>`
+with up to 3 retries and exponential backoff. Runs only for
+Lima/WSL2 (Native uses our own node/git downloads; Podman bakes
+packages into the image at build time).
+
 ## v0.2.11 — 2026-04-19
 
 Hotfix: `/etc/profile.d/proxy.sh` write was failing with Permission denied
