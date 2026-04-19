@@ -57,15 +57,14 @@ cli_win() {
         echo "[cli-win] $(date '+%H:%M:%S') → $*"
     } | tee -a "$log" >&2
 
-    local tmp_stdout
-    tmp_stdout=$(mktemp)
-    # Quote the clawcli.exe path (Windows path with backslashes). cmd
-    # treats double quotes ok for paths. `--json` as literal arg.
+    local err_file
+    err_file=$(mktemp)
+    # Stream live — same rationale as cli(). SSH respects line buffering
+    # on remote stdout by default so we get real-time progress on long
+    # installs. Windows clawcli.exe doesn't need stdbuf; cmd's `&&`
+    # chain passes line-mode output through.
     ssh -o ConnectTimeout=10 "$WIN_USER@$WIN_HOST" \
-        "$WIN_ENV_PREFIX cd $WIN_PROJECT && $WIN_CLAWCLI --json $*" > "$tmp_stdout" 2>>"$log"
-    local rc=$?
-
-    local last_error=""
+        "$WIN_ENV_PREFIX cd $WIN_PROJECT && $WIN_CLAWCLI --json $*" 2>>"$log" | \
     while IFS= read -r line; do
         echo "$line" >> "$log"
         local kind
@@ -84,14 +83,20 @@ cli_win() {
                 echo "  [done] $(echo "$line" | jq -r '.message // ""')" >&2
                 ;;
             error)
-                last_error=$(echo "$line" | jq -r '.message // "unknown"')
-                echo "  [ERR!] $last_error" >&2
+                local em
+                em=$(echo "$line" | jq -r '.message // "unknown"')
+                echo "$em" > "$err_file"
+                echo "  [ERR!] $em" >&2
                 ;;
         esac
-    done < "$tmp_stdout"
-    rm -f "$tmp_stdout"
+    done
+    local rc=${PIPESTATUS[0]}
 
-    if [ $rc -ne 0 ] || [ -n "$last_error" ]; then
+    local last_error=""
+    [ -s "$err_file" ] && last_error=$(cat "$err_file")
+    rm -f "$err_file"
+
+    if [ "$rc" -ne 0 ] || [ -n "$last_error" ]; then
         echo "[cli-win] FAILED rc=$rc err=${last_error:-<none>}" >&2
         return 1
     fi

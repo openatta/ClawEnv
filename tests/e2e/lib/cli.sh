@@ -35,18 +35,26 @@ cli() {
         echo "[cli] $(date '+%H:%M:%S') → $*"
     } | tee -a "$log" >&2
 
-    # Run clawcli with --json. Capture stdout (JSON events). Stderr
-    # streams directly to log for tracing output.
-    local tmp_stdout
-    tmp_stdout=$(mktemp)
-    "$bin" --json "$@" > "$tmp_stdout" 2>>"$log"
-    local rc=$?
+    # Stream clawcli output to stderr live (progress visible during
+    # multi-minute installs) AND record everything to the log. Capture
+    # the last error via a tmp file so it survives the pipe subshell.
+    local err_file
+    err_file=$(mktemp)
 
-    # Parse each JSON line and pretty-print progress/info/errors.
-    local last_error=""
+    # `stdbuf -oL` line-buffers clawcli's stdout so each JSON event
+    # comes through immediately rather than waiting for the 4KB OS
+    # buffer to fill. Falls back gracefully if stdbuf isn't present
+    # (unlikely on macOS with coreutils; bsd `unbuffer` covers it).
+    local unbuf
+    if command -v stdbuf >/dev/null; then
+        unbuf=(stdbuf -oL -eL)
+    else
+        unbuf=()
+    fi
+
+    "${unbuf[@]}" "$bin" --json "$@" 2>>"$log" | \
     while IFS= read -r line; do
         echo "$line" >> "$log"
-        # Require jq — bail hard if missing.
         if ! command -v jq >/dev/null; then
             echo "  (jq not installed; raw: $line)" >&2
             continue
@@ -67,8 +75,10 @@ cli() {
                 echo "  [done] $(echo "$line" | jq -r '.message // ""')" >&2
                 ;;
             error)
-                last_error=$(echo "$line" | jq -r '.message // "unknown"')
-                echo "  [ERR!] $last_error" >&2
+                local em
+                em=$(echo "$line" | jq -r '.message // "unknown"')
+                echo "$em" > "$err_file"
+                echo "  [ERR!] $em" >&2
                 ;;
             data)
                 if [ "${E2E_VERBOSE:-0}" = "1" ]; then
@@ -76,10 +86,14 @@ cli() {
                 fi
                 ;;
         esac
-    done < "$tmp_stdout"
-    rm -f "$tmp_stdout"
+    done
+    local rc=${PIPESTATUS[0]}
 
-    if [ $rc -ne 0 ] || [ -n "$last_error" ]; then
+    local last_error=""
+    [ -s "$err_file" ] && last_error=$(cat "$err_file")
+    rm -f "$err_file"
+
+    if [ "$rc" -ne 0 ] || [ -n "$last_error" ]; then
         echo "[cli] FAILED rc=$rc err=${last_error:-<none>}" >&2
         return 1
     fi
