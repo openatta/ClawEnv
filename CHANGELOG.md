@@ -4,6 +4,42 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.13 — 2026-04-19
+
+Two Windows-native fixes + CLAWENV_HOME for test isolation:
+
+**Windows install-time gateway start was silently broken** (since v0.2.8):
+- `install_native/mod.rs` used `backend.exec("Start-Process cmd.exe /c
+  openclaw gateway ...")` for the post-install auto-start on Windows.
+  The spawned cmd inherited a bare PATH (not our managed PATH with
+  node/git), redirected nothing (no gateway.log), and detached sloppily.
+  Result: install claimed `[85%] OpenClaw gateway started`, process
+  actually died immediately, no evidence of failure surfaced.
+- Switched to `ManagedShell::spawn_detached` — same path
+  `instance::start_instance` takes. It writes a `.clawenv-spawn.bat`
+  with prepended PATH, redirects stdout/stderr to gateway.log, and
+  launches via `Start-Process -WindowStyle Hidden` which actually
+  detaches the child.
+- Added real port-readiness polling (~30s budget) with gateway.log
+  tail on failure. No more lying "started" when the gateway died.
+
+**Same fix applied to bundle-install path** (second occurrence lower
+in install_native/mod.rs).
+
+**`CLAWENV_HOME` env var override** (`core/src/config/clawenv_root()`):
+- New helper that returns `$CLAWENV_HOME || ~/.clawenv`.
+- Used by `ConfigManager::config_path`, `lima::{lima_home, limactl_bin}`,
+  `install_native::{clawenv_node_dir, clawenv_git_dir}`,
+  `ManagedShell::new`, and `instance::start_instance`'s gateway/dashboard
+  log paths.
+- Enables E2E test isolation on Windows (`dirs::home_dir()` ignores
+  `$HOME` on Windows because `SHGetKnownFolderPath`). Mac tests can
+  still use `$HOME` override for the same effect. Both approaches
+  co-exist.
+- Other scattered `~/.clawenv` usages (bridge perms, exec probes, a few
+  test paths) still use bare `dirs::home_dir()` — fine for production,
+  migrates opportunistically.
+
 ## v0.2.12 — 2026-04-19
 
 Hotfix: post-boot verify-and-reinstall base packages when provision's

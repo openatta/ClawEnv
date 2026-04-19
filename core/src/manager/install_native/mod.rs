@@ -24,18 +24,14 @@ use super::install::{InstallOptions, InstallProgress, InstallStage, send, shell_
 
 // ---- Self-managed tool directories ----
 
-/// ClawEnv-private Node.js directory (~/.clawenv/node/).
+/// ClawEnv-private Node.js directory (`<clawenv_root>/node/`).
 pub fn clawenv_node_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".clawenv").join("node")
+    crate::config::clawenv_root().join("node")
 }
 
-/// ClawEnv-private Git directory (~/.clawenv/git/).
+/// ClawEnv-private Git directory (`<clawenv_root>/git/`).
 pub fn clawenv_git_dir() -> std::path::PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join(".clawenv").join("git")
+    crate::config::clawenv_root().join("git")
 }
 
 /// Git binary path inside ClawEnv's private Git.
@@ -480,32 +476,54 @@ pub async fn install_native(
         tracing::info!("MCP plugins ({runner}) deployed to {}", mcp_base.display());
     }
 
-    // Step 5: Start gateway
+    // Step 5: Start gateway.
+    // Uses `ManagedShell::spawn_detached` — the SAME path runtime
+    // `start_instance` takes. Previously Windows went through an
+    // ad-hoc `Start-Process -FilePath 'cmd.exe' -ArgumentList ...`
+    // which inherited the wrong PATH, didn't redirect stdout/stderr
+    // anywhere, and didn't properly detach → install claimed "gateway
+    // started" but the process actually died before even writing a
+    // log file. Going through spawn_detached fixes all three:
+    //   - PATH is injected via the .bat wrapper
+    //   - log path explicit (gateway.log)
+    //   - PowerShell Start-Process with Hidden window = real detach
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
     let port = opts.gateway_port;
     if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
-        // Instance name is validated (alphanumeric + dash + underscore),
-        // safe for paths. Unix wants single-quote escaping for the log
-        // path literal; Windows uses a different invocation that doesn't
-        // interpolate instance_name — compute each inside the cfg that
-        // actually uses it.
-        #[cfg(not(target_os = "windows"))]
-        {
-            let name_esc = opts.instance_name.replace('\'', "'\\''");
-            backend.exec(&format!(
-                "nohup {gateway_cmd} > '/tmp/clawenv-gateway-{name_esc}.log' 2>&1 &"
-            )).await?;
-        }
-        #[cfg(target_os = "windows")]
-        {
-            let full_cmd = gateway_cmd.replace('\'', "''");
-            backend.exec(&format!(
-                "Start-Process -WindowStyle Hidden -FilePath 'cmd.exe' -ArgumentList '/c {full_cmd}'"
-            )).await?;
-        }
+        let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
+        let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
+        let log_path = crate::config::clawenv_root().join("native").join("gateway.log");
+        let shell = crate::platform::managed_shell::ManagedShell::new();
+        shell.spawn_detached(bin, args, &log_path).await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Let the gateway bind its port before we tell the UI it's started.
+    // Poll instead of a bare 2s sleep so slow Windows ARM64 boxes
+    // (openclaw loads ~750 packages on each start) still get an honest
+    // success signal and don't race the subsequent install stages.
+    let probe_port = opts.gateway_port;
+    let mut gateway_up = false;
+    for i in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 2 } else { 3 })).await;
+        if crate::monitor::InstanceMonitor::check_health_native(probe_port).await
+            == crate::monitor::InstanceHealth::Running
+        {
+            gateway_up = true;
+            break;
+        }
+    }
+    if !gateway_up {
+        // Surface the gateway log — install's "gateway started" claim
+        // was silently bogus before this change; now we actually verify.
+        let log_path = crate::config::clawenv_root().join("native").join("gateway.log");
+        let log_tail = tokio::fs::read_to_string(&log_path).await.ok()
+            .map(|s| s.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_else(|| "(no gateway.log produced — spawn likely failed to execute)".into());
+        anyhow::bail!(
+            "{} gateway failed to come up on port {probe_port} after ~30s.\n\nGateway log tail:\n{log_tail}",
+            desc.display_name
+        );
+    }
     send(tx, &format!("{} gateway started", desc.display_name), 85, InstallStage::StartOpenClaw).await;
 
     // Step 5: Save config
@@ -664,14 +682,35 @@ async fn install_from_bundle(
     if let Some(gateway_cmd) = desc.gateway_start_cmd(opts.gateway_port) {
         send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
         let shell = crate::platform::managed_shell::ManagedShell::new();
-        let log_path = dirs::home_dir().unwrap_or_default()
-            .join(".clawenv").join("native").join("gateway.log");
+        let log_path = crate::config::clawenv_root().join("native").join("gateway.log");
         let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
         let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
         shell.spawn_detached(bin, args, &log_path).await?;
     }
 
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Same port-readiness polling as the online-install path above —
+    // refuse to claim "gateway started" until it actually listens.
+    let probe_port = opts.gateway_port;
+    let mut gateway_up = false;
+    for i in 0..10 {
+        tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 2 } else { 3 })).await;
+        if crate::monitor::InstanceMonitor::check_health_native(probe_port).await
+            == crate::monitor::InstanceHealth::Running
+        {
+            gateway_up = true;
+            break;
+        }
+    }
+    if !gateway_up {
+        let log_path = crate::config::clawenv_root().join("native").join("gateway.log");
+        let log_tail = tokio::fs::read_to_string(&log_path).await.ok()
+            .map(|s| s.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_else(|| "(no gateway.log produced)".into());
+        anyhow::bail!(
+            "{} gateway failed to come up on port {probe_port} after ~30s.\n\nGateway log tail:\n{log_tail}",
+            desc.display_name
+        );
+    }
     send(tx, &format!("{} gateway started", desc.display_name), 85, InstallStage::StartOpenClaw).await;
 
     // Save config

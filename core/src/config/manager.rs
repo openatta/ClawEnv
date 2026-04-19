@@ -12,11 +12,10 @@ pub struct ConfigManager {
 }
 
 impl ConfigManager {
-    /// Config file path: ~/.clawenv/config.toml
+    /// Config file path: `<clawenv_root>/config.toml`.
+    /// Honours `CLAWENV_HOME` env var via `config::clawenv_root()`.
     pub fn config_path() -> Result<PathBuf> {
-        Ok(dirs::home_dir()
-            .ok_or_else(|| anyhow!("Cannot find home directory"))?
-            .join(".clawenv/config.toml"))
+        Ok(super::clawenv_root().join("config.toml"))
     }
 
     pub fn exists() -> Result<bool> {

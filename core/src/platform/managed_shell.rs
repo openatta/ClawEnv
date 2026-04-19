@@ -27,8 +27,7 @@ impl Default for ManagedShell {
 impl ManagedShell {
     /// Create a ManagedShell for the native instance.
     pub fn new() -> Self {
-        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-        let clawenv_dir = home.join(".clawenv");
+        let clawenv_dir = crate::config::clawenv_root();
         let install_dir = clawenv_dir.join("native");
         Self { clawenv_dir, install_dir }
     }

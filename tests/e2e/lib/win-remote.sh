@@ -25,7 +25,14 @@ e2e_win_load_env() {
     # Same ENV_PREFIX pattern as scripts/win-remote.sh — Windows setx
     # system-scope PATH doesn't flow into new SSH sessions, so every
     # command gets explicit path prepended.
-    export WIN_ENV_PREFIX='set PATH=%PATH%;C:\Program Files\nodejs;C:\Program Files\Git\cmd;C:\Users\'"$WIN_USER"'\.cargo\bin&&'
+    #
+    # ALSO sets CLAWENV_HOME to isolate test state into
+    # %USERPROFILE%\Desktop\ClawEnv-e2e\ so we don't pollute the real
+    # %USERPROFILE%\.clawenv. Native clawcli uses dirs::home_dir() on
+    # Windows which reads SHGetKnownFolderPath — can't be redirected
+    # via $HOME like on macOS, so CLAWENV_HOME is the only knob.
+    export WIN_CLAWENV_HOME="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv-e2e"
+    export WIN_ENV_PREFIX='set PATH=%PATH%;C:\Program Files\nodejs;C:\Program Files\Git\cmd;C:\Users\'"$WIN_USER"'\.cargo\bin&&set CLAWENV_HOME='"$WIN_CLAWENV_HOME"'&&'
 
     # clawcli.exe lives at target/release/clawcli.exe under the project.
     # Windows path — use backslashes for cmd.exe line + forward slashes
@@ -142,8 +149,8 @@ expect_file_win() {
 # Check Windows config entry.
 expect_config_entry_win() {
     local name="$1"
-    # %USERPROFILE%\.clawenv\config.toml; findstr tolerant of CRLF.
-    if win_exec "findstr /C:\"name = \\\"$name\\\"\" %USERPROFILE%\\.clawenv\\config.toml" 2>/dev/null | grep -q "$name"; then
+    # findstr tolerant of CRLF. Reads from CLAWENV_HOME-isolated location.
+    if win_exec "findstr /C:\"name = \\\"$name\\\"\" \"$WIN_CLAWENV_HOME\\config.toml\"" 2>/dev/null | grep -q "$name"; then
         _ok "Windows config has instance '$name'"
         return 0
     fi
@@ -153,7 +160,7 @@ expect_config_entry_win() {
 
 expect_no_config_entry_win() {
     local name="$1"
-    if win_exec "findstr /C:\"name = \\\"$name\\\"\" %USERPROFILE%\\.clawenv\\config.toml" 2>/dev/null | grep -q "$name"; then
+    if win_exec "findstr /C:\"name = \\\"$name\\\"\" \"$WIN_CLAWENV_HOME\\config.toml\"" 2>/dev/null | grep -q "$name"; then
         _fail "Windows config.toml still has '$name'"
         return 1
     fi

@@ -141,8 +141,8 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
             // Native: use ManagedShell::spawn_detached for a truly independent process
             // with correct PATH (our own node/git, not system)
             let shell = crate::platform::managed_shell::ManagedShell::new();
-            let log_path = dirs::home_dir().unwrap_or_default()
-                .join(".clawenv").join("native").join("gateway.log");
+            let log_path = crate::config::clawenv_root()
+                .join("native").join("gateway.log");
 
             // Parse gateway_cmd into binary + args: "openclaw gateway --port 3000 --allow-unconfigured"
             let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
@@ -166,8 +166,8 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
         if let Some(dashboard_cmd) = desc.dashboard_start_cmd(dashboard_port) {
             if instance.sandbox_type == SandboxType::Native {
                 let shell = crate::platform::managed_shell::ManagedShell::new();
-                let log_path = dirs::home_dir().unwrap_or_default()
-                    .join(".clawenv").join("native").join("dashboard.log");
+                let log_path = crate::config::clawenv_root()
+                    .join("native").join("dashboard.log");
                 let parts: Vec<&str> = dashboard_cmd.split_whitespace().collect();
                 let (bin, args) = if parts.len() > 1 { (parts[0], &parts[1..]) } else { (parts[0], &[][..]) };
                 shell.spawn_detached(bin, args, &log_path).await?;

@@ -7,18 +7,15 @@ use tokio::sync::mpsc;
 use super::{SandboxBackend, SandboxOpts, ResourceStats, InstallMode, ImageSource};
 
 /// Private Lima data directory. VM images, sockets, and state live here
-/// so clawenv never touches the system's `~/.lima`.
+/// so clawenv never touches the system's `~/.lima`. Honours
+/// `CLAWENV_HOME` for test isolation.
 pub fn lima_home() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".clawenv/lima")
+    crate::config::clawenv_root().join("lima")
 }
 
 /// Absolute path to the private `limactl` binary installed by `ensure_prerequisites`.
 pub fn limactl_bin() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join(".clawenv/bin/limactl")
+    crate::config::clawenv_root().join("bin").join("limactl")
 }
 
 /// Initialise Lima env for this process. Must be called once at startup so every
