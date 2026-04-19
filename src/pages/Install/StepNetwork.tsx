@@ -1,10 +1,15 @@
-import { createSignal, Show, onMount, onCleanup } from "solid-js";
+import { createSignal, createEffect, Show, onMount, onCleanup } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type { SystemProxy, ConnTestResult } from "./types";
 import LogBox from "./LogBox";
 
-export default function StepNetwork() {
+export default function StepNetwork(props: {
+  /** Notifies parent whenever the user's proxy selection changes. Parent
+   *  stores it in InstallState so StepProgress can pass it to the install
+   *  IPC. Receives the already-serialized JSON (or null = "no proxy"). */
+  onProxyChange?: (proxyJson: string | null) => void;
+}) {
   const [systemProxy, setSystemProxy] = createSignal<SystemProxy | null>(null);
   const [proxyMode, setProxyMode] = createSignal<"system" | "custom" | "none">("system");
   const [httpProxy, setHttpProxy] = createSignal("");
@@ -40,6 +45,14 @@ export default function StepNetwork() {
     if (proxyMode() === "custom" && httpProxy()) return JSON.stringify({ enabled: true, http_proxy: httpProxy(), https_proxy: httpsProxy() || httpProxy(), no_proxy: "localhost,127.0.0.1", auth_required: false, auth_user: "" });
     return null; // use system default
   }
+
+  // Push the current selection up to the wizard whenever any input changes.
+  // Tracks the four reactive sources getProxyJson() reads from so edits to
+  // system/custom fields propagate without the user having to click "Test".
+  createEffect(() => {
+    void proxyMode(); void systemProxy(); void httpProxy(); void httpsProxy();
+    props.onProxyChange?.(getProxyJson());
+  });
 
   async function testConnectivity() {
     setConnTesting(true);

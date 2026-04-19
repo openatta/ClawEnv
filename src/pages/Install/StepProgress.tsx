@@ -135,6 +135,7 @@ export default function StepProgress(props: {
           apiKey: props.state.apiKey || null, useNative: true,
           installBrowser: false, installMcpBridge: false,
           gatewayPort: 0, image: props.state.localFilePath,
+          proxyJson: props.state.proxyJson,
         });
       } else {
         await invoke("install_openclaw", {
@@ -144,6 +145,7 @@ export default function StepProgress(props: {
           installMcpBridge: props.state.installMcpBridge,
           gatewayPort: 0,
           image: method === "local" ? props.state.localFilePath : null,
+          proxyJson: props.state.proxyJson,
         });
       }
     } catch (e) {

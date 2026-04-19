@@ -13,6 +13,10 @@ export type InstallState = {
   apiKey: string;
   installBrowser: boolean;
   installMcpBridge: boolean;
+  /** Serialized ProxyConfig JSON from StepNetwork, or null = no proxy chosen.
+   *  Passed to the install IPC so HTTPS_PROXY etc. get injected into the
+   *  clawcli child process for this install only (not persisted). */
+  proxyJson: string | null;
 };
 
 export function makeInstallStages(name: string) {

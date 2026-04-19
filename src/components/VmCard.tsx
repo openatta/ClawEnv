@@ -1,5 +1,6 @@
 import { createSignal, Show } from "solid-js";
 import { invoke } from "@tauri-apps/api/core";
+import ProxyModal from "./ProxyModal";
 
 type SandboxVm = {
   name: string;            // sandbox_id (e.g. "clawenv-a1b2c3d4e5f6") — not the user instance name
@@ -41,6 +42,7 @@ export default function VmCard(props: {
   const [actionLoading, setActionLoading] = createSignal("");
   const [confirmDelete, setConfirmDelete] = createSignal(false);
   const [showConfig, setShowConfig] = createSignal(false);
+  const [showProxy, setShowProxy] = createSignal(false);
   const [chromiumInstalled, setChromiumInstalled] = createSignal<boolean | null>(null);
 
   // Check chromium status when VM is running and managed. Use the user-chosen
@@ -176,6 +178,12 @@ export default function VmCard(props: {
             onClick={() => setShowConfig(true)}>
             Configure
           </button>
+          {/* Per-VM proxy — applies to every claw running in this sandbox.
+              Native has no VM so no VmCard renders → no proxy button. */}
+          <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
+            onClick={() => setShowProxy(true)}>
+            Proxy
+          </button>
           <button class="px-2 py-0.5 text-xs bg-gray-700 hover:bg-gray-600 rounded"
             onClick={() => props.onExport(instanceName())}>
             Export
@@ -251,6 +259,22 @@ export default function VmCard(props: {
             </div>
           </div>
         </div>
+      </Show>
+
+      {/* Proxy modal — per-VM, drives /etc/profile.d/proxy.sh inside the VM.
+          See docs/23-proxy-architecture.md §4. */}
+      <Show when={showProxy()}>
+        <ProxyModal
+          instanceName={instanceName()}
+          sandboxType={"lima"/* placeholder — modal only uses this to detect
+                              native mode; a real VM is never native, so it's
+                              fine to hardcode a non-native token here */}
+          onSave={(needsRestart) => {
+            setShowProxy(false);
+            if (needsRestart) props.onRefresh();
+          }}
+          onClose={() => setShowProxy(false)}
+        />
       </Show>
 
     </div>

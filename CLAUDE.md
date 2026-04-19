@@ -5,11 +5,21 @@ OpenClaw（及 claw 生态）的跨平台沙盒安装器、启动器与管理器
 ## 技术栈
 
 - **后端**: Rust 2021 edition
-- **GUI**: Tauri v2（系统原生 WebView）
+- **GUI**: Tauri v2（系统原生 WebView）—— **仅 macOS + Windows**，Linux 不做 GUI 支持
 - **前端**: SolidJS + TailwindCSS v4 + TypeScript
-- **CLI**: clap v4（derive 模式）
+- **CLI**: clap v4（derive 模式）—— 三平台都支持（含 Linux）
 - **配置**: TOML（`~/.clawenv/config.toml`）
 - **沙盒**: Alpine Linux，三平台对等后端（WSL2 / Lima / Podman）+ Native（开发者模式）
+
+## 平台支持矩阵
+
+|        | macOS | Windows | Linux |
+|--------|-------|---------|-------|
+| CLI    | ✅     | ✅       | ✅     |
+| Sandbox| ✅ Lima | ✅ WSL2 | ✅ Podman |
+| GUI    | ✅     | ✅       | ❌ 不支持 |
+
+**Linux GUI 明确不支持**：现存的 Linux GUI 相关代码（例如 `install_native/linux.rs` 的 Node 安装、`SandboxPage` 的 Podman 路径等）保留但不主动维护、不为其做新特性适配。新增 GUI 功能只保证 macOS + Windows 双平台同步，Linux 侧维持现状即可，不需要清理。Linux 用户通过 CLI（`clawcli`）使用。
 
 ## Workspace 结构
 
@@ -34,6 +44,7 @@ docs/            # 规格文档（SSOT，共 11 个文件）
 
 8. **CLI 是核心**：所有业务逻辑通过 CLI（`clawcli --json`）暴露，Tauri GUI 是薄壳，通过 `cli_bridge` spawn CLI 子进程。
 9. **Shell 安全**：所有拼入 shell 的动态变量必须用 `shell_quote()` / `powershell_quote()` 转义（`core/src/platform/mod.rs`）。
+10. **Bridge 是独立 daemon**：AttaRun bridge 和沙盒实例平级，由系统守护机制（launchd/systemd/Task Scheduler）托管。ClawEnv 通过 admin API（HTTP `127.0.0.1`）和守护协议管理，不做父进程。ClawEnv tray 关闭不影响 bridge 在线状态。详见 `docs/22-attarun-bridge.md`。
 
 ## Rust 版本
 

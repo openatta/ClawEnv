@@ -1,0 +1,108 @@
+# Unified mirror registry — single source of truth for every binary ClawEnv
+# downloads during install / upgrade. Loader: core/src/config/mirrors_asset.rs.
+#
+# To upgrade an asset: bump the version / tag / commit + checksums, rebuild.
+# No Rust code change needed.
+#
+# URL placeholders (expanded by the loader):
+#   {tag}              — VCS tag (e.g. "2.53.0-3" — dugite uses trailing counter)
+#   {upstream_version} — upstream version (e.g. "2.53.0" — dugite filename uses this)
+#   {version}          — plain version (most assets — "v22.16.0", "1.0.7", etc.)
+#   {commit}           — short commit SHA (dugite asset filename)
+#   {platform}         — platform key string (per-asset, see below)
+#   {filename}         — the full asset filename (already substituted)
+#   {ext}              — file extension (node: "tar.gz" macOS/Linux, "zip" Windows)
+
+# =====================================================================
+# dugite-native — portable Git for macOS + Linux native install.
+# Source: https://github.com/desktop/dugite-native/releases
+# Platform keys: macOS-arm64 / macOS-x64 / ubuntu-arm64 / ubuntu-x64
+# =====================================================================
+[dugite]
+tag              = "2.53.0-3"
+upstream_version = "2.53.0"
+commit           = "f49d009"
+filename_tpl     = "dugite-native-v{upstream_version}-{commit}-{platform}.tar.gz"
+urls = [
+    "https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+    "https://ghfast.top/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+    "https://mirror.ghproxy.com/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+    "https://gh-proxy.com/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+]
+[dugite.sha256]
+macos-arm64  = "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437"
+macos-x86_64 = "caf27c36b8834969550535bcd5e58186f970e080d1e175e76d9c1de3aac409ed"
+linux-arm64  = "d562ad433ed0dc1907f44a92fc701597bc577c48d07fe69ee7adddfee836ef4c"
+linux-x86_64 = "b3a85433c8dfde76d21b90938ad2f971653deff4340b1b4d347258c63250eafc"
+
+# =====================================================================
+# MinGit — portable Git for Windows.
+# Source: https://github.com/git-for-windows/git/releases
+# Platform keys: arm64 / 64-bit
+# sha256 NOT pinned yet; TLS + HTTP 200 is the safety net.
+# =====================================================================
+[mingit]
+version      = "2.49.0.windows.1"
+filename_tpl = "MinGit-2.49.0-{platform}.zip"
+urls = [
+    "https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+    "https://ghfast.top/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+    "https://mirror.ghproxy.com/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+]
+
+# =====================================================================
+# Node.js — portable runtime for native claws.
+# Source: https://nodejs.org/dist
+# Platform keys: darwin-arm64 / darwin-x64 / linux-arm64 / linux-x64 / win-arm64 / win-x64
+# ext key: tar.gz (unix) / tar.xz (linux prefers xz) / zip (windows)
+# sha256 NOT pinned (TLS fallback; Node dist doesn't publish sha256 in a
+# machine-readable mirrored form).
+# =====================================================================
+[node]
+version      = "v22.16.0"
+filename_tpl = "node-{version}-{platform}.{ext}"
+urls = [
+    "https://nodejs.org/dist/{version}/{filename}",
+    "https://npmmirror.com/mirrors/node/{version}/{filename}",
+    "https://mirrors.huaweicloud.com/nodejs/{version}/{filename}",
+    "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/{version}/{filename}",
+]
+
+# =====================================================================
+# Lima — macOS sandbox hypervisor.
+# Source: https://github.com/lima-vm/lima/releases
+# Platform keys: Darwin-arm64 / Darwin-x86_64
+# =====================================================================
+[lima]
+version      = "2.1.1"
+filename_tpl = "lima-{version}-{platform}.tar.gz"
+urls = [
+    "https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://ghproxy.net/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://hub.gitmirror.com/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://gh.llkk.cc/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+]
+[lima.sha256]
+darwin-arm64  = "b6b0e6701189cd8c4e549cc39e6d054dc681487798b9b774ad2cbd30c08b2bd8"
+darwin-x86_64 = "2dc5b10aa3a4f26d08c1f3fe83e37e01f85a7d9db0d1d5cb6985b18af96ab07d"
+
+# =====================================================================
+# Alpine minirootfs — WSL2 distro + Podman base image.
+# Source: https://dl-cdn.alpinelinux.org/alpine/
+# Platform keys: aarch64 / x86_64
+# version="latest-stable" means "query directory listing" — dynamic.
+# sha256 NOT pinned (Alpine ships its own .sha256 file per release; we trust
+# the HTTPS channel). Users pinning their own mirror can copy a specific
+# version string into config.toml's mirrors section.
+# =====================================================================
+[alpine-minirootfs]
+version      = "latest-stable"
+filename_tpl = "alpine-minirootfs-{version}-{platform}.tar.gz"
+# Note: the actual URL path is computed at runtime because it requires the
+# resolved version (major.minor path segment). The loader exposes
+# alpine_download_url(base, version, platform) for this.
+urls = [
+    "https://dl-cdn.alpinelinux.org/alpine/v{major_minor}/releases/{platform}/{filename}",
+    "https://mirrors.tuna.tsinghua.edu.cn/alpine/v{major_minor}/releases/{platform}/{filename}",
+    "https://mirrors.aliyun.com/alpine/v{major_minor}/releases/{platform}/{filename}",
+]

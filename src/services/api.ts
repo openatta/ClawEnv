@@ -119,6 +119,7 @@ export async function installOpenclaw(params: {
   installMcpBridge: boolean;
   gatewayPort: number;
   image: string;
+  proxyJson?: string | null;
 }): Promise<void> {
   return invoke<void>("install_openclaw", params);
 }

@@ -74,6 +74,23 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
             Ok(false) => {}
             Err(e) => tracing::warn!("Failed to sync host IP: {e}"),
         }
+
+        // Re-apply proxy via the unified resolver. Priority: per-VM
+        // InstanceConfig.proxy → global config → OS detection. See
+        // docs/23-proxy-architecture.md §9 (Start lifecycle).
+        if let Ok(cfg) = ConfigManager::load() {
+            let scope = crate::config::proxy_resolver::Scope::RuntimeSandbox {
+                instance,
+                backend: backend.as_ref(),
+            };
+            if let Some(triple) = scope.resolve(&cfg).await {
+                if let Err(e) = crate::config::proxy_resolver::apply_to_sandbox(&triple, backend.as_ref()).await {
+                    tracing::warn!(target: "clawenv::proxy", "apply_to_sandbox failed: {e}");
+                }
+            } else {
+                crate::config::proxy_resolver::clear_sandbox(backend.as_ref()).await.ok();
+            }
+        }
     }
 
     let registry = ClawRegistry::load();
@@ -456,6 +473,11 @@ pub async fn remove_instance(config: &mut ConfigManager, name: &str) -> Result<(
     }
 
     config.remove_instance(name)?;
+
+    // Clean up the per-instance proxy keychain entry (if any). Missing
+    // entries are fine — `delete_instance_proxy_password` errors when the
+    // key doesn't exist, which is the common case.
+    let _ = crate::config::keychain::delete_instance_proxy_password(name);
 
     tracing::info!("Instance '{}' removed", name);
     Ok(())

@@ -4,6 +4,71 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.8 — 2026-04-19
+
+Major proxy system overhaul — unified architecture, single resolver, correct
+per-VM vs Native separation. Closes the 0.2.5 "install stuck at 6%" customer
+bug and eliminates every class of proxy-related divergence we've hit. See
+`docs/23-proxy-architecture.md` for the full spec.
+
+**Proxy architecture (`docs/23-proxy-architecture.md`)** —
+- **Unified ProxyResolver** (`core/src/config/proxy_resolver.rs`): every
+  proxy read goes through `Scope::{Installer, RuntimeNative, RuntimeSandbox}
+  ::resolve()`. No more scattered `if config.proxy.enabled else env else ...`
+  across the codebase. Three scopes, one priority chain each, one apply
+  surface (`apply_env` / `apply_child_cmd` / `apply_to_sandbox`).
+- **Native = OS system proxy only, by design**. ClawPage has no proxy UI;
+  `set_instance_proxy` IPC rejects Native; `InstanceConfig.proxy` is
+  ignored for Native. Rule enforced at three layers so it can't erode.
+- **Per-VM proxy UI moves to SandboxPage/VmCard**. Proxy belongs to the
+  sandbox VM, not the claw instance. One VM, one proxy config, applies
+  to every claw running inside it.
+- **OS proxy watcher** (30s poll): Tauri notices when user toggles Clash,
+  updates env, emits `os-proxy-changed` event. Subsequent start_instance
+  picks up the new proxy automatically; no ClawEnv restart needed.
+- **Per-VM proxy auth + Keychain**: ProxyModal manual mode supports HTTP
+  basic auth. Password stored in `proxy-password-<instance>` keychain
+  entry — never in config.toml, never in bundle exports. Deleted with
+  the instance.
+- **VM-internal connectivity test**: ProxyModal has "Test connectivity"
+  buttons for international / CN / all target sets. `test_instance_network`
+  IPC runs curl inside the VM, returns per-target ok + http_code + latency.
+
+**Mirror infrastructure (`assets/mirrors.toml`)** —
+- Unified `assets/mirrors.toml` replaces `git-release.toml` + hardcoded
+  URL lists. Every asset (dugite, MinGit, Node.js, Lima, Alpine minirootfs)
+  has `version` + `urls` + optional `[asset.sha256]` in one file. Loader:
+  `core/src/config/mirrors_asset.rs`.
+- CN mirror fallback for all assets: Node.js (npmmirror + huaweicloud +
+  tsinghua), Alpine (tuna + aliyun), dugite (ghfast.top + ghproxy).
+
+**Download path consolidation** —
+- `core/src/platform/download.rs::download_with_progress` is now the single
+  downloader. Streaming chunks, 60s per-chunk stall detection, 1 MiB /
+  500ms progress throttle, sha256 verify, mirror URL fallback. Used by
+  Git, Node, Lima, WSL distro, Podman image downloads.
+- `download_silent` variant for contexts without a progress channel
+  (update checker, sandbox backend trait).
+
+**Install-time proxy unified with runtime** —
+- `provision_preamble` no longer injects proxy exports at VM create time.
+  Proxy is now applied via `apply_to_sandbox` as a post-boot hook (before
+  apk/npm). Single apply path, no baked-in-on-create divergence.
+- Sandbox export (`clawcli export`) scrubs `/etc/profile.d/proxy.sh` from
+  the VM before tarring. Manifest records `proxy_was_configured = true` —
+  import wizard reads this to prompt for fresh proxy config on the new host.
+
+**Diagnostics** —
+- New `clawcli proxy diagnose [--instance NAME]` prints every scope's
+  resolved triple + source + current env. One command for support.
+- All proxy-related tracing now uses `clawenv::proxy` target — filter with
+  `RUST_LOG=clawenv::proxy=debug clawcli ...`.
+
+**Platform matrix documented (CLAUDE.md)** —
+- Linux GUI is explicitly unsupported going forward. CLI + sandbox on
+  Linux keeps working; existing Linux GUI code is kept but not maintained.
+  New GUI features only synchronise macOS + Windows.
+
 ## v0.2.7 — 2026-04-18
 
 Two-pronged release: **bundle manifest protocol** (formalise the

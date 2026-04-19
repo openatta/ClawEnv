@@ -124,16 +124,12 @@ impl WslBackend {
             version.clone()
         };
 
-        let url = format!(
-            "https://dl-cdn.alpinelinux.org/alpine/v{major_minor}/releases/{arch}/{filename}"
-        );
+        // Unified mirror fallback (tuna / aliyun) via assets/mirrors.toml.
+        let urls = crate::config::mirrors_asset::AssetMirrors::get()
+            .build_alpine_urls(arch, &version, &major_minor)?;
 
-        tracing::info!("Downloading Alpine rootfs from {url}...");
-        let resp = reqwest::get(&url).await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("Download failed: HTTP {} for {url}", resp.status());
-        }
-        let bytes = resp.bytes().await?;
+        tracing::info!(target: "clawenv::proxy", "Downloading Alpine rootfs {} ...", filename);
+        let bytes = crate::platform::download::download_silent(&urls, None, 15).await?;
 
         let mut file = std::fs::File::create(&dest)?;
         file.write_all(&bytes)?;
@@ -342,16 +338,11 @@ impl SandboxBackend for WslBackend {
                         let dest = cache_dir.join(filename);
 
                         if !dest.exists() {
-                            tracing::info!("Downloading image from {url}...");
-                            let resp = reqwest::get(url).await?;
-                            if !resp.status().is_success() {
-                                anyhow::bail!("Download failed: HTTP {}", resp.status());
-                            }
-                            let bytes = resp.bytes().await?;
-                            let hash = sha256_hex(&bytes);
-                            if hash != *checksum_sha256 {
-                                anyhow::bail!("Checksum mismatch: expected {checksum_sha256}, got {hash}");
-                            }
+                            tracing::info!(target: "clawenv::proxy", "Downloading image from {url}...");
+                            let urls = vec![(url.to_string(), String::new())];
+                            let bytes = crate::platform::download::download_silent(
+                                &urls, Some(checksum_sha256.as_str()), 30,
+                            ).await?;
                             let mut file = std::fs::File::create(&dest)?;
                             file.write_all(&bytes)?;
                         }
@@ -787,6 +778,7 @@ fn parse_cpu_usage(line1: &str, line2: &str) -> f32 {
     ((total_diff - idle_diff) as f32 / total_diff as f32) * 100.0
 }
 
+#[allow(dead_code)] // kept for future cache-hit verification, currently unreferenced after the download migration
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
     let hash = Sha256::digest(data);

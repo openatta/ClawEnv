@@ -19,11 +19,48 @@ fn main() {
         )
         .init();
 
-    // Inject proxy env vars from config so reqwest and child processes
-    // (git, npm, curl) inherit them — without this the GUI cannot download
-    // Lima / Node / Git behind a corporate or GFW proxy.
-    if let Ok(config) = clawenv_core::config::ConfigManager::load() {
-        clawenv_core::config::proxy::inject_proxy_env(&config.config().clawenv.proxy);
+    // Startup proxy injection: feed OS-detected proxy (if any) into this
+    // process's env so every spawned subprocess (clawcli, native claws)
+    // inherits it. `core::proxy_resolver` handles priority chain —
+    // shell env > config > OS detect. See docs/23-proxy-architecture.md §3.
+    //
+    // OS detection itself lives in `ipc::detect_system_proxy_native_only`
+    // because it pulls in GUI-only deps (system-configuration / winreg /
+    // gsettings). We pass the detected payload into env manually here so
+    // when the CLI subprocess's resolver later queries env it sees it.
+    {
+        use clawenv_core::config::{proxy_resolver, ConfigManager};
+        // First, explicit config wins.
+        if let Ok(config) = ConfigManager::load() {
+            if let Some(t) = proxy_resolver::triple_from_config_proxy(
+                &config.config().clawenv.proxy,
+                proxy_resolver::ProxySource::GlobalConfig,
+            ) {
+                proxy_resolver::apply_env(&t);
+            }
+        }
+        // Then OS detection fills gaps.
+        if std::env::var("HTTPS_PROXY").ok().filter(|s| !s.is_empty()).is_none()
+            && std::env::var("https_proxy").ok().filter(|s| !s.is_empty()).is_none()
+        {
+            if let Some(v) = ipc::detect_system_proxy_native_only() {
+                let http  = v.get("http_proxy").and_then(|s| s.as_str()).unwrap_or("");
+                let https = v.get("https_proxy").and_then(|s| s.as_str()).unwrap_or("");
+                let no_p  = v.get("no_proxy").and_then(|s| s.as_str()).unwrap_or("localhost,127.0.0.1");
+                if !http.is_empty() || !https.is_empty() {
+                    let effective_http  = if http.is_empty() { https } else { http };
+                    let effective_https = if https.is_empty() { http } else { https };
+                    let triple = proxy_resolver::ProxyTriple {
+                        http: effective_http.to_string(),
+                        https: effective_https.to_string(),
+                        no_proxy: no_p.to_string(),
+                        source: proxy_resolver::ProxySource::OsSystem,
+                    };
+                    proxy_resolver::apply_env(&triple);
+                    tracing::info!(target: "clawenv::proxy", "startup: injected OS proxy {effective_http}");
+                }
+            }
+        }
     }
 
     // Pin LIMA_HOME to ~/.clawenv/lima so every spawned limactl uses the
@@ -49,6 +86,56 @@ fn main() {
         .setup(|app| {
             // Initialize system tray
             tray::setup_tray(app.handle())?;
+
+            // OS proxy watcher — 30s polling, emits `os-proxy-changed` on
+            // transitions. Simple polling trumps per-platform notification
+            // APIs because it works the same on macOS + Windows without
+            // platform-specific runloop gymnastics. Polling interval is the
+            // worst-case latency users see between "toggle Clash" and "claw
+            // sees new proxy", but Restart instance is free anyway so this
+            // is mostly for the UI indicator and passive env refresh.
+            {
+                let watcher_handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    use std::collections::hash_map::DefaultHasher;
+                    use std::hash::{Hash, Hasher};
+                    let mut last_sig: u64 = 0;
+                    loop {
+                        std::thread::sleep(std::time::Duration::from_secs(30));
+                        let current = ipc::detect_system_proxy_native_only();
+                        let mut h = DefaultHasher::new();
+                        let payload = current.as_ref()
+                            .map(|v| v.to_string())
+                            .unwrap_or_default();
+                        payload.hash(&mut h);
+                        let sig = h.finish();
+                        if sig != last_sig {
+                            last_sig = sig;
+                            // Refresh env for newly-spawned subprocesses.
+                            if let Some(v) = current.as_ref() {
+                                let http  = v.get("http_proxy").and_then(|s| s.as_str()).unwrap_or("");
+                                let https = v.get("https_proxy").and_then(|s| s.as_str()).unwrap_or("");
+                                let no_p  = v.get("no_proxy").and_then(|s| s.as_str()).unwrap_or("localhost,127.0.0.1");
+                                let eh = if http.is_empty() { https } else { http };
+                                let es = if https.is_empty() { http } else { https };
+                                if !eh.is_empty() {
+                                    let t = clawenv_core::config::proxy_resolver::ProxyTriple {
+                                        http: eh.into(),
+                                        https: es.into(),
+                                        no_proxy: no_p.into(),
+                                        source: clawenv_core::config::proxy_resolver::ProxySource::OsSystem,
+                                    };
+                                    clawenv_core::config::proxy_resolver::apply_env(&t);
+                                }
+                            } else {
+                                clawenv_core::config::proxy_resolver::clear_env();
+                            }
+                            let _ = watcher_handle.emit("os-proxy-changed", &current);
+                            tracing::info!(target: "clawenv::proxy", "OS proxy changed (watcher)");
+                        }
+                    }
+                });
+            }
 
             // If launched with --minimized (autostart), hide main window
             if std::env::args().any(|a| a == "--minimized") {
@@ -225,6 +312,10 @@ fn main() {
             ipc::edit_instance_resources,
             ipc::edit_instance_ports,
             ipc::get_instance_capabilities,
+            ipc::get_instance_proxy,
+            ipc::set_instance_proxy,
+            ipc::check_instance_proxy_baked_in,
+            ipc::test_instance_network,
             ipc::open_install_window,
             ipc::get_instance_health,
             ipc::save_settings,

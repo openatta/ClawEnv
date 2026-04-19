@@ -269,6 +269,10 @@ export default function ClawPage(props: {
             <div class="flex items-center justify-center gap-2 mb-2">
               <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
                 onClick={openConfig}>{t("配置", "Configure")}</button>
+              {/* Proxy settings are VM-scoped, not claw-scoped. They live on
+                  SandboxPage (VmCard) for sandbox instances. Native claws
+                  inherit the OS system proxy automatically — no UI needed.
+                  See docs/23-proxy-architecture.md §4. */}
               <Show when={activeInstance()?.sandbox_type?.toLowerCase() === "native"}>
                 <button class="px-3 py-1.5 bg-gray-700 hover:bg-gray-600 rounded text-xs"
                   onClick={doExportBundle}>{t("导出 Bundle", "Export Bundle")}</button>
@@ -357,6 +361,7 @@ export default function ClawPage(props: {
           onClose={() => setShowConfig(false)}
         />
       </Show>
+
 
       {/* Delete confirmation */}
       <Show when={showDeleteConfirm()}>

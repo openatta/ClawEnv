@@ -42,6 +42,16 @@ ClawEnv 项目的所有设计文档 (SSOT)。按主题分组，**编号不保证
 |---|---|---|
 | 18 | [Bundle 格式规范](18-bundle-format.md) | export/import 的 `.tar.gz` 契约，manifest schema，wrap 结构，V1→V2 演进方案 |
 
+## 产品功能设计（草案）
+
+| # | 文档 | 内容 |
+|---|---|---|
+| 19 | [API Key 管理](19-api-key-management.md) | 安装后的 key 增删改 / Key Pool / 用量统计分期方案 |
+| 20 | [APP 包（Skills/Tools 集合）](20-app-package.md) | APP 包格式、注册中心、Claw 钩子、MVP→V3 路线 |
+| 21 | [可观测性 / 监控边界](21-observability.md) | 分发/安装/监控三大职责中的监控边界，7 个监控域 |
+| 22 | [AttaRun Bridge 集成](22-attarun-bridge.md) | bridge 独立 daemon、admin API、channel 模型、pairing、左侧导航 |
+| 23 | [代理架构](23-proxy-architecture.md) | 统一 ProxyResolver、Scope 三分、Mirror 基建、VM 代理归属 SandboxPage 的设计 SSOT |
+
 ## 约定
 
 - **编号**：01-xx 先按功能域分块（01-09 架构，10-19 协议/实现）。不强制连续，合并/废弃不回收编号。

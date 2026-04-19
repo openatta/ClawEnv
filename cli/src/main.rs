@@ -85,6 +85,12 @@ enum Commands {
     },
     /// Diagnose current environment
     Doctor,
+    /// Proxy diagnostics — walk each resolver scope and print results.
+    /// Use to debug "why isn't my proxy applying" in one command.
+    Proxy {
+        #[command(subcommand)]
+        sub: ProxyCmd,
+    },
     /// Execute a command inside the sandbox
     Exec {
         cmd: String,
@@ -131,6 +137,19 @@ enum BridgeCmd {
         /// Bridge port (default: from config or 3100)
         #[arg(long)]
         port: Option<u16>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ProxyCmd {
+    /// Print the full resolver trace: every scope, priority layer,
+    /// source, and the effective URL. Use this for "why is my proxy
+    /// not applying" questions.
+    Diagnose {
+        /// Optional instance name — adds RuntimeSandbox[name] to the
+        /// report. Otherwise only Installer + RuntimeNative are shown.
+        #[arg(long)]
+        instance: Option<String>,
     },
 }
 
@@ -204,10 +223,15 @@ async fn main() -> Result<()> {
             .init();
     }
 
-    // Inject proxy env vars from config (if configured) so all child
-    // processes (npm, curl, etc.) inherit proxy settings automatically.
+    // Inject proxy env via the unified resolver (Installer scope). Shell env
+    // wins if already set; else config; else OS detection is relayed via env
+    // injected by the Tauri GUI parent (CLI alone can't query OS proxy).
+    // See `docs/23-proxy-architecture.md` §3.
     if let Ok(config) = clawenv_core::config::ConfigManager::load() {
-        clawenv_core::config::proxy::inject_proxy_env(&config.config().clawenv.proxy);
+        let scope = clawenv_core::config::proxy_resolver::Scope::Installer;
+        if let Some(triple) = scope.resolve(&config).await {
+            clawenv_core::config::proxy_resolver::apply_env(&triple);
+        }
     }
 
     // Pin LIMA_HOME to ~/.clawenv/lima so any limactl invocation uses the
@@ -530,15 +554,36 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
             out.emit(CliEvent::Info { message: format!("{}: {}", desc.display_name, version.trim()) });
 
+            // Detect whether the VM had a proxy configured AT EXPORT TIME
+            // so the import side can prompt for re-config. We then scrub
+            // /etc/profile.d/proxy.sh + npm config so the bundle on disk
+            // is proxy-clean — see docs/23-proxy-architecture.md §9.
+            // Native has no VM; its manifest flag stays false.
+            let mut proxy_was_configured = false;
+            if inst.sandbox_type != SandboxType::Native {
+                let probe = backend.exec("test -f /etc/profile.d/proxy.sh && echo yes || echo no")
+                    .await.unwrap_or_default();
+                if probe.trim() == "yes" {
+                    proxy_was_configured = true;
+                    // Scrub before tar so the exported image is clean.
+                    clawenv_core::config::proxy_resolver::clear_sandbox(backend.as_ref())
+                        .await.ok();
+                    out.emit(CliEvent::Info {
+                        message: "Scrubbed proxy.sh from VM before export".into(),
+                    });
+                }
+            }
+
             // Build the manifest once up-front; each backend decides where
             // to drop it (in-tree for Native/Lima, inside the outer wrap for
             // Podman/WSL). Using the registry claw_type here is what lets
             // the import side drop the old "probe version_check_cmd for
             // every known claw" loop.
-            let manifest = BundleManifest::build(
+            let manifest = BundleManifest::build_with_proxy(
                 &inst.claw_type,
                 version.trim(),
                 inst.sandbox_type.as_wire_str(),
+                proxy_was_configured,
             );
 
             // Route by backend. Previously this unconditionally called the
@@ -872,6 +917,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 },
                 resources: ResourceConfig::default(),
                 browser: Default::default(),
+                proxy: None,
                 cached_latest_version: String::new(),
                 cached_version_check_at: String::new(),
             })?;
@@ -907,6 +953,55 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 instances: instance_count,
             };
             out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });
+        }
+
+        // ====== Proxy diagnose ======
+        Commands::Proxy { sub: ProxyCmd::Diagnose { instance } } => {
+            use clawenv_core::config::proxy_resolver::{Scope, ProxySource};
+            let config = ConfigManager::load()?;
+
+            let line = |label: &str, t: Option<&clawenv_core::config::proxy_resolver::ProxyTriple>| {
+                match t {
+                    Some(t) => format!("  {label:24} → {} (source: {:?})", t.http, t.source),
+                    None => format!("  {label:24} → (direct — no proxy)"),
+                }
+            };
+
+            println!("══════ Proxy Diagnostic ══════");
+            println!("Env         HTTPS_PROXY = {}", std::env::var("HTTPS_PROXY").unwrap_or_default());
+            println!("Env         HTTP_PROXY  = {}", std::env::var("HTTP_PROXY").unwrap_or_default());
+            println!("Env         NO_PROXY    = {}", std::env::var("NO_PROXY").unwrap_or_default());
+            let g = &config.config().clawenv.proxy;
+            println!("Config      enabled={}, http_proxy={}", g.enabled, g.http_proxy);
+            println!();
+            println!("Per-scope resolution:");
+            let installer = Scope::Installer.resolve(&config).await;
+            println!("{}", line("Installer", installer.as_ref()));
+            let native = Scope::RuntimeNative.resolve(&config).await;
+            println!("{}", line("RuntimeNative", native.as_ref()));
+            let _ = ProxySource::PerVm; // silence unused if no instance branch taken
+            if let Some(inst_name) = instance {
+                if let Ok(inst) = clawenv_core::manager::instance::get_instance(&config, &inst_name) {
+                    if inst.sandbox_type != clawenv_core::sandbox::SandboxType::Native {
+                        match clawenv_core::manager::instance::backend_for_instance(inst) {
+                            Ok(backend) => {
+                                let scope = Scope::RuntimeSandbox { instance: inst, backend: backend.as_ref() };
+                                let t = scope.resolve(&config).await;
+                                println!("{}", line(&format!("RuntimeSandbox[{inst_name}]"), t.as_ref()));
+                            }
+                            Err(e) => println!("  RuntimeSandbox[{inst_name}] → backend error: {e}"),
+                        }
+                    } else {
+                        println!("  RuntimeSandbox[{inst_name}] → N/A (native has no VM)");
+                    }
+                } else {
+                    println!("  instance '{inst_name}' not found");
+                }
+            }
+            println!();
+            println!("Tip: run `clawcli proxy diagnose --instance <name>` to include");
+            println!("     per-VM resolution for a specific sandbox instance.");
+            out.emit(CliEvent::Complete { message: "diagnose done".into() });
         }
 
         // ====== Exec ======
@@ -1600,6 +1695,7 @@ async fn run_install_step(
                 },
                 resources: ResourceConfig::default(),
                 browser: Default::default(),
+                proxy: None,
                 cached_latest_version: String::new(),
                 cached_version_check_at: String::new(),
             })?;

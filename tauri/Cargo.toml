@@ -1,6 +1,6 @@
 [package]
 name = "clawgui"
-version = "0.2.7"
+version = "0.2.8"
 edition = "2021"
 
 [dependencies]
@@ -22,6 +22,20 @@ once_cell = "1"
 chrono = "0.4"
 sha2 = "0.10"
 hex = "0.4"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+# macOS proxy detection via SystemConfiguration framework — covers any active
+# network interface (Wi-Fi, Ethernet, Thunderbolt, USB LAN), not just the Wi-Fi
+# service name we used to hardcode via `networksetup`. Already pulled in
+# transitively by Tauri/rustls, so this is a direct re-export, not a new
+# supply-chain dep. Version must match system-configuration's own dep
+# (currently 0.9) — mismatching majors causes type-identity conflicts.
+system-configuration = "0.7"
+core-foundation = "0.9"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Registry read for Windows proxy detection (HKCU\...\Internet Settings).
+winreg = "0.52"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

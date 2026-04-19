@@ -1,4 +1,6 @@
 use clawenv_core::api::{SystemCheckResponse, CheckItem as ApiCheckItem};
+use clawenv_core::config::ProxyConfig;
+use clawenv_core::config::proxy_resolver::{self, ProxySource};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -39,6 +41,7 @@ pub async fn install_openclaw(
     _install_mcp_bridge: Option<bool>,
     gateway_port: u16,
     image: Option<String>,
+    proxy_json: Option<String>,
 ) -> Result<(), String> {
     if INSTALL_RUNNING.swap(true, Ordering::SeqCst) {
         return Err("Installation already in progress. Please wait for it to finish.".into());
@@ -73,6 +76,24 @@ pub async fn install_openclaw(
         }
     }
 
+    // Translate the wizard's proxy selection into HTTP_PROXY / HTTPS_PROXY /
+    // NO_PROXY env vars for the CLI subprocess. Deliberately not written to
+    // config.toml — the user picked a proxy for this install only.
+    // Resolver's `triple_from_config_proxy` handles auth + keychain lookup.
+    let proxy_env: Vec<(String, String)> = proxy_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str::<ProxyConfig>(s).ok())
+        .and_then(|p| proxy_resolver::triple_from_config_proxy(&p, ProxySource::GlobalConfig))
+        .map(|t| vec![
+            ("http_proxy".to_string(), t.http.clone()),
+            ("HTTP_PROXY".to_string(), t.http),
+            ("https_proxy".to_string(), t.https.clone()),
+            ("HTTPS_PROXY".to_string(), t.https),
+            ("no_proxy".to_string(), t.no_proxy.clone()),
+            ("NO_PROXY".to_string(), t.no_proxy),
+        ])
+        .unwrap_or_default();
+
     let app_handle = app.clone();
     tokio::spawn(async move {
         // Guard released when this task exits, via any path (normal return,
@@ -103,7 +124,8 @@ pub async fn install_openclaw(
         });
 
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-        let result = cli_bridge::run_cli_streaming(&args_ref, tx, |_| {}).await;
+        let env_ref: Vec<(&str, String)> = proxy_env.iter().map(|(k, v)| (k.as_str(), v.clone())).collect();
+        let result = cli_bridge::run_cli_streaming_with_env(&args_ref, &env_ref, tx, |_| {}).await;
         fwd_task.await.ok();
 
         match result {

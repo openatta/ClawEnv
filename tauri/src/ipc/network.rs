@@ -98,10 +98,138 @@ pub async fn test_connectivity(
     Ok(results)
 }
 
-/// Detect system proxy — check env vars + macOS networksetup
+/// Synchronous, blocking variant of `detect_system_proxy` suitable for use
+/// from `main()` before any async runtime is up. Returns the detected proxy
+/// payload (same JSON shape the Tauri command returns) so callers can pick
+/// out just the fields they need.
+///
+/// Skips env vars — the caller's intent at startup is "find the OS-level
+/// system proxy and inject it into our env". If env is already set, nothing
+/// to inject; this helper ignores env and only queries the native store.
+pub fn detect_system_proxy_native_only() -> Option<serde_json::Value> {
+    #[cfg(target_os = "macos")]
+    { return detect_macos_proxy(); }
+    #[cfg(target_os = "windows")]
+    { return detect_windows_proxy(); }
+    #[cfg(target_os = "linux")]
+    {
+        // gsettings must be invoked async — to stay blocking here we use
+        // std::process. GNOME-only; non-GNOME Linux relies on shell env.
+        return detect_linux_proxy_blocking();
+    }
+    #[allow(unreachable_code)]
+    None
+}
+
+/// Blocking sibling of `detect_linux_proxy` for use from `main()`.
+#[cfg(target_os = "linux")]
+fn detect_linux_proxy_blocking() -> Option<serde_json::Value> {
+    fn gs(key: &str, subkey: &str) -> Option<String> {
+        let output = std::process::Command::new("gsettings")
+            .args(["get", key, subkey])
+            .output().ok()?;
+        if !output.status.success() { return None; }
+        let s = String::from_utf8_lossy(&output.stdout).trim().trim_matches('\'').to_string();
+        if s.is_empty() || s == "''" { None } else { Some(s) }
+    }
+    let mode = gs("org.gnome.system.proxy", "mode")?;
+    if mode != "manual" { return None; }
+    let host = gs("org.gnome.system.proxy.http", "host").unwrap_or_default();
+    let port = gs("org.gnome.system.proxy.http", "port").unwrap_or_default();
+    if host.is_empty() || port == "0" { return None; }
+    let url = format!("http://{host}:{port}");
+    Some(serde_json::json!({
+        "detected": true,
+        "source": "GNOME gsettings",
+        "http_proxy": url, "https_proxy": url,
+        "no_proxy": "localhost,127.0.0.1",
+    }))
+}
+
+/// Test connectivity TO a set of targets FROM inside a specific sandbox VM.
+/// Used by the ProxyModal "test" button to verify the proxy applied to
+/// the VM actually reaches the targets the user cares about (LLM APIs,
+/// npm, github, etc.). See docs/23-proxy-architecture.md §11.
+///
+/// Preset keys (`targets` strings): `github` / `npm` / `openai` /
+/// `anthropic` / `deepseek` / `qwen`. Any other value is treated as a
+/// literal URL (`https://...` expected).
+#[tauri::command]
+pub async fn test_instance_network(
+    name: String,
+    targets: Vec<String>,
+) -> Result<Vec<serde_json::Value>, String> {
+    use clawenv_core::config::ConfigManager;
+
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = config.instances().iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+
+    let backend = clawenv_core::manager::instance::backend_for_instance(inst)
+        .map_err(|e| e.to_string())?;
+
+    let mut results = Vec::new();
+    for t in targets {
+        let url = preset_url(&t).unwrap_or(&t).to_string();
+        let cmd = format!(
+            "curl -sS -m 8 -o /dev/null -w '%{{http_code}}|%{{time_total}}' '{}' 2>&1 || echo 'FAIL|0'",
+            url.replace('\'', "'\\''"),
+        );
+        let out = backend.exec(&cmd).await.unwrap_or_else(|e| format!("FAIL|0|{e}"));
+        let parts: Vec<&str> = out.trim().split('|').collect();
+        let (ok, code, latency) = if parts.len() >= 2 {
+            let code = parts[0].to_string();
+            let ok = code.starts_with('2') || code.starts_with('3');
+            let latency = parts[1].parse::<f64>().unwrap_or(0.0);
+            (ok, code, latency)
+        } else {
+            (false, "FAIL".to_string(), 0.0)
+        };
+        results.push(serde_json::json!({
+            "target": t,
+            "url": url,
+            "ok": ok,
+            "http_code": code,
+            "latency_ms": (latency * 1000.0).round(),
+        }));
+    }
+    Ok(results)
+}
+
+fn preset_url(key: &str) -> Option<&'static str> {
+    match key {
+        "github"    => Some("https://api.github.com"),
+        "npm"       => Some("https://registry.npmjs.org"),
+        "openai"    => Some("https://api.openai.com"),
+        "anthropic" => Some("https://api.anthropic.com"),
+        "deepseek"  => Some("https://api.deepseek.com"),
+        "qwen"      => Some("https://dashscope.aliyuncs.com"),
+        "npmmirror" => Some("https://registry.npmmirror.com"),
+        _ => None,
+    }
+}
+
+/// Detect system proxy across platforms.
+///
+/// Order of precedence:
+///   1. `HTTP_PROXY` / `HTTPS_PROXY` env vars (what the GUI itself sees).
+///   2. Platform-native source:
+///        - macOS  — `SCDynamicStoreCopyProxies` via system-configuration
+///                    crate; covers every active interface (Wi-Fi / Ethernet
+///                    / Thunderbolt / USB LAN), not just hardcoded Wi-Fi.
+///        - Windows — `HKCU\...\Internet Settings` registry (Internet Options).
+///        - Linux   — `gsettings get org.gnome.system.proxy` (GNOME); other
+///                    DEs typically rely on env vars, already covered in (1).
+///
+/// PAC auto-config URLs are reported via `source` = "macos-pac" so the wizard
+/// can show a "PAC detected — please fill manually" hint (we don't resolve
+/// PAC scripts). SOCKS-only proxies are reported too but flagged in `source`
+/// since reqwest needs its `socks` feature to dial them, which we don't
+/// enable by default.
 #[tauri::command]
 pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
-    // 1. Check environment variables
+    // 1. Env vars — what the GUI process itself sees.
     let env_http = std::env::var("http_proxy")
         .or_else(|_| std::env::var("HTTP_PROXY"))
         .unwrap_or_default();
@@ -122,113 +250,22 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
         }));
     }
 
-    // 2. macOS: check networksetup for HTTP proxy
+    // 2a. macOS — SystemConfiguration framework.
     #[cfg(target_os = "macos")]
-    {
-        if let Ok(output) = tokio::process::Command::new("networksetup")
-            .args(["-getwebproxy", "Wi-Fi"])
-            .output()
-            .await
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut enabled = false;
-            let mut server = String::new();
-            let mut port = String::new();
-            for line in stdout.lines() {
-                if line.starts_with("Enabled:") && line.contains("Yes") {
-                    enabled = true;
-                }
-                if let Some(s) = line.strip_prefix("Server: ") {
-                    server = s.trim().to_string();
-                }
-                if let Some(p) = line.strip_prefix("Port: ") {
-                    port = p.trim().to_string();
-                }
-            }
-            if enabled && !server.is_empty() {
-                let proxy_url = format!("http://{}:{}", server, port);
-                return Ok(serde_json::json!({
-                    "detected": true,
-                    "source": "macOS System Preferences (Wi-Fi)",
-                    "http_proxy": proxy_url,
-                    "https_proxy": proxy_url,
-                    "no_proxy": "",
-                }));
-            }
-        }
-
-        // Also check HTTPS proxy
-        if let Ok(output) = tokio::process::Command::new("networksetup")
-            .args(["-getsecurewebproxy", "Wi-Fi"])
-            .output()
-            .await
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let mut enabled = false;
-            let mut server = String::new();
-            let mut port = String::new();
-            for line in stdout.lines() {
-                if line.starts_with("Enabled:") && line.contains("Yes") {
-                    enabled = true;
-                }
-                if let Some(s) = line.strip_prefix("Server: ") {
-                    server = s.trim().to_string();
-                }
-                if let Some(p) = line.strip_prefix("Port: ") {
-                    port = p.trim().to_string();
-                }
-            }
-            if enabled && !server.is_empty() {
-                let proxy_url = format!("http://{}:{}", server, port);
-                return Ok(serde_json::json!({
-                    "detected": true,
-                    "source": "macOS System Preferences (Wi-Fi HTTPS)",
-                    "http_proxy": proxy_url,
-                    "https_proxy": proxy_url,
-                    "no_proxy": "",
-                }));
-            }
-        }
+    if let Some(v) = detect_macos_proxy() {
+        return Ok(v);
     }
 
-    // 3. Windows: read proxy from registry (Internet Settings)
+    // 2b. Windows — registry.
     #[cfg(target_os = "windows")]
-    {
-        if let Ok(output) = clawenv_core::platform::process::silent_cmd("reg")
-            .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyEnable"])
-            .output()
-            .await
-        {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            // ProxyEnable REG_DWORD 0x1 means proxy is on
-            if stdout.contains("0x1") {
-                if let Ok(server_output) = clawenv_core::platform::process::silent_cmd("reg")
-                    .args(["query", r"HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings", "/v", "ProxyServer"])
-                    .output()
-                    .await
-                {
-                    let server_stdout = String::from_utf8_lossy(&server_output.stdout);
-                    // Extract server value: "    ProxyServer    REG_SZ    127.0.0.1:10808"
-                    if let Some(line) = server_stdout.lines().find(|l| l.contains("ProxyServer")) {
-                        let parts: Vec<&str> = line.split_whitespace().collect();
-                        if let Some(server) = parts.last() {
-                            let proxy_url = if server.starts_with("http") {
-                                server.to_string()
-                            } else {
-                                format!("http://{}", server)
-                            };
-                            return Ok(serde_json::json!({
-                                "detected": true,
-                                "source": "Windows Registry (Internet Settings)",
-                                "http_proxy": proxy_url,
-                                "https_proxy": proxy_url,
-                                "no_proxy": "localhost,127.0.0.1",
-                            }));
-                        }
-                    }
-                }
-            }
-        }
+    if let Some(v) = detect_windows_proxy() {
+        return Ok(v);
+    }
+
+    // 2c. Linux — GNOME gsettings.
+    #[cfg(target_os = "linux")]
+    if let Some(v) = detect_linux_proxy().await {
+        return Ok(v);
     }
 
     Ok(serde_json::json!({
@@ -237,5 +274,264 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
         "http_proxy": "",
         "https_proxy": "",
         "no_proxy": "",
+    }))
+}
+
+/// macOS proxy detection via SystemConfiguration framework — returns the
+/// current active interface's proxy settings, not a hardcoded Wi-Fi lookup.
+///
+/// Returns `None` when no proxy is configured, so the caller can fall through
+/// to the "none detected" response. Returns `Some(...)` even for PAC / SOCKS
+/// so the UI can show a friendly hint even when the value isn't directly
+/// usable by reqwest.
+#[cfg(target_os = "macos")]
+fn detect_macos_proxy() -> Option<serde_json::Value> {
+    use core_foundation::array::{CFArray, CFArrayGetCount, CFArrayGetValueAtIndex};
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    use core_foundation::string::{CFString, CFStringRef};
+    use std::os::raw::c_void;
+    use system_configuration::dynamic_store::SCDynamicStoreBuilder;
+
+    // build() can fail if CFRunLoop isn't set up (very rare — returns None).
+    let store = SCDynamicStoreBuilder::new("clawenv-proxy-detect").build()?;
+    let proxies: CFDictionary<CFString, CFType> = store.get_proxies()?;
+
+    // Helpers. `proxies.find` returns `ItemRef<CFType>` which derefs to
+    // `&CFType`. We bind through `&CFType` explicitly so the `downcast`
+    // turbofish resolves unambiguously to `CFType::downcast<T>` instead of
+    // getting tangled in method resolution with `CFPropertyList::downcast`.
+    let get_string = |k: &str| -> Option<String> {
+        let key = CFString::new(k);
+        let v = proxies.find(&key)?;
+        let cft: &CFType = &v;
+        let s: CFString = cft.downcast::<CFString>()?;
+        Some(s.to_string())
+    };
+    let get_num = |k: &str| -> Option<i64> {
+        let key = CFString::new(k);
+        let v = proxies.find(&key)?;
+        let cft: &CFType = &v;
+        let n: CFNumber = cft.downcast::<CFNumber>()?;
+        n.to_i64()
+    };
+    let get_bool = |k: &str| -> bool {
+        get_num(k).map(|n| n != 0).unwrap_or(false)
+    };
+    let get_u16 = |k: &str| -> Option<u16> {
+        get_num(k).and_then(|n| u16::try_from(n).ok())
+    };
+    // CFArray downcast is only impl'd for `CFArray<*const c_void>` (the
+    // heterogeneous form) — ConcreteCFType isn't impl'd for the typed
+    // `CFArray<CFString>`. We downcast to the untyped form and pull each
+    // element out via the raw FFI, wrapping as CFString (ExceptionsList is
+    // documented to always contain strings).
+    let get_strings = |k: &str| -> Vec<String> {
+        let key = CFString::new(k);
+        let Some(v) = proxies.find(&key) else { return Vec::new() };
+        let cft: &CFType = &v;
+        let Some(arr) = cft.downcast::<CFArray<*const c_void>>() else { return Vec::new() };
+        let raw = arr.as_concrete_TypeRef();
+        let count = unsafe { CFArrayGetCount(raw) };
+        (0..count)
+            .map(|i| unsafe {
+                let item_ptr = CFArrayGetValueAtIndex(raw, i) as CFStringRef;
+                CFString::wrap_under_get_rule(item_ptr).to_string()
+            })
+            .collect()
+    };
+
+    // Exceptions list → NO_PROXY string. `localhost,127.0.0.1` always merged
+    // in so the wizard's connectivity tests to `127.0.0.1` don't detour.
+    let mut no_proxy_parts = get_strings("ExceptionsList");
+    for d in ["localhost", "127.0.0.1"] {
+        if !no_proxy_parts.iter().any(|s| s == d) {
+            no_proxy_parts.push(d.to_string());
+        }
+    }
+    let no_proxy = no_proxy_parts.join(",");
+
+    // HTTPS preferred over HTTP when both are configured — HTTPS requests
+    // (most of what we do) should use the HTTPS proxy.
+    let https_on = get_bool("HTTPSEnable");
+    let http_on  = get_bool("HTTPEnable");
+
+    let https_url = if https_on {
+        let host = get_string("HTTPSProxy").unwrap_or_default();
+        let port = get_u16("HTTPSPort").unwrap_or(0);
+        (!host.is_empty() && port != 0).then(|| format!("http://{host}:{port}"))
+    } else { None };
+
+    let http_url = if http_on {
+        let host = get_string("HTTPProxy").unwrap_or_default();
+        let port = get_u16("HTTPPort").unwrap_or(0);
+        (!host.is_empty() && port != 0).then(|| format!("http://{host}:{port}"))
+    } else { None };
+
+    if https_url.is_some() || http_url.is_some() {
+        // Fall back each direction if one is missing.
+        let h = http_url.clone().or_else(|| https_url.clone()).unwrap();
+        let s = https_url.or(http_url).unwrap();
+        return Some(serde_json::json!({
+            "detected": true,
+            "source": "macOS System Preferences",
+            "http_proxy": h,
+            "https_proxy": s,
+            "no_proxy": no_proxy,
+        }));
+    }
+
+    // PAC auto-config — we don't resolve it, but tell the user we saw one.
+    if get_bool("ProxyAutoConfigEnable") {
+        if let Some(pac) = get_string("ProxyAutoConfigURLString") {
+            return Some(serde_json::json!({
+                "detected": false,
+                "source": "macos-pac",
+                "http_proxy": "",
+                "https_proxy": "",
+                "no_proxy": no_proxy,
+                "pac_url": pac,
+                "note": "PAC (auto-config) URL detected. PAC scripts are not resolved — please switch to an explicit HTTP proxy or enter one manually.",
+            }));
+        }
+    }
+
+    // SOCKS-only: we can detect but reqwest without socks feature can't dial
+    // it. Report so the UI can prompt the user.
+    if get_bool("SOCKSEnable") {
+        let host = get_string("SOCKSProxy").unwrap_or_default();
+        let port = get_u16("SOCKSPort").unwrap_or(0);
+        if !host.is_empty() && port != 0 {
+            return Some(serde_json::json!({
+                "detected": false,
+                "source": "macos-socks",
+                "http_proxy": "",
+                "https_proxy": "",
+                "no_proxy": no_proxy,
+                "socks_proxy": format!("socks5://{host}:{port}"),
+                "note": "SOCKS proxy detected — ClawEnv cannot dial it directly. Please configure an HTTP/HTTPS proxy or use a local HTTP bridge (Clash/V2Ray usually provides one).",
+            }));
+        }
+    }
+
+    None
+}
+
+/// Windows proxy detection via `HKCU\Software\Microsoft\Windows\CurrentVersion\Internet Settings`.
+/// Reads `ProxyEnable`, `ProxyServer` (supports both single "host:port" and
+/// "http=host:port;https=host:port" forms), and `ProxyOverride` (bypass list).
+#[cfg(target_os = "windows")]
+fn detect_windows_proxy() -> Option<serde_json::Value> {
+    use winreg::enums::HKEY_CURRENT_USER;
+    use winreg::RegKey;
+
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let key = hkcu
+        .open_subkey(r"Software\Microsoft\Windows\CurrentVersion\Internet Settings")
+        .ok()?;
+    let enable: u32 = key.get_value("ProxyEnable").ok()?;
+    if enable == 0 {
+        return None;
+    }
+
+    let server: String = key.get_value("ProxyServer").ok()?;
+    let override_raw: String = key.get_value("ProxyOverride").unwrap_or_default();
+
+    // ProxyServer can be either `host:port` (same for all) or
+    // `http=host:port;https=host:port;ftp=host:port`.
+    let (http_url, https_url) = if server.contains('=') {
+        let mut http = String::new();
+        let mut https = String::new();
+        for part in server.split(';') {
+            if let Some(v) = part.strip_prefix("http=") { http = format!("http://{v}"); }
+            if let Some(v) = part.strip_prefix("https=") { https = format!("http://{v}"); }
+        }
+        (http, https)
+    } else {
+        let u = format!("http://{server}");
+        (u.clone(), u)
+    };
+    let http  = if http_url.is_empty()  { https_url.clone() } else { http_url };
+    let https = if https_url.is_empty() { http.clone() } else { https_url };
+
+    // `ProxyOverride` uses semicolons and often includes `<local>`. Translate
+    // into a comma-separated list for NO_PROXY; drop the Windows-specific
+    // `<local>` since reqwest doesn't understand it — rely on explicit
+    // `localhost,127.0.0.1`.
+    let mut no_proxy: Vec<String> = override_raw
+        .split(';')
+        .filter(|s| !s.is_empty() && *s != "<local>")
+        .map(|s| s.trim().to_string())
+        .collect();
+    for d in ["localhost", "127.0.0.1"] {
+        if !no_proxy.iter().any(|s| s == d) {
+            no_proxy.push(d.to_string());
+        }
+    }
+
+    Some(serde_json::json!({
+        "detected": true,
+        "source": "Windows Registry (Internet Settings)",
+        "http_proxy": http,
+        "https_proxy": https,
+        "no_proxy": no_proxy.join(","),
+    }))
+}
+
+/// Linux proxy detection via GNOME gsettings. KDE and env-var-driven setups
+/// are handled by the env-var branch at the top of `detect_system_proxy`.
+/// A plain Linux box with no proxy configured simply returns `None`.
+#[cfg(target_os = "linux")]
+async fn detect_linux_proxy() -> Option<serde_json::Value> {
+    async fn gs(key: &str, subkey: &str) -> Option<String> {
+        let output = tokio::process::Command::new("gsettings")
+            .args(["get", key, subkey])
+            .output().await.ok()?;
+        if !output.status.success() { return None; }
+        let s = String::from_utf8_lossy(&output.stdout).trim().trim_matches('\'').to_string();
+        if s.is_empty() || s == "''" { None } else { Some(s) }
+    }
+
+    let mode = gs("org.gnome.system.proxy", "mode").await?;
+    if mode != "manual" {
+        // `auto` uses PAC URL — same caveat as macOS. Report but don't claim
+        // a usable proxy URL.
+        if mode == "auto" {
+            let pac = gs("org.gnome.system.proxy", "autoconfig-url").await.unwrap_or_default();
+            return Some(serde_json::json!({
+                "detected": false,
+                "source": "gnome-pac",
+                "http_proxy": "",
+                "https_proxy": "",
+                "no_proxy": "",
+                "pac_url": pac,
+                "note": "GNOME auto-proxy (PAC) detected. PAC scripts are not resolved — please enter an explicit proxy.",
+            }));
+        }
+        return None;
+    }
+
+    let http_host = gs("org.gnome.system.proxy.http", "host").await.unwrap_or_default();
+    let http_port = gs("org.gnome.system.proxy.http", "port").await.unwrap_or_default();
+    let https_host = gs("org.gnome.system.proxy.https", "host").await.unwrap_or_default();
+    let https_port = gs("org.gnome.system.proxy.https", "port").await.unwrap_or_default();
+
+    let http  = (!http_host.is_empty()  && http_port != "0").then(|| format!("http://{http_host}:{http_port}"));
+    let https = (!https_host.is_empty() && https_port != "0").then(|| format!("http://{https_host}:{https_port}"));
+
+    if http.is_none() && https.is_none() {
+        return None;
+    }
+
+    let h = http.clone().or_else(|| https.clone()).unwrap();
+    let s = https.or(http).unwrap();
+
+    Some(serde_json::json!({
+        "detected": true,
+        "source": "GNOME gsettings",
+        "http_proxy": h,
+        "https_proxy": s,
+        "no_proxy": "localhost,127.0.0.1",
     }))
 }

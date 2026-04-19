@@ -45,6 +45,7 @@ export default function InstallWizard(props: {
   const [apiKey, setApiKey] = createSignal("");
   const [installBrowser, setInstallBrowser] = createSignal(false);
   const [installMcpBridge, setInstallMcpBridge] = createSignal(true);
+  const [proxyJson, setProxyJson] = createSignal<string | null>(null);
   const [installError, setInstallError] = createSignal("");
 
   // Track whether system check is ready (controls Next button)
@@ -95,11 +96,24 @@ export default function InstallWizard(props: {
     apiKey: apiKey(),
     installBrowser: installBrowser(),
     installMcpBridge: installMcpBridge(),
+    proxyJson: proxyJson(),
   });
 
   // Key to force remount of StepProgress on retry. Starts at 1 so Show/keyed
   // actually renders on first entry — progressKey() must be truthy.
   const [progressKey, setProgressKey] = createSignal(1);
+
+  // Baked-in proxy detected from imported bundle — filled after install when
+  // installMethod is "local" (sandbox image import). Shown on Step 7 so the
+  // user can confirm / override via ClawPage's Proxy button.
+  const [bakedProxy, setBakedProxy] = createSignal("");
+  async function checkBakedProxy() {
+    if (installMethod() !== "local") return;
+    try {
+      const p = await invoke<string>("check_instance_proxy_baked_in", { name: instanceName() });
+      if (p && p.trim()) setBakedProxy(p.trim());
+    } catch { /* ignore — offline VM or first-boot race */ }
+  }
 
   function goToStep(s: number) {
     // Bump progressKey BEFORE transitioning into step 6. Otherwise StepProgress
@@ -189,7 +203,7 @@ export default function InstallWizard(props: {
           {step() === 2 && (
             <StepSystemCheck onReady={() => setSysCheckReady(true)} />
           )}
-          {step() === 3 && <StepNetwork />}
+          {step() === 3 && <StepNetwork onProxyChange={setProxyJson} />}
           {step() === 4 && (
             <StepInstallPlan
               lang={iLang()} installMethod={installMethod} onMethodChange={m => setInstallMethod(m as any)}
@@ -213,7 +227,7 @@ export default function InstallWizard(props: {
             <StepProgress
               state={buildInstallState()} stages={INSTALL_STAGES()}
               retryTrigger={progressKey}
-              onComplete={() => setStep(7)}
+              onComplete={() => { void checkBakedProxy(); setStep(7); }}
               onError={(msg) => setInstallError(msg)}
             />
           )}
@@ -228,6 +242,24 @@ export default function InstallWizard(props: {
                   {(s) => <div class="flex items-center gap-2 text-xs text-green-400 py-0.5"><span>✓</span>{s.label}</div>}
                 </For>
               </div>
+              {/* Baked-in-proxy advisory for sandbox bundle imports. The bundle
+                  carries /etc/profile.d/proxy.sh from the source machine — which
+                  is likely unreachable on the current host's network. Point the
+                  user at ClawPage's Proxy button rather than silently
+                  overwriting; they may be on the same LAN and want to keep it. */}
+              <Show when={bakedProxy()}>
+                <div class="mt-3 p-3 rounded-lg bg-yellow-900/30 border border-yellow-700/50 text-sm">
+                  <div class="text-yellow-400 font-medium mb-1">
+                    {iLang() === "zh-CN" ? "⚠ 检测到导入包自带代理" : "⚠ Imported bundle contains a baked-in proxy"}
+                  </div>
+                  <div class="text-xs text-gray-300 font-mono mb-2">{bakedProxy()}</div>
+                  <div class="text-xs text-gray-400">
+                    {iLang() === "zh-CN"
+                      ? "来自导出机器的代理配置。如果当前网络不同，请在主界面的 \"代理\" 按钮中调整，否则 claw 可能无法连接网络。"
+                      : "This proxy comes from the exporting machine. If you're on a different network, adjust it via the \"Proxy\" button on the main page — the claw may otherwise fail to reach the network."}
+                  </div>
+                </div>
+              </Show>
             </div>
           )}
         </div>

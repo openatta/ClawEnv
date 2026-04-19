@@ -16,6 +16,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::claw::ClawRegistry;
+use crate::platform::download::download_with_progress;
 use crate::config::{keychain, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
 use crate::sandbox::{InstallMode, SandboxType, native_backend, SandboxBackend};
 
@@ -54,105 +55,45 @@ pub async fn has_git() -> bool {
 }
 
 
-/// Pinned dugite-native Git release metadata, loaded from the bundled TOML.
-/// Version bumps happen by editing `assets/git/git-release.toml` — no code
-/// change required.
-///
-/// Only used on macOS/Linux: Windows ships MinGit through a separate
-/// hard-coded URL (see the `#[cfg(target_os = "windows")]` branch of
-/// `install_git`). Gating the struct + impl here keeps the Windows build
-/// under `-D warnings` without a blanket `#[allow(dead_code)]` that
-/// would also hide accidental deadness on macOS/Linux.
+/// Dugite platform key for the current host. Used as the sha256 lookup
+/// key in `[dugite.sha256]` and as the URL template `{platform}` value.
+/// Windows doesn't use dugite (it uses MinGit); callers should cfg-gate.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
-#[allow(dead_code)] // per-platform sha256 fields are only read under the matching #[cfg]
-struct GitRelease {
-    tag: String,                  // dugite release tag, e.g. "2.53.0-3" — URL path
-    upstream_version: String,     // upstream git version, e.g. "2.53.0" — filename
-    commit: String,
-    url_templates: Vec<String>,
-    sha256_macos_arm64: String,
-    sha256_macos_x86_64: String,
-    sha256_linux_arm64: String,
-    sha256_linux_x86_64: String,
+fn dugite_current_platform() -> Result<&'static str> {
+    let arch = std::env::consts::ARCH;
+    #[cfg(target_os = "macos")]
+    match arch {
+        "aarch64" => Ok("macOS-arm64"),
+        "x86_64"  => Ok("macOS-x64"),
+        other => anyhow::bail!("Unsupported macOS architecture: {other}"),
+    }
+    #[cfg(target_os = "linux")]
+    match arch {
+        "aarch64" => Ok("ubuntu-arm64"),
+        "x86_64"  => Ok("ubuntu-x64"),
+        other => anyhow::bail!("Unsupported Linux architecture: {other}"),
+    }
 }
 
+// Back-compat shim so the old call sites below still compile — inlined
+// into install_git.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+struct GitRelease;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl GitRelease {
-    fn load() -> Result<Self> {
-        let src = include_str!("../../../../assets/git/git-release.toml");
-        let t: toml::Table = src.parse()
-            .map_err(|e| anyhow::anyhow!("git-release.toml invalid: {e}"))?;
-        let tag = t.get("tag").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `tag`"))?.to_string();
-        let upstream_version = t.get("upstream_version").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `upstream_version`"))?.to_string();
-        let commit = t.get("commit").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing `commit`"))?.to_string();
-        let url_templates: Vec<String> = t.get("urls")
-            .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        if url_templates.is_empty() {
-            anyhow::bail!("git-release.toml must list at least one URL in top-level `urls`");
-        }
-        let sha = t.get("sha256").and_then(|v| v.as_table())
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing [sha256] table"))?;
-        let get_sha = |k: &str| sha.get(k).and_then(|v| v.as_str())
-            .map(String::from)
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml missing sha256.{k}"));
-        Ok(Self {
-            tag,
-            upstream_version,
-            commit,
-            url_templates,
-            sha256_macos_arm64:  get_sha("macos-arm64")?,
-            sha256_macos_x86_64: get_sha("macos-x86_64")?,
-            sha256_linux_arm64:  get_sha("linux-arm64")?,
-            sha256_linux_x86_64: get_sha("linux-x86_64")?,
-        })
+    fn load() -> Result<Self> { Ok(Self) }
+    fn current_platform(&self) -> Result<(&'static str, String)> {
+        let plat = dugite_current_platform()?;
+        // sha256 lookup key (lowercase "macos-arm64" / "ubuntu-arm64") differs
+        // from the URL platform key ("macOS-arm64" / "ubuntu-arm64") — normalise.
+        let sha_key = plat.replace("macOS", "macos").replace("x64", "x86_64");
+        let sha = crate::config::mirrors_asset::AssetMirrors::get()
+            .expected_sha256("dugite", &sha_key)
+            .ok_or_else(|| anyhow::anyhow!("mirrors.toml missing [dugite.sha256.{sha_key}]"))?;
+        Ok((plat, sha))
     }
-
-    /// Resolve (platform_tag, expected_sha256) for the current host, or bail
-    /// if the target isn't supported (e.g. unknown arch).
-    fn current_platform(&self) -> Result<(&'static str, &str)> {
-        let arch = std::env::consts::ARCH;
-        #[cfg(target_os = "macos")]
-        {
-            match arch {
-                "aarch64" => Ok(("macOS-arm64", self.sha256_macos_arm64.as_str())),
-                "x86_64"  => Ok(("macOS-x64",   self.sha256_macos_x86_64.as_str())),
-                other => anyhow::bail!("Unsupported macOS architecture: {other}"),
-            }
-        }
-        #[cfg(target_os = "linux")]
-        {
-            match arch {
-                "aarch64" => Ok(("ubuntu-arm64", self.sha256_linux_arm64.as_str())),
-                "x86_64"  => Ok(("ubuntu-x64",   self.sha256_linux_x86_64.as_str())),
-                other => anyhow::bail!("Unsupported Linux architecture: {other}"),
-            }
-        }
-        #[cfg(target_os = "windows")]
-        { let _ = arch; anyhow::bail!("Git on Windows is shipped via MinGit, not dugite-native"); }
-    }
-
-    fn render_urls(&self, platform: &str) -> Vec<(String, String)> {
-        // dugite asset filename uses upstream git version (e.g. "2.53.0"),
-        // not the release tag ("2.53.0-3") — that's a dugite-specific
-        // distinction. URL path in turn uses the release tag.
-        let filename = format!(
-            "dugite-native-v{ver}-{commit}-{platform}.tar.gz",
-            ver = self.upstream_version, commit = self.commit, platform = platform,
-        );
-        self.url_templates.iter().map(|tmpl| {
-            let u = tmpl
-                .replace("{tag}",              &self.tag)
-                .replace("{upstream_version}", &self.upstream_version)
-                .replace("{commit}",           &self.commit)
-                .replace("{platform}",         platform)
-                .replace("{filename}",         &filename);
-            (u, filename.clone())
-        }).collect()
+    fn render_urls(&self, platform: &str) -> Result<Vec<(String, String)>> {
+        crate::config::mirrors_asset::AssetMirrors::get().build_urls("dugite", platform)
     }
 }
 
@@ -168,19 +109,28 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        send(tx, "Downloading Git for Windows (MinGit)...", 6, InstallStage::EnsurePrerequisites).await;
         let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "64-bit" };
-        let url = format!(
-            "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-{arch}.zip"
+        // github.com primary, public CN-accessible GitHub mirrors as fallback.
+        // No sha256 pinned for MinGit yet — TLS + HTTP 200 is the safety net.
+        // (See git-release.toml for the dugite sha256 pattern we could adopt.)
+        let base_path = format!(
+            "github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-{arch}.zip"
         );
-        let zip_path = parent.join("git.zip");
+        let urls: Vec<(String, String)> = vec![
+            (format!("https://{base_path}"), String::new()),
+            (format!("https://ghfast.top/https://{base_path}"), String::new()),
+            (format!("https://mirror.ghproxy.com/https://{base_path}"), String::new()),
+        ];
 
-        let status = crate::platform::process::silent_cmd("curl.exe")
-            .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
-            .status().await?;
-        if !status.success() {
-            anyhow::bail!("Failed to download MinGit from {url}");
-        }
+        let bytes = download_with_progress(
+            &urls, None, tx,
+            InstallStage::EnsurePrerequisites,
+            6, 8,
+            &format!("Git for Windows (MinGit-{arch})"),
+        ).await?;
+
+        let zip_path = parent.join("git.zip");
+        tokio::fs::write(&zip_path, &bytes).await?;
 
         send(tx, "Extracting Git...", 8, InstallStage::EnsurePrerequisites).await;
         let git_str = git_dir.to_string_lossy().replace('/', "\\");
@@ -204,18 +154,22 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     {
         let release = GitRelease::load()?;
         let (platform, expected_sha) = release.current_platform()?;
-        let urls = release.render_urls(platform);
+        let urls = release.render_urls(platform)?;
         let (_url, filename) = urls.first()
-            .ok_or_else(|| anyhow::anyhow!("git-release.toml produced no URLs"))?;
+            .ok_or_else(|| anyhow::anyhow!("mirrors.toml [dugite] produced no URLs"))?;
+        let filename = filename.clone();
 
-        send(tx, &format!("Downloading portable Git ({platform})..."), 6, InstallStage::EnsurePrerequisites).await;
-
-        // Fetch each URL in order, verifying sha256. Uses the same resilient
-        // download pattern as the Lima installer.
-        let bytes = download_git_tarball(&urls, expected_sha).await?;
+        // Streaming download with throttled progress, per-chunk stall detection,
+        // and sha256 verification. Mirror fallback is handled inside.
+        let bytes = download_with_progress(
+            &urls, Some(&expected_sha), tx,
+            InstallStage::EnsurePrerequisites,
+            6, 8,
+            &format!("portable Git ({platform})"),
+        ).await?;
 
         send(tx, "Extracting Git...", 8, InstallStage::EnsurePrerequisites).await;
-        let tar_path = parent.join(filename);
+        let tar_path = parent.join(&filename);
         tokio::fs::write(&tar_path, &bytes).await?;
 
         // Dugite's tarball layout is a flat ./bin/ ./libexec/ ./share/ root
@@ -264,37 +218,56 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     Ok(())
 }
 
-/// Try each mirror URL in order, return the first response whose bytes match
-/// the expected sha256. Mirrors checksum-mismatches to the next candidate so
-/// a compromised mirror can't inject bad binaries — identical shape to the
-/// Lima downloader.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-async fn download_git_tarball(urls: &[(String, String)], expected_sha256: &str) -> Result<Vec<u8>> {
-    use sha2::{Digest, Sha256};
-    let mut last_err: Option<String> = None;
-    for (url, _filename) in urls {
-        tracing::info!("Trying git tarball URL: {url}");
-        match reqwest::get(url).await {
-            Err(e) => { last_err = Some(format!("{url}: {e}")); continue; }
-            Ok(r) if !r.status().is_success() => {
-                last_err = Some(format!("{url}: HTTP {}", r.status())); continue;
-            }
-            Ok(r) => match r.bytes().await {
-                Err(e) => { last_err = Some(format!("{url}: body read: {e}")); continue; }
-                Ok(bytes) => {
-                    let hex = hex::encode(Sha256::digest(&bytes));
-                    if hex == expected_sha256 {
-                        return Ok(bytes.to_vec());
-                    }
-                    last_err = Some(format!("{url}: checksum mismatch"));
-                }
+/// Build the URL list for Node.js downloads via the unified asset mirror
+/// registry (`assets/mirrors.toml`). Platform keys: `darwin-arm64` /
+/// `darwin-x64` / `win-arm64` / `win-x64`. Extension is `tar.gz` on unix,
+/// `zip` on Windows.
+///
+/// The primary_base arg (from `mirrors.nodejs_dist_url()` config) is used
+/// to prepend a user-pinned mirror ahead of the bundled list.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(super) fn build_node_urls(primary_base: &str, platform_with_ext: &str) -> Result<Vec<(String, String)>> {
+    use crate::config::mirrors_asset::AssetMirrors;
+    // `platform_with_ext` is something like "darwin-arm64.tar.gz" or
+    // "win-arm64.zip" — split on the last dot to separate platform from ext.
+    let (platform, ext) = match platform_with_ext.rsplit_once('.') {
+        Some((p, e)) if p.contains('-') => {
+            // tar.gz → "darwin-arm64.tar" + "gz" — need to re-split.
+            match p.rsplit_once('.') {
+                Some((pp, "tar")) => (pp, format!("tar.{e}")),
+                _ => (p, e.to_string()),
             }
         }
+        _ => anyhow::bail!("malformed node platform key: {platform_with_ext}"),
+    };
+    let mirrors = AssetMirrors::get();
+    // AssetMirrors templates use {platform} and {ext}; pass platform and
+    // rely on the loader to substitute via its generic scalar-var mechanism.
+    // `ext` isn't a section field by default — we synthesise it.
+    let mut urls = mirrors.build_urls("node", platform)?;
+    // Substitute {ext} in each URL manually since it's not a section scalar.
+    for (u, _) in urls.iter_mut() {
+        *u = u.replace("{ext}", &ext);
     }
-    anyhow::bail!(
-        "All git download URLs failed. Last error: {}",
-        last_err.as_deref().unwrap_or("(no URLs tried)")
-    )
+    // User-pinned primary base takes precedence if non-default.
+    if primary_base != "https://nodejs.org/dist"
+        && !primary_base.is_empty()
+    {
+        if let Some((first_url, first_file)) = urls.first().cloned() {
+            // Rewrite the first url's base to primary_base.
+            let replaced = first_url.replacen(
+                "https://nodejs.org/dist",
+                primary_base.trim_end_matches('/'),
+                1,
+            );
+            urls.insert(0, (replaced, first_file));
+        }
+    }
+    // Also fix the filename returned in the pair (loader embeds {ext} raw).
+    for (_, f) in urls.iter_mut() {
+        *f = f.replace("{ext}", &ext);
+    }
+    Ok(urls)
 }
 
 /// Node binary path inside ClawEnv's private Node.js.
@@ -560,6 +533,7 @@ pub async fn install_native(
         },
         resources: ResourceConfig::default(),
         browser: Default::default(),
+        proxy: None,
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
     })?;
@@ -722,6 +696,7 @@ async fn install_from_bundle(
         },
         resources: ResourceConfig::default(),
         browser: Default::default(),
+        proxy: None,
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
     })?;
@@ -730,49 +705,40 @@ async fn install_from_bundle(
     Ok(())
 }
 
-// The test module references `GitRelease` which is cfg-gated to
-// macos/linux. Gate the tests the same way so the Windows build doesn't
-// drag in a non-existent symbol.
+// Regression tests for the dugite URL path+filename split. Historically
+// conflated the release tag ("2.53.0-3") with the upstream version ("2.53.0")
+// and produced 404s. Now driven by `mirrors.toml` via `AssetMirrors`.
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod git_release_tests {
-    use super::GitRelease;
+    use crate::config::mirrors_asset::AssetMirrors;
 
-    // Regression guard: dugite-native's release tag (e.g. "2.53.0-3") carries
-    // a build-counter suffix that is NOT present in asset filenames ("2.53.0").
-    // Conflating the two produces URLs like /download/v2.53.0-3/dugite-...-
-    // v2.53.0-3-f49d009-macOS-arm64.tar.gz which 404 on the server.
     #[test]
-    fn release_toml_renders_dugite_url_correctly() {
-        let release = GitRelease::load().expect("git-release.toml must parse");
-        assert!(!release.tag.is_empty(), "tag must not be empty");
-        assert!(!release.upstream_version.is_empty(), "upstream_version must not be empty");
-        assert!(!release.commit.is_empty(), "commit must not be empty");
-        assert_eq!(release.sha256_macos_arm64.len(), 64);
-
-        let urls = release.render_urls("macOS-arm64");
+    fn mirrors_toml_renders_dugite_url_correctly() {
+        let m = AssetMirrors::get();
+        let urls = m.build_urls("dugite", "macOS-arm64").expect("dugite urls");
         assert!(!urls.is_empty(), "urls array must have at least one entry");
         let (url, filename) = &urls[0];
 
-        // Path must carry the full release tag…
+        // Path must carry the full release tag "v2.53.0-3/"...
         assert!(
-            url.contains(&format!("/download/v{}/", release.tag)),
-            "URL path should use release tag 'v{}' but got: {url}",
-            release.tag
+            url.contains("/download/v2.53.0-3/"),
+            "URL should use release tag 'v2.53.0-3': got {url}"
         );
-        // …while the asset filename uses only the upstream git version.
+        // ...while filename uses upstream version "v2.53.0-"
         assert!(
-            filename.contains(&format!("v{}-", release.upstream_version)),
-            "filename should use upstream_version 'v{}' but got: {filename}",
-            release.upstream_version
+            filename.contains("v2.53.0-"),
+            "filename should use upstream version 'v2.53.0-': got {filename}"
         );
-        // And must NOT embed the tag's build-counter suffix inside the filename,
-        // which was the exact regression that produced 404s.
+        // Regression guard: filename must NOT embed the build-counter suffix
+        // "2.53.0-3" inside it (the exact 404 bug).
         assert!(
-            !filename.contains(&release.tag) || release.tag == release.upstream_version,
-            "filename must not contain the full dugite tag '{}' — that was the 404 bug. \
-             Got: {filename}",
-            release.tag
+            !filename.contains("v2.53.0-3"),
+            "filename must not contain tag 'v2.53.0-3': got {filename}"
         );
         assert!(filename.ends_with("-macOS-arm64.tar.gz"));
+
+        // sha256 pinned
+        let sha = m.expected_sha256("dugite", "macos-arm64").expect("sha256");
+        assert_eq!(sha.len(), 64);
     }
 }

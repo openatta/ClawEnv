@@ -1,35 +1,37 @@
 //! macOS-specific Node.js installation for Native mode.
 //!
-//! Downloads .tar.gz from nodejs.org, extracts to ~/.clawenv/node/.
-//! No admin privileges needed — fully self-contained in user directory.
+//! Streams the .tar.gz from nodejs.org (with CN mirror fallback) and
+//! extracts into ~/.clawenv/node/. No admin privileges — fully self-
+//! contained in the user directory.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use super::{InstallProgress, InstallStage, send, clawenv_node_dir, ensure_node_in_path};
+use super::{
+    build_node_urls, clawenv_node_dir, ensure_node_in_path, send,
+    InstallProgress, InstallStage,
+};
+use crate::platform::download::download_with_progress;
 
 pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
-    send(tx, "Downloading Node.js for macOS...", 14, InstallStage::EnsurePrerequisites).await;
-
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         _ => "x64",
     };
-    let version = "v22.16.0";
-    let url = format!("{nodejs_dist_base}/{version}/node-{version}-darwin-{arch}.tar.gz");
+    let platform_ext = format!("darwin-{arch}.tar.gz");
+    let urls = build_node_urls(nodejs_dist_base, &platform_ext)?;
 
     let node_dir = clawenv_node_dir();
     tokio::fs::create_dir_all(&node_dir).await?;
-
     let tar_path = node_dir.parent().unwrap_or(&node_dir).join("node.tar.gz");
 
-    let status = tokio::process::Command::new("curl")
-        .args(["-fSL", "-o", &tar_path.to_string_lossy(), &url])
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("Failed to download Node.js from {url}");
-    }
+    let bytes = download_with_progress(
+        &urls, None, tx,
+        InstallStage::EnsurePrerequisites,
+        14, 18,
+        &format!("Node.js darwin-{arch}"),
+    ).await?;
+    tokio::fs::write(&tar_path, &bytes).await?;
 
     send(tx, "Extracting Node.js...", 18, InstallStage::EnsurePrerequisites).await;
 
@@ -39,7 +41,6 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
         .status()
         .await?;
 
-    // Cleanup
     tokio::fs::remove_file(&tar_path).await.ok();
 
     if !status.success() {

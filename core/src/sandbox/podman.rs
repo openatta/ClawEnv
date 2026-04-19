@@ -205,20 +205,11 @@ impl SandboxBackend for PodmanBackend {
                         let dest = cache_dir.join(filename);
 
                         if !dest.exists() {
-                            tracing::info!("Downloading image from {url}...");
-                            let resp = reqwest::get(url).await?;
-                            if !resp.status().is_success() {
-                                anyhow::bail!("Download failed: HTTP {}", resp.status());
-                            }
-                            let bytes = resp.bytes().await?;
-
-                            let hash = sha256_hex(&bytes);
-                            if hash != *checksum_sha256 {
-                                anyhow::bail!(
-                                    "Checksum mismatch: expected {checksum_sha256}, got {hash}"
-                                );
-                            }
-
+                            tracing::info!(target: "clawenv::proxy", "Downloading image from {url}...");
+                            let urls = vec![(url.to_string(), String::new())];
+                            let bytes = crate::platform::download::download_silent(
+                                &urls, Some(checksum_sha256.as_str()), 30,
+                            ).await?;
                             let mut file = std::fs::File::create(&dest)?;
                             file.write_all(&bytes)?;
                         }
@@ -483,6 +474,7 @@ fn parse_mem_to_mb(s: &str) -> u64 {
     }
 }
 
+#[allow(dead_code)]
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
     let hash = Sha256::digest(data);

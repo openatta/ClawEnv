@@ -57,6 +57,15 @@ pub struct BundleManifest {
     /// "windows-aarch64", "linux-x86_64"). Informational — cross-arch
     /// import isn't blocked by this field, just flagged to the user.
     pub source_platform: String,
+
+    /// Whether the source machine had a proxy configured when the bundle
+    /// was produced. The bundle itself is proxy-clean (export scrubs
+    /// `/etc/profile.d/proxy.sh`), but this flag lets the import wizard
+    /// proactively prompt the user for proxy config — common when
+    /// migrating to a different network. `#[serde(default)] = false`
+    /// keeps schema_version=1 compatible with pre-v0.2.8 bundles.
+    #[serde(default)]
+    pub proxy_was_configured: bool,
 }
 
 impl BundleManifest {
@@ -259,6 +268,10 @@ impl BundleManifest {
     /// (now, UTC RFC-3339), `clawenv_version` (from Cargo pkg) and
     /// `source_platform` from the runtime.
     pub fn build(claw_type: &str, claw_version: &str, sandbox_type: &str) -> Self {
+        Self::build_with_proxy(claw_type, claw_version, sandbox_type, false)
+    }
+
+    pub fn build_with_proxy(claw_type: &str, claw_version: &str, sandbox_type: &str, proxy_was_configured: bool) -> Self {
         let created_at = chrono::Utc::now().to_rfc3339();
         let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
         Self {
@@ -269,6 +282,7 @@ impl BundleManifest {
             claw_version: claw_version.to_string(),
             sandbox_type: sandbox_type.to_string(),
             source_platform: platform,
+            proxy_was_configured,
         }
     }
 }
@@ -287,6 +301,7 @@ mod tests {
             claw_version: "v0.10.0".into(),
             sandbox_type: "lima-alpine".into(),
             source_platform: "darwin-aarch64".into(),
+            proxy_was_configured: false,
         }
     }
 

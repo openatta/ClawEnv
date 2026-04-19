@@ -29,87 +29,48 @@ pub fn init_lima_env() {
     std::env::set_var("LIMA_HOME", &home);
 }
 
-/// Pinned Lima release metadata, loaded from the bundled TOML file.
-/// Version bumps are done by editing `assets/lima/lima-release.toml` — no Rust
-/// code change required.
-struct LimaRelease {
-    version: String,
-    sha256_arm64: String,
-    sha256_x86_64: String,
-    url_templates: Vec<String>,
-}
+/// Lima release metadata now lives in the unified `assets/mirrors.toml`
+/// under `[lima]`. The loader handles URL templates + sha256 via
+/// `AssetMirrors::build_urls` / `expected_sha256`. Ensure_prerequisites
+/// uses `download_silent` (no progress channel available from the
+/// sandbox trait today) which still carries stall detection + mirror
+/// fallback + checksum verify.
+struct LimaRelease;
 
 impl LimaRelease {
-    fn load() -> Result<Self> {
-        let toml_src = include_str!("../../../assets/lima/lima-release.toml");
-        let table: toml::Table = toml_src.parse()
-            .map_err(|e| anyhow!("lima-release.toml is invalid: {e}"))?;
+    fn load() -> Result<Self> { Ok(Self) }
 
-        let version = table.get("version").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("lima-release.toml missing `version`"))?
-            .to_string();
-        let sha = table.get("sha256").and_then(|v| v.as_table())
-            .ok_or_else(|| anyhow!("lima-release.toml missing [sha256] table"))?;
-        let sha256_arm64 = sha.get("darwin-arm64").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("lima-release.toml missing sha256.darwin-arm64"))?
-            .to_string();
-        let sha256_x86_64 = sha.get("darwin-x86_64").and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow!("lima-release.toml missing sha256.darwin-x86_64"))?
-            .to_string();
-
-        let url_templates: Vec<String> = table.get("urls")
-            .and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
-            .unwrap_or_default();
-        if url_templates.is_empty() {
-            anyhow::bail!("lima-release.toml must list at least one download URL in `urls`");
-        }
-
-        Ok(Self { version, sha256_arm64, sha256_x86_64, url_templates })
+    /// Current arch → (platform key for filename, sha256 hex).
+    fn current_arch(&self) -> Result<(&'static str, String)> {
+        let plat = match std::env::consts::ARCH {
+            "aarch64" => "Darwin-arm64",
+            "x86_64"  => "Darwin-x86_64",
+            other => anyhow::bail!("Unsupported architecture for Lima: {other}"),
+        };
+        let sha = crate::config::mirrors_asset::AssetMirrors::get()
+            .expected_sha256("lima", &plat.to_lowercase())
+            .ok_or_else(|| anyhow!("mirrors.toml missing [lima.sha256.{}]", plat.to_lowercase()))?;
+        Ok((plat, sha))
     }
 
-    /// Render URL templates by substituting {version} and {filename}.
-    fn render_urls(&self, filename: &str) -> Vec<String> {
-        self.url_templates.iter()
-            .map(|t| t.replace("{version}", &self.version).replace("{filename}", filename))
-            .collect()
+    fn render_urls(&self, platform: &str) -> Result<Vec<(String, String)>> {
+        crate::config::mirrors_asset::AssetMirrors::get().build_urls("lima", platform)
     }
-}
 
-/// Try each URL in order, verifying sha256 against the expected value.
-/// Returns the first URL whose download matches the checksum. Any HTTP error,
-/// body read failure, or checksum mismatch moves on to the next URL.
-async fn download_with_fallback(urls: &[String], expected_sha256: &str) -> Result<Vec<u8>> {
-    let mut last_err: Option<String> = None;
-    for url in urls {
-        tracing::info!("Trying {url}");
-        match reqwest::get(url).await {
-            Err(e) => { last_err = Some(format!("{url}: request failed: {e}")); continue; }
-            Ok(resp) if !resp.status().is_success() => {
-                last_err = Some(format!("{url}: HTTP {}", resp.status()));
-                continue;
-            }
-            Ok(resp) => {
-                match resp.bytes().await {
-                    Err(e) => { last_err = Some(format!("{url}: body read failed: {e}")); continue; }
-                    Ok(bytes) => {
-                        let actual = sha256_hex(&bytes);
-                        if actual == expected_sha256 {
-                            tracing::info!("Downloaded from {url} ({} bytes, sha256 OK)", bytes.len());
-                            return Ok(bytes.to_vec());
-                        }
-                        last_err = Some(format!(
-                            "{url}: checksum mismatch (expected {expected_sha256}, got {actual})"
-                        ));
-                    }
-                }
-            }
-        }
+    fn version(&self) -> String {
+        let m = crate::config::mirrors_asset::AssetMirrors::get();
+        // Read version directly from raw table — exposed as raw read via
+        // build_urls side effect, but we need it for logging/display. The
+        // loader doesn't expose a scalar-get today; quick access:
+        m.build_urls("lima", "Darwin-arm64")
+            .ok()
+            .and_then(|urls| urls.first().and_then(|(u, _)| {
+                u.split("/download/v").nth(1)
+                 .and_then(|s| s.split('/').next())
+                 .map(String::from)
+            }))
+            .unwrap_or_else(|| "?".into())
     }
-    anyhow::bail!(
-        "All download URLs failed. Last error: {}",
-        last_err.as_deref().unwrap_or("(no URLs tried)")
-    )
 }
 
 pub struct LimaBackend {
@@ -217,20 +178,10 @@ impl LimaBackend {
             }
         }
 
-        tracing::info!("Downloading image from {url}...");
-        let resp = reqwest::get(url).await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("Download failed: HTTP {}", resp.status());
-        }
-        let bytes = resp.bytes().await?;
-
-        // Verify checksum
-        let hash = sha256_hex(&bytes);
-        if hash != checksum_sha256 {
-            anyhow::bail!(
-                "Checksum mismatch: expected {checksum_sha256}, got {hash}"
-            );
-        }
+        tracing::info!(target: "clawenv::proxy", "Downloading image from {url}...");
+        // Stall-detecting single-URL download with sha256 verify.
+        let urls = vec![(url.to_string(), String::new())];
+        let bytes = crate::platform::download::download_silent(&urls, Some(checksum_sha256), 30).await?;
 
         let mut file = std::fs::File::create(&dest)?;
         file.write_all(&bytes)?;
@@ -267,8 +218,7 @@ fn parse_lima_cpu_usage(line1: &str, line2: &str) -> f32 {
 
 fn sha256_hex(data: &[u8]) -> String {
     use sha2::{Sha256, Digest};
-    let hash = Sha256::digest(data);
-    hex::encode(hash)
+    hex::encode(Sha256::digest(data))
 }
 
 /// Read the last `max_bytes` of a file as a lossy UTF-8 string. Returns empty
@@ -597,16 +547,12 @@ impl SandboxBackend for LimaBackend {
         }
 
         let release = LimaRelease::load()?;
-        let (arch_tag, expected_sha) = match std::env::consts::ARCH {
-            "aarch64" => ("arm64", release.sha256_arm64.as_str()),
-            "x86_64" => ("x86_64", release.sha256_x86_64.as_str()),
-            other => anyhow::bail!("Unsupported architecture for Lima: {other}"),
-        };
+        let (platform, expected_sha) = release.current_arch()?;
+        let urls = release.render_urls(platform)?;
+        let filename = urls.first().map(|(_, f)| f.clone())
+            .unwrap_or_else(|| format!("lima-Darwin-{platform}.tar.gz"));
 
-        let filename = format!("lima-{ver}-Darwin-{arch_tag}.tar.gz", ver = release.version);
-        let urls = release.render_urls(&filename);
-
-        tracing::info!("Installing private Lima {} into ~/.clawenv/ ...", release.version);
+        tracing::info!(target: "clawenv::proxy", "Installing private Lima {} into ~/.clawenv/ ...", release.version());
 
         let clawenv_root = dirs::home_dir()
             .ok_or_else(|| anyhow!("Cannot find home directory"))?
@@ -617,7 +563,7 @@ impl SandboxBackend for LimaBackend {
         tokio::fs::create_dir_all(&cache_dir).await?;
         let tarball = cache_dir.join(&filename);
 
-        let bytes = download_with_fallback(&urls, expected_sha).await?;
+        let bytes = crate::platform::download::download_silent(&urls, Some(&expected_sha), 15).await?;
         tokio::fs::write(&tarball, &bytes).await
             .map_err(|e| anyhow!("Writing Lima tarball to cache failed: {e}"))?;
 
@@ -654,7 +600,7 @@ impl SandboxBackend for LimaBackend {
             .status()
             .await;
 
-        tracing::info!("Lima {} installed at {}", release.version, bin.display());
+        tracing::info!("Lima {} installed at {}", release.version(), bin.display());
         Ok(())
     }
 
@@ -974,20 +920,21 @@ impl SandboxBackend for LimaBackend {
 
 #[cfg(test)]
 mod release_tests {
-    use super::*;
+    use crate::config::mirrors_asset::AssetMirrors;
 
-    // Guards against a TOML layout regression: if `urls` is placed after
-    // `[sha256]` it becomes `sha256.urls` and download fails at runtime.
+    // Ensure mirrors.toml [lima] section renders sensible URLs.
     #[test]
-    fn release_toml_parses_with_top_level_urls() {
-        let r = LimaRelease::load().expect("lima-release.toml must parse");
-        assert!(!r.version.is_empty(), "version missing");
-        assert_eq!(r.sha256_arm64.len(), 64, "arm64 sha256 must be hex-64");
-        assert_eq!(r.sha256_x86_64.len(), 64, "x86_64 sha256 must be hex-64");
-        assert!(!r.url_templates.is_empty(), "urls must be a top-level array");
+    fn mirrors_toml_renders_lima_url_correctly() {
+        let m = AssetMirrors::get();
+        let urls = m.build_urls("lima", "Darwin-arm64").expect("lima urls");
+        assert!(!urls.is_empty(), "urls must not be empty");
+        let (url, filename) = &urls[0];
+        assert!(url.contains("Darwin-arm64"), "URL should include platform key: {url}");
+        assert!(filename.contains("Darwin-arm64"), "filename should include platform key: {filename}");
+        assert!(filename.ends_with(".tar.gz"));
 
-        let urls = r.render_urls("lima-x.y.z-Darwin-arm64.tar.gz");
-        assert!(urls[0].contains(&r.version), "template {{version}} substitution failed");
-        assert!(urls[0].contains("lima-x.y.z-Darwin-arm64.tar.gz"), "template {{filename}} substitution failed");
+        // sha256 pinned
+        let sha = m.expected_sha256("lima", "darwin-arm64").expect("sha");
+        assert_eq!(sha.len(), 64);
     }
 }

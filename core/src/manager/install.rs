@@ -213,18 +213,15 @@ pub async fn install(
     if !vm_ready {
         send(&tx, "Creating VM (installing system packages)...", 12, InstallStage::CreateVm).await;
 
-        let proxy_config = &config.config().clawenv.proxy;
-
         let mut provision_preamble = String::new();
-
-        // Proxy exports
-        if proxy_config.enabled && !proxy_config.http_proxy.is_empty() {
-            let https = if proxy_config.https_proxy.is_empty() { &proxy_config.http_proxy } else { &proxy_config.https_proxy };
-            provision_preamble.push_str(&format!(
-                "export http_proxy=\"{}\" https_proxy=\"{}\" HTTP_PROXY=\"{}\" HTTPS_PROXY=\"{}\" no_proxy=\"localhost,127.0.0.1\"\n",
-                proxy_config.http_proxy, https, proxy_config.http_proxy, https
-            ));
-        }
+        // Phase 2 (docs/23-proxy-architecture.md §9): we **no longer inject
+        // proxy exports into the provision_preamble at VM create time**.
+        // Proxy is now applied via `apply_to_sandbox` as a post-boot hook
+        // (see the post-create block below and `manager::instance::start_instance`).
+        //
+        // This unifies the install-time and runtime paths, eliminates the
+        // "install bakes old proxy that survives export" class of bugs, and
+        // keeps VM images clean for export/import.
 
         // Mirror sources (Alpine APK + npm registry)
         provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable"));
@@ -316,6 +313,38 @@ pub async fn install(
     }
     if !vm_ok {
         anyhow::bail!("VM is not reachable after 20 attempts. Check sandbox status.");
+    }
+
+    // Apply proxy inside the running VM using the unified resolver. Runs
+    // BEFORE apk/npm so any outbound traffic from those uses the proxy.
+    // At install time we don't have a per-VM InstanceConfig yet (it's
+    // saved at the end of install), so we synthesise a placeholder that
+    // resolves to "inherit global" — the resolver will fall through to
+    // config.toml.clawenv.proxy or OS detection.
+    send(&tx, "Configuring proxy...", 39, InstallStage::ConfigureProxy).await;
+    let placeholder = InstanceConfig {
+        name: opts.instance_name.clone(),
+        claw_type: opts.claw_type.clone(),
+        version: "0".into(),
+        sandbox_type,
+        sandbox_id: sandbox_id.clone(),
+        created_at: String::new(),
+        last_upgraded_at: String::new(),
+        gateway: Default::default(),
+        resources: Default::default(),
+        browser: Default::default(),
+        proxy: None, // no per-VM override yet
+        cached_latest_version: String::new(),
+        cached_version_check_at: String::new(),
+    };
+    let scope = crate::config::proxy_resolver::Scope::RuntimeSandbox {
+        instance: &placeholder,
+        backend: backend.as_ref(),
+    };
+    if let Some(triple) = scope.resolve(config).await {
+        crate::config::proxy_resolver::apply_to_sandbox(&triple, backend.as_ref()).await?;
+    } else {
+        crate::config::proxy_resolver::clear_sandbox(backend.as_ref()).await.ok();
     }
 
     // Apply mirrors inside the running VM (more reliable than provision-time)
@@ -594,6 +623,7 @@ if p.exists():
             vnc_ws_port: allocate_port(opts.gateway_port, 4),
             ..Default::default()
         },
+        proxy: None,
         cached_latest_version: String::new(),
         cached_version_check_at: String::new(),
     })?;

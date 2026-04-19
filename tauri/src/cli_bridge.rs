@@ -237,10 +237,31 @@ pub async fn run_cli_streaming<F>(
 where
     F: FnOnce(u32),
 {
+    run_cli_streaming_with_env(args, &[], tx, on_spawn).await
+}
+
+/// Same as `run_cli_streaming`, but injects additional environment variables
+/// into the spawned child process. The parent's env is unchanged.
+///
+/// The install path uses this to pass the wizard-configured HTTP_PROXY /
+/// HTTPS_PROXY / NO_PROXY into `clawcli` without persisting them to
+/// config.toml — the proxy applies to this one install and goes away.
+pub async fn run_cli_streaming_with_env<F>(
+    args: &[&str],
+    env_overrides: &[(&str, String)],
+    tx: mpsc::Sender<CliEvent>,
+    on_spawn: F,
+) -> Result<Value>
+where
+    F: FnOnce(u32),
+{
     let _instance_guard = acquire_instance_lock(args).await;
     let binary = cli_binary_path();
     let mut cmd = new_cli_command(&binary);
     cmd.arg("--json").args(args);
+    for (k, v) in env_overrides {
+        cmd.env(k, v);
+    }
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     cmd.kill_on_drop(true);
 

@@ -1,22 +1,25 @@
 //! Windows-specific Node.js installation for Native mode.
 //!
-//! Downloads .zip from nodejs.org, extracts to ~/.clawenv/node/ using PowerShell.
-//! No admin privileges needed — fully self-contained in user directory.
+//! Streams .zip from nodejs.org (with CN mirror fallback), extracts to
+//! ~/.clawenv/node/ using PowerShell Expand-Archive. No admin privileges
+//! needed — fully self-contained in user directory.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
 
-use super::{InstallProgress, InstallStage, send, clawenv_node_dir, ensure_node_in_path};
+use super::{
+    build_node_urls, clawenv_node_dir, ensure_node_in_path, send,
+    InstallProgress, InstallStage,
+};
+use crate::platform::download::download_with_progress;
 
 pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
-    send(tx, "Downloading Node.js for Windows...", 14, InstallStage::EnsurePrerequisites).await;
-
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         _ => "x64",
     };
-    let version = "v22.16.0";
-    let url = format!("{nodejs_dist_base}/{version}/node-{version}-win-{arch}.zip");
+    let platform_ext = format!("win-{arch}.zip");
+    let urls = build_node_urls(nodejs_dist_base, &platform_ext)?;
 
     let node_dir = clawenv_node_dir();
     let parent = node_dir.parent().unwrap_or(&node_dir).to_path_buf();
@@ -24,14 +27,13 @@ pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base
     let tmp_dir = parent.join("node-tmp");
     let bak_dir = parent.join("node.bak");
 
-    // Download
-    let status = crate::platform::process::silent_cmd("curl.exe")
-        .args(["-fSL", "-o", &zip_path.to_string_lossy(), &url])
-        .status()
-        .await?;
-    if !status.success() {
-        anyhow::bail!("Failed to download Node.js from {url}");
-    }
+    let bytes = download_with_progress(
+        &urls, None, tx,
+        InstallStage::EnsurePrerequisites,
+        14, 18,
+        &format!("Node.js win-{arch}"),
+    ).await?;
+    tokio::fs::write(&zip_path, &bytes).await?;
 
     send(tx, "Extracting Node.js (this may take a moment)...", 18, InstallStage::EnsurePrerequisites).await;
 

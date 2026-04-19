@@ -33,12 +33,28 @@ pub fn get_api_key(instance_name: &str) -> Result<String> {
     retrieve(&format!("apikey-{instance_name}"))
 }
 
-/// Store proxy password
+/// Store proxy password (global / Installer scope)
 pub fn store_proxy_password(password: &str) -> Result<()> {
     store("proxy-password", password)
 }
 
-/// Retrieve proxy password
+/// Retrieve proxy password (global / Installer scope)
 pub fn get_proxy_password() -> Result<String> {
     retrieve("proxy-password")
+}
+
+/// Store proxy password for a specific VM instance. Separate namespace
+/// from the global password (`proxy-password`) so per-VM credentials
+/// don't leak across instances. Deleted automatically when the instance
+/// is removed.
+pub fn store_instance_proxy_password(instance: &str, password: &str) -> Result<()> {
+    store(&format!("proxy-password-{instance}"), password)
+}
+
+pub fn get_instance_proxy_password(instance: &str) -> Result<String> {
+    retrieve(&format!("proxy-password-{instance}"))
+}
+
+pub fn delete_instance_proxy_password(instance: &str) -> Result<()> {
+    delete(&format!("proxy-password-{instance}"))
 }

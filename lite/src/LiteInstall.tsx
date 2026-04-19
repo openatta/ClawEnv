@@ -93,6 +93,9 @@ export default function LiteInstall(props: Props) {
         }
       }
 
+      // Lite already wrote proxy to config.toml via save_settings above, so
+      // the CLI's startup inject_proxy_env picks it up — no need to also pass
+      // proxyJson here. null tells the IPC "no ephemeral override".
       await invoke("install_openclaw", {
         instanceName: "default",
         clawType: "openclaw",
@@ -103,6 +106,7 @@ export default function LiteInstall(props: Props) {
         installMcpBridge: !pkg.is_native,
         gatewayPort: 0,
         image: pkg.path,
+        proxyJson: null,
       });
     } catch (e) {
       setInstallError(String(e));

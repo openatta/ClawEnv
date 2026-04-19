@@ -104,7 +104,44 @@ pub struct InstanceConfig {
     pub cached_latest_version: String,
     #[serde(default)]
     pub cached_version_check_at: String,
+    /// Per-instance proxy config. `None` = inherit global `clawenv.proxy`
+    /// from config.toml. Set to `Some(...)` via the ClawPage proxy modal
+    /// when the user wants a different proxy for this specific instance
+    /// (typical case: exported from machine A, imported on machine B with
+    /// a different network).
+    #[serde(default)]
+    pub proxy: Option<InstanceProxyConfig>,
 }
+
+/// Per-instance proxy setting. Distinct from the global `ProxyConfig`
+/// because the user's intent is different: global is "default for all
+/// new installs"; per-instance is "this specific VM needs X, regardless
+/// of what the host has globally".
+///
+/// `mode` = None/SyncHost/Manual. For `SyncHost`, `http_proxy` holds
+/// the last-detected host proxy URL at apply-time (rewritten with the
+/// backend-specific host IP, e.g. `http://host.lima.internal:7890`).
+/// We store it so the config.toml is self-documenting — a user reading
+/// the file can see what's actually being used without re-running detect.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct InstanceProxyConfig {
+    #[serde(default = "default_instance_proxy_mode")]
+    pub mode: String, // "none" | "sync-host" | "manual"
+    #[serde(default)]
+    pub http_proxy: String,
+    #[serde(default)]
+    pub https_proxy: String,
+    #[serde(default = "default_no_proxy")]
+    pub no_proxy: String,
+    /// `true` when the proxy requires HTTP basic auth. Password lives in
+    /// keychain (`proxy-password-<instance_name>`), never in config.toml.
+    #[serde(default)]
+    pub auth_required: bool,
+    #[serde(default)]
+    pub auth_user: String,
+}
+
+fn default_instance_proxy_mode() -> String { "none".into() }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GatewayConfig {

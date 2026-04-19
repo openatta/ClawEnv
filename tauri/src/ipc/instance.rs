@@ -90,9 +90,52 @@ pub async fn open_install_window(app: tauri::AppHandle, instance_name: Option<St
 
 #[tauri::command]
 pub async fn start_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
+    // Refresh the GUI process's env from the OS system proxy before spawning
+    // the CLI (which spawns the native claw). Covers the case where the user
+    // toggled Clash / changed System Preferences AFTER ClawEnv started — the
+    // original startup-time injection would be stale, and a Native claw
+    // would see the old proxy. Sandbox instances don't strictly need this
+    // (their proxy.sh is written per-instance), but it's a cheap call and
+    // keeps behavior uniform.
+    refresh_system_proxy_env();
     cli_bridge::run_cli(&["start", &name]).await.map_err(|e| e.to_string())?;
     emit_instance_changed(&app, InstanceChanged::simple(InstanceAction::Start, &name));
     Ok(())
+}
+
+/// Re-query the OS system proxy and reinject into this process's env
+/// using the unified `proxy_resolver`. Called on every start_instance
+/// so Native claws see fresh OS proxy if the user toggled Clash between
+/// app launch and claw start. When `config.toml.proxy.enabled` is true
+/// the explicit config wins and we leave env alone.
+fn refresh_system_proxy_env() {
+    use clawenv_core::config::{proxy_resolver, ConfigManager};
+    if let Ok(config) = ConfigManager::load() {
+        if config.config().clawenv.proxy.enabled
+            && !config.config().clawenv.proxy.http_proxy.is_empty()
+        {
+            return; // explicit config wins
+        }
+    }
+    if let Some(v) = crate::ipc::detect_system_proxy_native_only() {
+        let http  = v.get("http_proxy").and_then(|s| s.as_str()).unwrap_or("");
+        let https = v.get("https_proxy").and_then(|s| s.as_str()).unwrap_or("");
+        let no_p  = v.get("no_proxy").and_then(|s| s.as_str()).unwrap_or("localhost,127.0.0.1");
+        let eh = if http.is_empty()  { https } else { http };
+        let es = if https.is_empty() { http }  else { https };
+        if !eh.is_empty() {
+            let triple = proxy_resolver::ProxyTriple {
+                http: eh.into(),
+                https: es.into(),
+                no_proxy: no_p.into(),
+                source: proxy_resolver::ProxySource::OsSystem,
+            };
+            proxy_resolver::apply_env(&triple);
+            return;
+        }
+    }
+    // OS reports no proxy → clear (stale values shouldn't stick).
+    proxy_resolver::clear_env();
 }
 
 #[tauri::command]
@@ -237,6 +280,185 @@ pub async fn edit_instance_ports(
         InstanceChanged::simple(InstanceAction::EditPorts, &name).with_needs_restart(true),
     );
     Ok(())
+}
+
+/// Per-instance proxy config for the ClawPage proxy modal. `None` (default
+/// on a fresh instance) means "inherit global proxy". Setting to
+/// `mode="none"` explicitly disables proxy for just this instance.
+#[tauri::command]
+pub async fn get_instance_proxy(name: String) -> Result<serde_json::Value, String> {
+    use clawenv_core::config::ConfigManager;
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = config.instances().iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+    match &inst.proxy {
+        Some(p) => Ok(serde_json::json!({
+            "mode": p.mode,
+            "http_proxy": p.http_proxy,
+            "https_proxy": p.https_proxy,
+            "no_proxy": p.no_proxy,
+            "auth_required": p.auth_required,
+            "auth_user": p.auth_user,
+            // Password is never returned — users re-enter it if they want
+            // to change it. Current value stays in keychain.
+        })),
+        None => Ok(serde_json::json!({
+            "mode": "inherit",
+            "http_proxy": "",
+            "https_proxy": "",
+            "no_proxy": "",
+            "auth_required": false,
+            "auth_user": "",
+        })),
+    }
+}
+
+/// Save + apply a new proxy config for this instance. If the sandbox is
+/// running (Lima/Podman/WSL), rewrites `/etc/profile.d/proxy.sh` and npm
+/// config in-place. Claws already-running don't pick up the change until
+/// they restart — the caller is expected to prompt the user for a restart
+/// when `needs_restart == true`.
+#[allow(clippy::too_many_arguments)]
+#[tauri::command]
+pub async fn set_instance_proxy(
+    app: tauri::AppHandle,
+    name: String,
+    mode: String,
+    http_proxy: String,
+    https_proxy: String,
+    no_proxy: String,
+    auth_required: Option<bool>,
+    auth_user: Option<String>,
+    auth_password: Option<String>,
+) -> Result<serde_json::Value, String> {
+    use clawenv_core::config::{keychain, ConfigManager, InstanceProxyConfig};
+    use clawenv_core::config::proxy_resolver::{self, Scope};
+
+    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
+
+    // Pull out owned copies we need after the mutable borrow ends.
+    let (sandbox_type, backend_res) = {
+        let inst = config.instances().iter()
+            .find(|i| i.name == name)
+            .ok_or_else(|| format!("Instance '{name}' not found"))?;
+        (inst.sandbox_type, instance::backend_for_instance(inst))
+    };
+
+    // Native mode is system-proxy-only by design — the native claw inherits
+    // the GUI process's env (which already carries the system proxy, injected
+    // at Tauri startup). Per-instance proxy overrides would diverge from that
+    // contract and confuse users, so we reject any attempt to set one.
+    if sandbox_type == clawenv_core::sandbox::SandboxType::Native {
+        return Err(
+            "Native mode uses the system proxy only — no per-instance proxy config. Adjust your OS proxy settings (System Preferences / Internet Options) and restart the claw."
+            .into()
+        );
+    }
+
+    // "inherit" is a sentinel — we clear the per-instance override and let
+    // the install-time global proxy apply as before. Everything else gets
+    // persisted (including "none" as an explicit opt-out for this instance).
+    let is_inherit = mode == "inherit";
+    let auth_required_v = auth_required.unwrap_or(false);
+    let auth_user_v = auth_user.unwrap_or_default();
+
+    // Persist password to keychain BEFORE config write so the resolver's
+    // first `resolve` call (inside apply loop) can find it. Delete entry
+    // when auth is turned off to avoid stale credentials.
+    if auth_required_v && auth_user_v.is_empty() {
+        return Err("auth_required=true requires a non-empty auth_user".into());
+    }
+    if let Some(pw) = auth_password.as_ref().filter(|s| !s.is_empty()) {
+        keychain::store_instance_proxy_password(&name, pw)
+            .map_err(|e| format!("keychain store: {e}"))?;
+    } else if !auth_required_v {
+        // Best-effort cleanup — ignore errors (no prior entry is fine).
+        let _ = keychain::delete_instance_proxy_password(&name);
+    }
+
+    let new_cfg = InstanceProxyConfig {
+        mode: if is_inherit { "none".into() } else { mode.clone() },
+        http_proxy: http_proxy.clone(),
+        https_proxy: https_proxy.clone(),
+        no_proxy: no_proxy.clone(),
+        auth_required: auth_required_v,
+        auth_user: auth_user_v,
+    };
+
+    // Write config FIRST so the resolver sees the new value, then resolve
+    // + apply via the unified path. This ensures the URL written into the
+    // VM is the exact one the resolver would return — no divergence risk.
+    config.update_instance(&name, |i| {
+        if is_inherit {
+            i.proxy = None;
+        } else {
+            i.proxy = Some(new_cfg.clone());
+        }
+    }).map_err(|e| e.to_string())?;
+
+    let backend = backend_res.map_err(|e| e.to_string())?;
+    // Re-read the updated instance for the resolve call.
+    let inst_owned = config.instances().iter()
+        .find(|i| i.name == name)
+        .cloned()
+        .ok_or_else(|| format!("Instance '{name}' vanished after save"))?;
+    let scope = Scope::RuntimeSandbox {
+        instance: &inst_owned,
+        backend: &*backend,
+    };
+    let applied = match scope.resolve(&config).await {
+        Some(triple) => {
+            proxy_resolver::apply_to_sandbox(&triple, &*backend).await
+                .map_err(|e| format!("apply_to_sandbox: {e}"))?;
+            Some(triple)
+        }
+        None => {
+            proxy_resolver::clear_sandbox(&*backend).await.ok();
+            None
+        }
+    };
+
+    emit_instance_changed(
+        &app,
+        InstanceChanged::simple(InstanceAction::EditPorts, &name).with_needs_restart(true),
+    );
+
+    let (http, https) = match applied {
+        Some(t) => (t.http, t.https),
+        None => (String::new(), String::new()),
+    };
+    Ok(serde_json::json!({
+        "effective_http_proxy": http,
+        "effective_https_proxy": https,
+        "needs_restart": true,
+    }))
+}
+
+/// Peek at any proxy config baked into the sandbox (via `/etc/profile.d/proxy.sh`).
+/// Used after import to warn the user about stale proxy from the source machine.
+/// Returns empty string if no proxy file or instance is native.
+#[tauri::command]
+pub async fn check_instance_proxy_baked_in(name: String) -> Result<String, String> {
+    use clawenv_core::config::ConfigManager;
+    use clawenv_core::sandbox::SandboxType;
+
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = config.instances().iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+
+    if inst.sandbox_type == SandboxType::Native {
+        return Ok(String::new());
+    }
+
+    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    // `|| true` swallows errors so an offline VM just reports "no bake-in".
+    let out = backend
+        .exec("grep -oE 'http_proxy=\"[^\"]*\"' /etc/profile.d/proxy.sh 2>/dev/null | head -1 | sed 's/http_proxy=//;s/\"//g' || true")
+        .await
+        .unwrap_or_default();
+    Ok(out.trim().to_string())
 }
 
 #[tauri::command]
