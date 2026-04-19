@@ -1,6 +1,15 @@
 FROM alpine:latest
 LABEL maintainer="ClawEnv"
 
+# HTTP_PROXY / HTTPS_PROXY / NO_PROXY are predefined ARGs in Docker/Podman
+# — `podman build --build-arg HTTP_PROXY=...` (set in
+# core/src/sandbox/podman.rs::create) automatically propagates them into
+# every RUN layer's env WITHOUT explicit `ARG` declarations here AND
+# WITHOUT persisting them into the final image's runtime env (which would
+# bake the source-machine's proxy into exported images and break on import).
+# Just pass --build-arg and trust Docker/Podman's built-in handling.
+# See docs/23-proxy-architecture.md §9 for the export-clean contract.
+
 # Optional: custom Alpine mirror (e.g., mirrors.aliyun.com/alpine for China)
 ARG ALPINE_MIRROR=""
 RUN if [ -n "$ALPINE_MIRROR" ]; then \

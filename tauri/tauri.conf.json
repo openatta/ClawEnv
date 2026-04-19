@@ -1,7 +1,7 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicholasrice/application-config-schema/master/tauri-v2.json",
   "productName": "ClawEnv",
-  "version": "0.2.8",
+  "version": "0.2.9",
   "identifier": "com.attaspace.clawenv",
   "build": {
     "frontendDist": "../dist",

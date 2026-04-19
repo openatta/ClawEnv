@@ -205,14 +205,27 @@ IPC install_openclaw：
 CLI install：
   apply_env(Scope::Installer.resolve(cfg))      // 二次注入
   download_with_progress(...)                   // 自动读 env
-创建 VM：
-  backend.create(opts)                          // 不再携带 proxy_script
-  backend.start()                               // boot
-  apply_to_sandbox(Scope::RuntimeSandbox.resolve(cfg, &instance, &backend), &backend)
-  // 此时 VM 已能经代理出去
-  backend.exec("apk update && ...")
+
+创建 VM（关键：provision 三拍子）：
+  (1) provision_preamble 拼入 Scope::Installer 的 proxy export 行
+      → Lima YAML / WSL script 里 apk update/add 第一次跑就能走代理
+      → Podman: opts.{http,https,no}_proxy 作为 --build-arg 传给 podman build
+  backend.create(opts)                          // VM 首次 boot + apk 装包
+  backend.start()                               // 确认运行
+  (2) apply_to_sandbox(Scope::RuntimeSandbox.resolve(cfg, &instance, &backend), &backend)
+      → 把 /etc/profile.d/proxy.sh 写为持久化代理配置
+      → 和 provision-time 的 export 相同值，后续 VM shell / claw 进程都能看到
+  mirrors::apply_mirrors(backend, ...)          // 如果配了镜像
+  backend.exec("apk add ...")                   // 后续依赖装包，走持久化 proxy
   backend.exec("npm install openclaw ...")
 ```
+
+**provision 三拍子的必要性**：
+1. **provision 期间的 apk/npm** 跑在 VM 第一次 boot 阶段，走 `provision_preamble` 的 inline export（机制 1）
+2. **持久化 proxy** 由 post-boot `apply_to_sandbox` 写 `/etc/profile.d/proxy.sh`（机制 2），供后续所有 shell/claw 继承
+3. **导出时 scrub** 把 `/etc/profile.d/proxy.sh` 清掉（机制 3），bundle 永远 proxy-clean
+
+机制 1 和 2 的代理值**永远相同**（都从 `Scope::Installer` / `Scope::RuntimeSandbox` 读），所以 VM 内看到的代理在 provision 和 post-boot 之间没有跳变。
 
 ### Start
 

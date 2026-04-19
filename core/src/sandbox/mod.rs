@@ -130,6 +130,16 @@ pub struct SandboxOpts {
     /// Custom npm registry URL (empty = default npmjs.org)
     #[serde(default)]
     pub npm_registry: String,
+    /// Proxy URL triple for provision-time use. Lima / WSL use
+    /// `proxy_script` (inline export statements); Podman builds use these
+    /// separate fields passed as `--build-arg HTTP_PROXY=...`. Populated
+    /// from `proxy_resolver::Scope::Installer` at install.rs entry.
+    #[serde(default)]
+    pub http_proxy: String,
+    #[serde(default)]
+    pub https_proxy: String,
+    #[serde(default)]
+    pub no_proxy: String,
 }
 
 fn default_claw_type() -> String { "openclaw".into() }

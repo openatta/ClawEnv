@@ -4,6 +4,41 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.2.9 — 2026-04-19
+
+Hotfix for a regression introduced in v0.2.8's Phase 2 refactor. All three
+sandbox backends (Lima / WSL / Podman) relied on proxy exports being in the
+VM's first-boot provision script to reach Alpine CDN during `apk update`.
+v0.2.8 removed those exports and moved proxy application to a post-boot
+hook — but that runs AFTER provision has already hung on direct CDN fetches
+in regions where the CDN is blocked (e.g. China).
+
+Symptom: `limactl start` stuck at `Waiting for the final requirement 1 of 1:
+"boot scripts must have finished"` for 10 minutes, then fatal with
+`did not receive an event with the "running" status`. UI shows
+`[35%] Installing system packages...` repeating.
+
+Fix — **provision-time proxy restored; export scrub + post-boot apply kept**:
+
+- `install.rs::provision_preamble` resolves `Scope::Installer` and embeds
+  `export http_proxy=... export https_proxy=...` inline so Lima's YAML
+  `provision:` script and WSL's bootstrap script have proxy before their
+  `apk update/add` lines.
+- `SandboxOpts` gains `http_proxy/https_proxy/no_proxy` fields. Podman
+  backend passes them as `--build-arg HTTP_PROXY=... HTTPS_PROXY=...` to
+  `podman build` — Docker/Podman's predefined proxy ARGs flow into
+  `RUN apk` layers automatically without baking into the image's runtime env.
+- `assets/podman/Containerfile` documents that HTTP_PROXY is handled via
+  predefined ARGs (no explicit `ENV` — would persist into exported images
+  and break on import across networks).
+- Post-boot `apply_to_sandbox` (writes `/etc/profile.d/proxy.sh`) and
+  export-time scrub both kept as-is. The provision preamble is transient;
+  the persistent config is still the single source of truth for future
+  VM shells.
+- `docs/23-proxy-architecture.md` §9 updated with the "provision 三拍子"
+  contract (provision-time inline export + post-boot persistent write +
+  export-time scrub), clarifying which mechanism owns which window.
+
 ## v0.2.8 — 2026-04-19
 
 Major proxy system overhaul — unified architecture, single resolver, correct

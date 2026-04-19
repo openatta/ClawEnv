@@ -251,6 +251,22 @@ impl SandboxBackend for PodmanBackend {
                     build_args.push("--build-arg".to_string());
                     build_args.push(format!("NPM_REGISTRY={}", opts.npm_registry));
                 }
+                // Proxy for RUN layers inside the Containerfile. Must be
+                // --build-arg so the Containerfile's ARG declarations pick
+                // them up. Without this, `RUN apk update` goes direct and
+                // hangs in regions where Alpine CDN is blocked.
+                if !opts.http_proxy.is_empty() {
+                    build_args.push("--build-arg".into());
+                    build_args.push(format!("HTTP_PROXY={}", opts.http_proxy));
+                }
+                if !opts.https_proxy.is_empty() {
+                    build_args.push("--build-arg".into());
+                    build_args.push(format!("HTTPS_PROXY={}", opts.https_proxy));
+                }
+                if !opts.no_proxy.is_empty() {
+                    build_args.push("--build-arg".into());
+                    build_args.push(format!("NO_PROXY={}", opts.no_proxy));
+                }
                 build_args.push("-f".to_string());
                 build_args.push(containerfile.to_string_lossy().to_string());
                 build_args.push(context_dir.to_string_lossy().to_string());

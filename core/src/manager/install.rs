@@ -214,14 +214,32 @@ pub async fn install(
         send(&tx, "Creating VM (installing system packages)...", 12, InstallStage::CreateVm).await;
 
         let mut provision_preamble = String::new();
-        // Phase 2 (docs/23-proxy-architecture.md §9): we **no longer inject
-        // proxy exports into the provision_preamble at VM create time**.
-        // Proxy is now applied via `apply_to_sandbox` as a post-boot hook
-        // (see the post-create block below and `manager::instance::start_instance`).
+        // Provision-time proxy injection: VM's FIRST BOOT runs apk/npm etc.
+        // BEFORE control returns to us — without proxy exports here, Alpine
+        // CDN fetches hang in regions where direct access is blocked (e.g.
+        // China), and Lima's 10-minute "boot scripts must have finished"
+        // timeout kills the install.
         //
-        // This unifies the install-time and runtime paths, eliminates the
-        // "install bakes old proxy that survives export" class of bugs, and
-        // keeps VM images clean for export/import.
+        // This is distinct from the canonical VM proxy at `/etc/profile.d/
+        // proxy.sh` (written by `apply_to_sandbox` post-boot). The preamble
+        // is a one-shot inline export for provision; the post-boot apply
+        // makes it persistent. Export scrubs the post-boot file, so the
+        // bundle still ships clean.
+        //
+        // See docs/23-proxy-architecture.md §9 (Install lifecycle).
+        if let Some(triple) = crate::config::proxy_resolver::Scope::Installer
+            .resolve(config).await
+        {
+            let esc_dq = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
+            provision_preamble.push_str(&format!(
+                "export http_proxy=\"{}\" https_proxy=\"{}\" HTTP_PROXY=\"{}\" HTTPS_PROXY=\"{}\" no_proxy=\"{}\" NO_PROXY=\"{}\"\n",
+                esc_dq(&triple.http), esc_dq(&triple.https),
+                esc_dq(&triple.http), esc_dq(&triple.https),
+                esc_dq(&triple.no_proxy), esc_dq(&triple.no_proxy),
+            ));
+            tracing::info!(target: "clawenv::proxy",
+                "provision_preamble: proxy injected (source={:?})", triple.source);
+        }
 
         // Mirror sources (Alpine APK + npm registry)
         provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable"));
@@ -244,6 +262,12 @@ pub async fn install(
             mirrors_config.npm_registry_url().to_string()
         };
 
+        // Re-resolve the installer triple so we can hand proxy URL parts
+        // to Podman as --build-arg (Lima/WSL already got them via the
+        // inline `proxy_script` export statements above).
+        let installer_triple = crate::config::proxy_resolver::Scope::Installer
+            .resolve(config).await;
+
         let sandbox_opts = SandboxOpts {
             instance_name: opts.instance_name.clone(),
             claw_type: opts.claw_type.clone(),
@@ -257,6 +281,9 @@ pub async fn install(
             gateway_port: opts.gateway_port,
             alpine_mirror,
             npm_registry,
+            http_proxy:  installer_triple.as_ref().map(|t| t.http.clone()).unwrap_or_default(),
+            https_proxy: installer_triple.as_ref().map(|t| t.https.clone()).unwrap_or_default(),
+            no_proxy:    installer_triple.as_ref().map(|t| t.no_proxy.clone()).unwrap_or_default(),
         };
 
         // Heartbeat while VM creates
@@ -315,12 +342,11 @@ pub async fn install(
         anyhow::bail!("VM is not reachable after 20 attempts. Check sandbox status.");
     }
 
-    // Apply proxy inside the running VM using the unified resolver. Runs
-    // BEFORE apk/npm so any outbound traffic from those uses the proxy.
-    // At install time we don't have a per-VM InstanceConfig yet (it's
-    // saved at the end of install), so we synthesise a placeholder that
-    // resolves to "inherit global" — the resolver will fall through to
-    // config.toml.clawenv.proxy or OS detection.
+    // Write the canonical persistent proxy file (`/etc/profile.d/proxy.sh`)
+    // inside the running VM via the unified resolver. This runs AFTER the
+    // first-boot provision completes — the provision preamble (above)
+    // handled proxy for that window inline. This post-boot apply is what
+    // every subsequent VM shell / claw process sees.
     send(&tx, "Configuring proxy...", 39, InstallStage::ConfigureProxy).await;
     let placeholder = InstanceConfig {
         name: opts.instance_name.clone(),

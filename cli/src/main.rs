@@ -1557,6 +1557,9 @@ async fn run_install_step(
                         gateway_port: port,
                         alpine_mirror,
                         npm_registry,
+                        http_proxy: String::new(),
+                        https_proxy: String::new(),
+                        no_proxy: String::new(),
                     };
                     out.emit(CliEvent::Info { message: "Creating VM (this takes a few minutes)...".into() });
                     backend.create(&opts).await?;
