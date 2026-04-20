@@ -123,7 +123,7 @@ fn main() {
                                         http: eh.into(),
                                         https: es.into(),
                                         no_proxy: no_p.into(),
-                                        source: clawenv_core::config::proxy_resolver::ProxySource::OsSystem,
+                                                        source: clawenv_core::config::proxy_resolver::ProxySource::OsSystem,
                                     };
                                     clawenv_core::config::proxy_resolver::apply_env(&t);
                                 }
@@ -266,7 +266,7 @@ fn main() {
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 loop {
                     if let Ok(mut config) = ConfigManager::load() {
-                        let npm_registry = config.config().clawenv.mirrors.npm_registry_url().to_string();
+                        let npm_registry = config.config().clawenv.mirrors.npm_registry_url();
                         let instances = config.instances().to_vec();
                         for inst in &instances {
                             let claw_reg = clawenv_core::claw::ClawRegistry::load();

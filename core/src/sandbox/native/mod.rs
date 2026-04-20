@@ -19,14 +19,13 @@ pub struct NativeBackend {
 impl NativeBackend {
     pub fn new(_dir_hint: &str) -> Self {
         let shell = ManagedShell::new();
-        // Native install lives at a fixed ~/.clawenv/native path — there's
-        // only ever one native install per machine by design (the native
-        // backend doesn't scope by instance name the way Lima/WSL/Podman
-        // do). An earlier version derived install_dir from inst_bin_dir()
-        // first, but that output was always overwritten — dead code.
-        let install_dir = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".clawenv").join("native");
+        // Native install lives at `<clawenv_root>/native` — honours the
+        // `CLAWENV_HOME` env var for test isolation, same as every other
+        // path in the codebase. Must match install_native/mod.rs's
+        // `install_dir` computation exactly; any drift means npm's cwd
+        // ends up in a different tree from where install_native actually
+        // dropped node_modules.
+        let install_dir = crate::config::clawenv_root().join("native");
         Self { shell, install_dir }
     }
 
@@ -49,7 +48,7 @@ impl SandboxBackend for NativeBackend {
         Ok(check)
     }
 
-    async fn ensure_prerequisites(&self) -> Result<()> {
+    async fn ensure_prerequisites(&self, _proxy_on: bool) -> Result<()> {
         if !self.is_available().await? {
             anyhow::bail!("Native mode requires Node.js. Please run the installer first.");
         }

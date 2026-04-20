@@ -13,13 +13,17 @@ use super::{
 };
 use crate::platform::download::download_with_progress;
 
-pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
+pub async fn install_nodejs(
+    tx: &mpsc::Sender<InstallProgress>,
+    nodejs_dist_base: &str,
+    proxy_on: bool,
+) -> Result<()> {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         _ => "x64",
     };
     let platform_ext = format!("darwin-{arch}.tar.gz");
-    let urls = build_node_urls(nodejs_dist_base, &platform_ext)?;
+    let urls = build_node_urls(nodejs_dist_base, &platform_ext, proxy_on)?;
 
     let node_dir = clawenv_node_dir();
     tokio::fs::create_dir_all(&node_dir).await?;

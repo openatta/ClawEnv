@@ -36,8 +36,8 @@ created_at = "2026-01-01T00:00:00Z"
     assert_eq!(inst.claw_type, "openclaw"); // default
     assert_eq!(inst.gateway.gateway_port, 3000); // default
     assert_eq!(inst.gateway.ttyd_port, 3001); // default
-    assert_eq!(inst.resources.memory_limit_mb, 512); // default
-    assert_eq!(inst.resources.cpu_cores, 2); // default
+    assert_eq!(inst.resources.memory_limit_mb, 4096); // default — see ResourceConfig::default
+    assert_eq!(inst.resources.cpu_cores, 4); // default
     assert!(!inst.browser.enabled); // default false
 }
 
@@ -90,36 +90,57 @@ fn config_roundtrip_toml() {
 }
 
 #[test]
-fn mirrors_default_preset() {
+fn mirrors_default_no_override() {
     let m = MirrorsConfig::default();
     assert!(m.is_default());
+    // Default (no override) → first entry of official_urls from mirrors.toml.
     assert_eq!(m.alpine_repo_url(), "https://dl-cdn.alpinelinux.org/alpine");
     assert_eq!(m.npm_registry_url(), "https://registry.npmjs.org");
     assert_eq!(m.nodejs_dist_url(), "https://nodejs.org/dist");
 }
 
 #[test]
-fn mirrors_china_preset() {
+fn mirrors_legacy_china_preset_ignored() {
+    // Pre-v0.2.14 config.toml may have `preset = "china"`. The field is
+    // retained for compatibility but no longer branches URL selection —
+    // all tiering is now proxy-aware and comes from assets/mirrors.toml.
+    // A user who selected "china" now sees upstream-first with
+    // corporate-CN fallback appended when proxy is OFF — which is
+    // actually BETTER than the old static china-only behaviour.
     let m = MirrorsConfig {
         preset: "china".into(),
         ..Default::default()
     };
-    assert!(!m.is_default());
-    assert_eq!(m.alpine_repo_url(), "https://mirrors.aliyun.com/alpine");
-    assert_eq!(m.npm_registry_url(), "https://registry.npmmirror.com");
+    // No URL override set → same as default. is_default() now keys on
+    // *overrides*, not on preset value.
+    assert!(m.is_default());
+    assert_eq!(m.alpine_repo_url(), "https://dl-cdn.alpinelinux.org/alpine");
+    // Proxy-off list includes the corporate-CN fallbacks.
+    let urls = m.alpine_repo_urls(false);
+    assert!(urls.iter().any(|u| u.contains("aliyun")), "fallback should include aliyun");
 }
 
 #[test]
-fn mirrors_custom_overrides_preset() {
+fn mirrors_user_override_wins() {
     let m = MirrorsConfig {
-        preset: "china".into(),
         npm_registry: "https://my.custom.registry".into(),
         ..Default::default()
     };
-    // Custom URL overrides preset
+    // Custom URL overrides — both legacy accessor and new list.
     assert_eq!(m.npm_registry_url(), "https://my.custom.registry");
-    // But alpine still uses china preset
-    assert_eq!(m.alpine_repo_url(), "https://mirrors.aliyun.com/alpine");
+    assert_eq!(m.npm_registry_urls(true), vec!["https://my.custom.registry".to_string()]);
+    assert_eq!(m.npm_registry_urls(false), vec!["https://my.custom.registry".to_string()]);
+    // alpine untouched — goes through mirrors.toml.
+    assert_eq!(m.alpine_repo_url(), "https://dl-cdn.alpinelinux.org/alpine");
+}
+
+#[test]
+fn mirrors_proxy_on_is_official_only() {
+    let m = MirrorsConfig::default();
+    let alpine_on = m.alpine_repo_urls(true);
+    let alpine_off = m.alpine_repo_urls(false);
+    assert_eq!(alpine_on.len(), 1, "proxy on → official only");
+    assert!(alpine_off.len() > alpine_on.len(), "proxy off → more URLs");
 }
 
 #[test]

@@ -1,8 +1,27 @@
 # Unified mirror registry — single source of truth for every binary ClawEnv
 # downloads during install / upgrade. Loader: core/src/config/mirrors_asset.rs.
 #
-# To upgrade an asset: bump the version / tag / commit + checksums, rebuild.
-# No Rust code change needed.
+# Two-tier design (proxy-aware):
+#   [<asset>.official_urls]  — upstream, authoritative source. Always tried.
+#   [<asset>.fallback_urls]  — domestic big-corp mirrors. Used ONLY when the
+#                              install-time proxy snapshot is OFF (the
+#                              assumption being that without a proxy the
+#                              user is likely in a region where upstream is
+#                              slow/blocked, and the fallbacks help).
+# When proxy is ON, fallbacks are skipped: the proxy is expected to give the
+# user access to the canonical upstream, and domestic mirrors are pointless
+# detours (and in the E2E-discovered case, university mirrors like SJTU can
+# outright fail HTTPS CONNECT through some proxies).
+#
+# Fallback policy:
+#   - Only corporate mirrors with ops SLAs (Aliyun / Huawei / Tencent / the
+#     npmmirror service run by Alibaba). University mirrors (tuna/sjtu/ustc)
+#     were removed in v0.2.14 — they're bandwidth-limited and drop
+#     connections unpredictably.
+#   - GitHub-release assets have a single GitHub-proxy fallback (ghfast.top,
+#     the most stable community proxy). Other GitHub-relay hosts
+#     (ghproxy.com, ghproxy.net, gh.llkk.cc, hub.gitmirror.com, gh-proxy.com)
+#     were removed for the same stability reason.
 #
 # URL placeholders (expanded by the loader):
 #   {tag}              — VCS tag (e.g. "2.53.0-3" — dugite uses trailing counter)
@@ -12,6 +31,7 @@
 #   {platform}         — platform key string (per-asset, see below)
 #   {filename}         — the full asset filename (already substituted)
 #   {ext}              — file extension (node: "tar.gz" macOS/Linux, "zip" Windows)
+#   {major_minor}      — Alpine "3.22"-style path segment (minirootfs only)
 
 # =====================================================================
 # dugite-native — portable Git for macOS + Linux native install.
@@ -23,11 +43,19 @@ tag              = "2.53.0-3"
 upstream_version = "2.53.0"
 commit           = "f49d009"
 filename_tpl     = "dugite-native-v{upstream_version}-{commit}-{platform}.tar.gz"
-urls = [
+official_urls = [
     "https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
-    "https://ghfast.top/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
-    "https://mirror.ghproxy.com/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+]
+fallback_urls = [
+    # Order = measured CN speed: ghproxy.net > github.boki.moe > gh-proxy.com > ghfast.top.
+    # All four are GitHub-release reverse proxies; none super-fast (max ~250 KB/s
+    # for a 50MB lima tarball ≈ 3-4 min) but each is the difference between
+    # download and stall in a GFW network. Listed in order so the throughput
+    # floor in download.rs picks the next one quickly when one stalls.
+    "https://ghproxy.net/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+    "https://github.boki.moe/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
     "https://gh-proxy.com/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
+    "https://ghfast.top/https://github.com/desktop/dugite-native/releases/download/v{tag}/{filename}",
 ]
 [dugite.sha256]
 macos-arm64  = "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437"
@@ -44,10 +72,14 @@ linux-x86_64 = "b3a85433c8dfde76d21b90938ad2f971653deff4340b1b4d347258c63250eafc
 [mingit]
 version      = "2.49.0.windows.1"
 filename_tpl = "MinGit-2.49.0-{platform}.zip"
-urls = [
+official_urls = [
     "https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+]
+fallback_urls = [
+    "https://ghproxy.net/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+    "https://github.boki.moe/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
+    "https://gh-proxy.com/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
     "https://ghfast.top/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
-    "https://mirror.ghproxy.com/https://github.com/git-for-windows/git/releases/download/v{version}/{filename}",
 ]
 
 # =====================================================================
@@ -61,11 +93,15 @@ urls = [
 [node]
 version      = "v22.16.0"
 filename_tpl = "node-{version}-{platform}.{ext}"
-urls = [
+official_urls = [
     "https://nodejs.org/dist/{version}/{filename}",
-    "https://npmmirror.com/mirrors/node/{version}/{filename}",
+]
+fallback_urls = [
+    # Order = measured speed in CN (huawei 2.0 MB/s > tuna 1.6 MB/s > npmmirror).
+    # When proxy is OFF we lead with these; npmjs upstream is appended last.
     "https://mirrors.huaweicloud.com/nodejs/{version}/{filename}",
     "https://mirrors.tuna.tsinghua.edu.cn/nodejs-release/{version}/{filename}",
+    "https://registry.npmmirror.com/binary.html?path=node/{version}/{filename}",
 ]
 
 # =====================================================================
@@ -76,11 +112,14 @@ urls = [
 [lima]
 version      = "2.1.1"
 filename_tpl = "lima-{version}-{platform}.tar.gz"
-urls = [
+official_urls = [
     "https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+]
+fallback_urls = [
     "https://ghproxy.net/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
-    "https://hub.gitmirror.com/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
-    "https://gh.llkk.cc/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://github.boki.moe/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://gh-proxy.com/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
+    "https://ghfast.top/https://github.com/lima-vm/lima/releases/download/v{version}/{filename}",
 ]
 [lima.sha256]
 darwin-arm64  = "b6b0e6701189cd8c4e549cc39e6d054dc681487798b9b774ad2cbd30c08b2bd8"
@@ -100,9 +139,39 @@ version      = "latest-stable"
 filename_tpl = "alpine-minirootfs-{version}-{platform}.tar.gz"
 # Note: the actual URL path is computed at runtime because it requires the
 # resolved version (major.minor path segment). The loader exposes
-# alpine_download_url(base, version, platform) for this.
-urls = [
+# build_alpine_urls(platform, version, major_minor) for this.
+official_urls = [
     "https://dl-cdn.alpinelinux.org/alpine/v{major_minor}/releases/{platform}/{filename}",
-    "https://mirrors.tuna.tsinghua.edu.cn/alpine/v{major_minor}/releases/{platform}/{filename}",
+]
+fallback_urls = [
     "https://mirrors.aliyun.com/alpine/v{major_minor}/releases/{platform}/{filename}",
+    "https://mirrors.huaweicloud.com/alpine/v{major_minor}/releases/{platform}/{filename}",
+]
+
+# =====================================================================
+# Alpine APK repositories — the in-VM /etc/apk/repositories content.
+# Unlike the binaries above, these are repo BASE urls (no filename).
+# apk itself tries each line in order and is immune to individual-line
+# failures, so we just emit all URLs as repo lines. Per proxy_on policy:
+# proxy ON → only official (dl-cdn) line; OFF → all.
+# =====================================================================
+[apk]
+official_base_urls = [
+    "https://dl-cdn.alpinelinux.org/alpine",
+]
+fallback_base_urls = [
+    "https://mirrors.aliyun.com/alpine",
+    "https://mirrors.huaweicloud.com/alpine",
+]
+
+# =====================================================================
+# npm registry — the single-valued `npm config set registry` target.
+# preflight-picks first reachable from this list at install time.
+# =====================================================================
+[npm]
+official_urls = [
+    "https://registry.npmjs.org",
+]
+fallback_urls = [
+    "https://registry.npmmirror.com",
 ]

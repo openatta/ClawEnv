@@ -188,12 +188,28 @@ pub async fn install(
     // Use dir_id for VM name (ASCII-safe, supports non-ASCII instance names)
     let backend: Box<dyn SandboxBackend> = detect_backend_for(&dir_id)?;
 
-    send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
-    backend.ensure_prerequisites().await?;
-    send(&tx, &format!("{} ready", backend.name()), 10, InstallStage::EnsurePrerequisites).await;
-
     let sandbox_type = if opts.use_native { SandboxType::Native } else { SandboxType::from_os() };
     let mirrors_config = config.config().clawenv.mirrors.clone();
+
+    // Install-time proxy snapshot. Taken once here; passed down to all
+    // mirror selection — including `ensure_prerequisites` which may
+    // download Lima/WSL/etc before the rest of the flow runs. Rationale
+    // in docs/23: mirror fallback behaviour must be deterministic for
+    // the whole install flow. If the user toggles the proxy setting
+    // mid-install we don't want the VM-side apk suddenly using a
+    // different URL list than the host-side node download.
+    //
+    // `is_some()` is the honest signal: `Scope::Installer.resolve()`
+    // already runs the full priority chain (installer override →
+    // instance proxy → OS proxy → env vars → global config), returning
+    // None only when nothing produced a proxy URL. Any Some means a
+    // proxy is in effect for this install.
+    let proxy_on = crate::config::proxy_resolver::Scope::Installer
+        .resolve(config).await.is_some();
+
+    send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
+    backend.ensure_prerequisites(proxy_on).await?;
+    send(&tx, &format!("{} ready", backend.name()), 10, InstallStage::EnsurePrerequisites).await;
 
     // ---- Step 2: Create VM (provision = system packages only) ----
     // Check if VM exists AND has basic packages. A VM that exists but
@@ -241,9 +257,23 @@ pub async fn install(
                 "provision_preamble: proxy injected (source={:?})", triple.source);
         }
 
-        // Mirror sources (Alpine APK + npm registry)
-        provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable"));
-        provision_preamble.push_str(&mirrors::npm_registry_script(&mirrors_config));
+        // Rewrite ssh://git@github.com/ → https:// for git clone deps —
+        // but only when a proxy is active. Without a proxy, HTTPS to
+        // github is flaky in GFW networks (TLS hang 30-60s per package),
+        // so letting the original ssh:// URL fail fast on port 22 is the
+        // lesser evil. Strict proxy_on semantic: no proxy → don't rewrite.
+        if proxy_on {
+            provision_preamble.push_str(
+                "export GIT_CONFIG_COUNT=1\n\
+                 export GIT_CONFIG_KEY_0=\"url.https://github.com/.insteadOf\"\n\
+                 export GIT_CONFIG_VALUE_0=\"ssh://git@github.com/\"\n",
+            );
+        }
+
+        // Mirror sources (Alpine APK + npm registry). Both consult the
+        // install-time proxy snapshot to decide which URL tier to use.
+        provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable", proxy_on));
+        provision_preamble.push_str(&mirrors::npm_registry_script(&mirrors_config, proxy_on));
 
         let proxy_script = if provision_preamble.trim().is_empty() {
             "# No proxy / mirrors".to_string()
@@ -251,15 +281,21 @@ pub async fn install(
             provision_preamble
         };
 
-        let alpine_mirror = if mirrors_config.is_default() {
+        // Podman --build-arg values: single-valued fields, pass the first
+        // effective URL. For the default case (empty overrides) we pass
+        // "" so Podman's Containerfile uses its hardcoded upstream — the
+        // new per-layer apk repos config in Rust is preferred, but
+        // Containerfile runs before that and needs *something* to reach.
+        // When a user override exists, their value wins.
+        let alpine_mirror = if mirrors_config.alpine_repo.is_empty() {
             String::new()
         } else {
-            mirrors_config.alpine_repo_url().to_string()
+            mirrors_config.alpine_repo.clone()
         };
-        let npm_registry = if mirrors_config.is_default() {
+        let npm_registry = if mirrors_config.npm_registry.is_empty() {
             String::new()
         } else {
-            mirrors_config.npm_registry_url().to_string()
+            mirrors_config.npm_registry.clone()
         };
 
         // Re-resolve the installer triple so we can hand proxy URL parts
@@ -273,8 +309,13 @@ pub async fn install(
             claw_type: opts.claw_type.clone(),
             claw_version: opts.claw_version.clone(),
             alpine_version: "latest-stable".into(),
-            memory_mb: 512,
-            cpu_cores: 2,
+            // 4 cores / 4 GB is the minimum for OpenClaw's npm install +
+            // native postinstall compilation (bufferutil, protobufjs deps
+            // etc) to finish in reasonable time. The 2c/512MB defaults
+            // wedged the install on slower hosts. GUI installer asks the
+            // same minimum; CLI now matches.
+            memory_mb: 4096,
+            cpu_cores: 4,
             install_browser: opts.install_browser,
             install_mode: opts.install_mode.clone(),
             proxy_script,
@@ -373,11 +414,13 @@ pub async fn install(
         crate::config::proxy_resolver::clear_sandbox(backend.as_ref()).await.ok();
     }
 
-    // Apply mirrors inside the running VM (more reliable than provision-time)
-    if !mirrors_config.is_default() {
-        send(&tx, "Configuring package mirrors...", 39, InstallStage::ConfigureProxy).await;
-        mirrors::apply_mirrors(backend.as_ref(), &mirrors_config).await?;
-    }
+    // Apply mirrors inside the running VM (more reliable than provision-time).
+    // Always apply now — even without a user override, we rewrite the apk
+    // repositories to the proxy-aware list so fallback behaviour is
+    // consistent (and the VM doesn't inherit Alpine's default dl-cdn-only
+    // /etc/apk/repositories which misses the corporate-CN fallback tier).
+    send(&tx, "Configuring package mirrors...", 39, InstallStage::ConfigureProxy).await;
+    mirrors::apply_mirrors(backend.as_ref(), &mirrors_config, proxy_on).await?;
 
     // ---- Step 2a: Verify base packages are actually installed ----
     // Cloud-init's `apk update && apk add` in the Lima provision YAML

@@ -1,12 +1,18 @@
 //! Unified loader for `assets/mirrors.toml` — single source of truth for
 //! every binary ClawEnv downloads (git, node, lima, wsl distro, podman
-//! base image).
+//! base image) AND for every repo-URL-style config it writes (apk, npm).
+//!
+//! Two-tier proxy-aware model (v0.2.14+):
+//!
+//!   official_urls  — upstream, authoritative. Always included.
+//!   fallback_urls  — corporate domestic mirrors (aliyun / huaweicloud /
+//!                    npmmirror / ghfast.top). Appended ONLY when the
+//!                    caller passes `proxy_on=false`.
 //!
 //! Callers pass an asset name ("dugite" / "mingit" / "node" / "lima" /
-//! "alpine-minirootfs") plus a platform key; the loader builds the
-//! complete fallback URL list and returns the expected sha256 (if any).
-//! The on-disk format and placeholder grammar are documented in
-//! `assets/mirrors.toml`.
+//! "alpine-minirootfs" / "apk" / "npm") plus a platform key; the loader
+//! builds the fallback URL list and (for sha-pinned assets) returns the
+//! expected sha256. On-disk grammar is documented in `assets/mirrors.toml`.
 
 use anyhow::{anyhow, Result};
 use std::sync::OnceLock;
@@ -37,29 +43,63 @@ impl AssetMirrors {
         Ok(Self { raw })
     }
 
-    /// Return (url, filename) pairs in fallback order. Filename is the
-    /// final asset name (same for every URL, the loader expands
-    /// `{filename}` placeholders consistently).
+    /// Extract a list of URL templates from an asset section. `list_key`
+    /// is one of "official_urls" / "fallback_urls" / "official_base_urls"
+    /// / "fallback_base_urls". Missing keys return an empty vec (not an
+    /// error — most assets have one tier but not both, and apk uses the
+    /// `_base_urls` variants).
+    fn urls_list(&self, asset: &str, list_key: &str) -> Vec<String> {
+        self.raw.get(asset)
+            .and_then(|v| v.as_table())
+            .and_then(|t| t.get(list_key))
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Assemble the effective URL list for `asset` based on the install-time
+    /// proxy snapshot.
+    ///
+    /// proxy ON  → official_urls only. Proxy is expected to give clean
+    ///             access to upstream; domestic CN mirrors are pointless
+    ///             detours and (in the SJTU case) actively break.
+    /// proxy OFF → fallback_urls FIRST, then official_urls. The user has
+    ///             chosen to install without a proxy, which in practice
+    ///             means they're either (a) on an unrestricted network
+    ///             where official upstream works fine and CN mirrors are
+    ///             still fast enough to lead, or (b) inside the GFW
+    ///             where official upstream trickles to a halt and the
+    ///             CN mirror is the only viable path. Leading with the
+    ///             fast CN mirror covers both cases — official upstream
+    ///             is appended as a last-resort safety net.
+    fn effective_url_tpls(&self, asset: &str, proxy_on: bool) -> Vec<String> {
+        if proxy_on {
+            self.urls_list(asset, "official_urls")
+        } else {
+            let mut out = self.urls_list(asset, "fallback_urls");
+            out.extend(self.urls_list(asset, "official_urls"));
+            out
+        }
+    }
+
+    /// Return (url, filename) pairs in fallback order, for download-style
+    /// assets (dugite/mingit/node/lima). `proxy_on` controls whether
+    /// fallback_urls are appended.
     ///
     /// Returns an error when:
     /// - asset section missing
-    /// - `urls` missing / empty
+    /// - both URL tiers empty
     /// - a required placeholder substitution produces an empty string
     ///   (catches typos in platform keys immediately rather than failing
     ///   later in the downloader)
-    pub fn build_urls(&self, asset: &str, platform: &str) -> Result<Vec<(String, String)>> {
+    pub fn build_urls(&self, asset: &str, platform: &str, proxy_on: bool) -> Result<Vec<(String, String)>> {
         let section = self.raw.get(asset)
             .and_then(|v| v.as_table())
             .ok_or_else(|| anyhow!("mirrors.toml missing [{asset}]"))?;
 
-        let urls: Vec<String> = section.get("urls")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("[{asset}] missing `urls`"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+        let urls = self.effective_url_tpls(asset, proxy_on);
         if urls.is_empty() {
-            anyhow::bail!("[{asset}] has empty `urls`");
+            anyhow::bail!("[{asset}] has no URLs (both official_urls and fallback_urls empty)");
         }
 
         // Collect all scalar fields as substitution variables.
@@ -103,9 +143,15 @@ impl AssetMirrors {
 
     /// Alpine is special: the directory path depends on `major_minor`
     /// which has to be computed from the resolved version at runtime.
-    /// This variant takes the extra `major_minor` arg. Other callers
-    /// should use `build_urls`.
-    pub fn build_alpine_urls(&self, platform: &str, version: &str, major_minor: &str) -> Result<Vec<(String, String)>> {
+    /// Takes the extra `major_minor` arg. Other callers should use
+    /// `build_urls`.
+    pub fn build_alpine_urls(
+        &self,
+        platform: &str,
+        version: &str,
+        major_minor: &str,
+        proxy_on: bool,
+    ) -> Result<Vec<(String, String)>> {
         let asset = "alpine-minirootfs";
         let section = self.raw.get(asset)
             .and_then(|v| v.as_table())
@@ -124,13 +170,41 @@ impl AssetMirrors {
             ("version".into(), version.into()),
             ("filename".into(), filename.clone()),
         ];
-        let urls: Vec<String> = section.get("urls")
-            .and_then(|v| v.as_array())
-            .ok_or_else(|| anyhow!("[{asset}] missing urls"))?
-            .iter()
-            .filter_map(|v| v.as_str().map(String::from))
-            .collect();
+        let urls = self.effective_url_tpls(asset, proxy_on);
+        if urls.is_empty() {
+            anyhow::bail!("[{asset}] has no URLs");
+        }
         Ok(urls.into_iter().map(|u| (expand(&u, &vars), filename.clone())).collect())
+    }
+
+    /// Return the effective list of Alpine apk repository *base* URLs
+    /// (e.g. `["https://dl-cdn.alpinelinux.org/alpine",
+    /// "https://mirrors.aliyun.com/alpine"]`). Caller appends the
+    /// `/v<major.minor>/main` and `/community` suffixes. Uses the
+    /// `[apk].official_base_urls` + `fallback_base_urls` scheme rather
+    /// than the `urls`/`filename` download pattern — apk consumes the
+    /// bases directly, no filename placeholder.
+    pub fn apk_base_urls(&self, proxy_on: bool) -> Vec<String> {
+        // Same policy as effective_url_tpls — proxy off leads with CN mirror.
+        // apk's `/etc/apk/repositories` reads top-down so first-listed wins
+        // for the initial fetch; subsequent ones are tried on per-package
+        // failures. With aliyun first, GFW users see ~1.5 MB/s instead of
+        // dl-cdn's trickle.
+        if proxy_on {
+            self.urls_list("apk", "official_base_urls")
+        } else {
+            let mut out = self.urls_list("apk", "fallback_base_urls");
+            out.extend(self.urls_list("apk", "official_base_urls"));
+            out
+        }
+    }
+
+    /// Effective list of npm registry URLs. Caller picks the first
+    /// reachable one via a preflight HEAD. `npm config set registry`
+    /// takes one value, so the list is a candidate set, not a fallback
+    /// chain like download URLs.
+    pub fn npm_registry_urls(&self, proxy_on: bool) -> Vec<String> {
+        self.effective_url_tpls("npm", proxy_on)
     }
 }
 
@@ -148,43 +222,79 @@ mod tests {
 
     #[test]
     fn loads_bundled_toml() {
-        // If this panics, mirrors.toml is broken at bundle-time.
         let m = AssetMirrors::get();
         assert!(m.raw.contains_key("dugite"));
         assert!(m.raw.contains_key("node"));
         assert!(m.raw.contains_key("lima"));
+        assert!(m.raw.contains_key("apk"));
+        assert!(m.raw.contains_key("npm"));
     }
 
     #[test]
-    fn dugite_macos_arm64_expands() {
+    fn dugite_macos_arm64_expands_proxy_off() {
+        // proxy off → fallback (GH relay) leads, official upstream appended.
         let m = AssetMirrors::get();
-        let urls = m.build_urls("dugite", "macOS-arm64").unwrap();
-        assert!(urls.len() >= 2, "need at least upstream + one mirror");
-        assert!(urls[0].0.contains("dugite-native-v2.53.0"));
-        assert!(urls[0].0.contains("macOS-arm64"));
+        let urls = m.build_urls("dugite", "macOS-arm64", false).unwrap();
+        assert!(urls.len() >= 2, "proxy off → fallback + official");
+        // First URL is a GH-relay fallback (not raw github.com).
+        assert!(!urls[0].0.starts_with("https://github.com/"),
+                "fallback should lead, got: {}", urls[0].0);
+        assert!(urls.iter().any(|(u, _)| u.starts_with("https://github.com/")),
+                "official upstream must be present as safety net");
         assert_eq!(urls[0].1, "dugite-native-v2.53.0-f49d009-macOS-arm64.tar.gz");
         let sha = m.expected_sha256("dugite", "macos-arm64").unwrap();
         assert_eq!(sha.len(), 64);
     }
 
     #[test]
+    fn dugite_macos_arm64_expands_proxy_on() {
+        let m = AssetMirrors::get();
+        let urls = m.build_urls("dugite", "macOS-arm64", true).unwrap();
+        assert_eq!(urls.len(), 1, "proxy on → official only");
+        assert!(urls[0].0.starts_with("https://github.com/"));
+    }
+
+    #[test]
     fn node_macos_arm64_expands() {
         let m = AssetMirrors::get();
-        // Caller also substitutes {ext} — build_urls inserts platform/filename
-        // but the {ext} placeholder flows through since build_urls collects
-        // all scalar section fields as vars. Node has no `ext` field so the
-        // caller prepends it: we mimic by calling build_urls with a
-        // platform value that already has the extension baked in.
-        let urls = m.build_urls("node", "darwin-arm64").unwrap();
-        assert!(!urls.is_empty());
-        // The URL should contain the version and the platform key.
+        let urls = m.build_urls("node", "darwin-arm64", false).unwrap();
+        assert!(urls.len() >= 2);
         assert!(urls[0].0.contains("v22.16.0"));
         assert!(urls[0].0.contains("darwin-arm64"));
     }
 
     #[test]
+    fn apk_base_urls_proxy_on_only_official() {
+        let m = AssetMirrors::get();
+        assert_eq!(m.apk_base_urls(true), vec!["https://dl-cdn.alpinelinux.org/alpine".to_string()]);
+    }
+
+    #[test]
+    fn apk_base_urls_proxy_off_includes_fallback() {
+        // Per v0.2.13 policy flip: proxy off → fallback (CN mirror) leads,
+        // official upstream is appended last as safety net. apk reads
+        // /etc/apk/repositories top-down, so CN mirror gets first attempt.
+        let m = AssetMirrors::get();
+        let urls = m.apk_base_urls(false);
+        assert!(urls.len() >= 2);
+        assert!(urls[0].contains("aliyun"), "fallback (CN mirror) should lead, got: {}", urls[0]);
+        assert!(urls.iter().any(|u| u == "https://dl-cdn.alpinelinux.org/alpine"));
+    }
+
+    #[test]
+    fn npm_registry_urls_have_both_tiers_off() {
+        // Same policy: npmmirror leads when proxy off, official npmjs is
+        // appended as safety net.
+        let m = AssetMirrors::get();
+        let urls = m.npm_registry_urls(false);
+        assert!(urls.len() >= 2);
+        assert!(urls[0].contains("npmmirror"), "fallback should lead, got: {}", urls[0]);
+        assert!(urls.iter().any(|u| u == "https://registry.npmjs.org"));
+    }
+
+    #[test]
     fn missing_asset_errors() {
         let m = AssetMirrors::get();
-        assert!(m.build_urls("does-not-exist", "any").is_err());
+        assert!(m.build_urls("does-not-exist", "any", false).is_err());
     }
 }

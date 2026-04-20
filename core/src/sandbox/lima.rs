@@ -50,16 +50,19 @@ impl LimaRelease {
         Ok((plat, sha))
     }
 
-    fn render_urls(&self, platform: &str) -> Result<Vec<(String, String)>> {
-        crate::config::mirrors_asset::AssetMirrors::get().build_urls("lima", platform)
+    fn render_urls(&self, platform: &str, proxy_on: bool) -> Result<Vec<(String, String)>> {
+        crate::config::mirrors_asset::AssetMirrors::get().build_urls("lima", platform, proxy_on)
     }
 
     fn version(&self) -> String {
         let m = crate::config::mirrors_asset::AssetMirrors::get();
         // Read version directly from raw table — exposed as raw read via
         // build_urls side effect, but we need it for logging/display. The
-        // loader doesn't expose a scalar-get today; quick access:
-        m.build_urls("lima", "Darwin-arm64")
+        // loader doesn't expose a scalar-get today; quick access. Proxy
+        // state is irrelevant for a pure version-string parse — pass
+        // false so the full URL list is available (first entry is
+        // official in either branch).
+        m.build_urls("lima", "Darwin-arm64", false)
             .ok()
             .and_then(|urls| urls.first().and_then(|(u, _)| {
                 u.split("/download/v").nth(1)
@@ -538,14 +541,14 @@ impl SandboxBackend for LimaBackend {
         Ok(result.map(|o| o.status.success()).unwrap_or(false))
     }
 
-    async fn ensure_prerequisites(&self) -> Result<()> {
+    async fn ensure_prerequisites(&self, proxy_on: bool) -> Result<()> {
         if self.is_available().await? {
             return Ok(());
         }
 
         let release = LimaRelease::load()?;
         let (platform, expected_sha) = release.current_arch()?;
-        let urls = release.render_urls(platform)?;
+        let urls = release.render_urls(platform, proxy_on)?;
         let filename = urls.first().map(|(_, f)| f.clone())
             .unwrap_or_else(|| format!("lima-Darwin-{platform}.tar.gz"));
 
@@ -631,10 +634,38 @@ impl SandboxBackend for LimaBackend {
                 // the same VM doesn't require re-rendering the yaml.
                 let dashboard_port = crate::manager::install::allocate_port(gateway_port, 5);
 
-                // The provision script carries its own multi-mirror fallback
-                // chain; USER_ALPINE_MIRROR is just its highest-priority entry.
-                // Leaving it empty is fine — the script falls through to the
-                // canonical Fastly CDN and then to mainland-China mirrors.
+                // Fallback mirror chain is sourced from assets/mirrors.toml
+                // (`AssetMirrors::apk_base_urls`). Proxy-on snapshot is
+                // derived from the triple that install.rs already populated
+                // via proxy_resolver::Scope::Installer — if any of the
+                // proxy env fields came through, we skip the fallback list
+                // because the proxy itself is expected to reach upstream
+                // and domestic detours only cause TLS-through-proxy failures.
+                // USER_ALPINE_MIRROR is the explicit user override and
+                // remains the highest-priority attempt.
+                let proxy_on = !opts.http_proxy.is_empty() || !opts.https_proxy.is_empty();
+                let fallback_lines = crate::config::mirrors_asset::AssetMirrors::get()
+                    .apk_base_urls(proxy_on)
+                    .into_iter()
+                    .map(|u| format!("    [ -z \"$SUCCESS\" ] && try_install {} && SUCCESS=1",
+                                     crate::platform::shell_quote(u.trim_end_matches('/'))))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+
+                // `{PROXY_SCRIPT}` sits inside a `script: |` block scalar
+                // whose base indent is 4 spaces. The substitution text is
+                // arbitrary multi-line shell (proxy exports + alpine
+                // repo script + npm registry script). The template
+                // supplies the leading indent for the *first* line only,
+                // so every subsequent line must get its own 4 spaces
+                // prepended — otherwise the YAML parser drops out of
+                // the block scalar at column 0 and fails at install time.
+                let proxy_script_indented = opts
+                    .proxy_script
+                    .lines()
+                    .collect::<Vec<_>>()
+                    .join("\n    ");
+
                 let rendered = template
                     .replace("{WORKSPACE_DIR}", &workspace_dir)
                     .replace("{GATEWAY_PORT}", &gateway_port.to_string())
@@ -643,8 +674,9 @@ impl SandboxBackend for LimaBackend {
                     .replace("{CDP_PORT}", &cdp_port.to_string())
                     .replace("{VNC_WS_PORT}", &vnc_ws_port.to_string())
                     .replace("{DASHBOARD_PORT}", &dashboard_port.to_string())
-                    .replace("{PROXY_SCRIPT}", &opts.proxy_script)
-                    .replace("{USER_ALPINE_MIRROR}", opts.alpine_mirror.trim_end_matches('/'));
+                    .replace("{PROXY_SCRIPT}", &proxy_script_indented)
+                    .replace("{USER_ALPINE_MIRROR}", opts.alpine_mirror.trim_end_matches('/'))
+                    .replace("{ALPINE_MIRROR_FALLBACK_LINES}", &fallback_lines);
 
                 // Write rendered template
                 let templates_dir = Self::templates_dir()?;
@@ -923,7 +955,7 @@ mod release_tests {
     #[test]
     fn mirrors_toml_renders_lima_url_correctly() {
         let m = AssetMirrors::get();
-        let urls = m.build_urls("lima", "Darwin-arm64").expect("lima urls");
+        let urls = m.build_urls("lima", "Darwin-arm64", false).expect("lima urls");
         assert!(!urls.is_empty(), "urls must not be empty");
         let (url, filename) = &urls[0];
         assert!(url.contains("Darwin-arm64"), "URL should include platform key: {url}");
@@ -933,5 +965,25 @@ mod release_tests {
         // sha256 pinned
         let sha = m.expected_sha256("lima", "darwin-arm64").expect("sha");
         assert_eq!(sha.len(), 64);
+    }
+
+    // The clawenv-alpine.yaml template loses its hardcoded fallback chain
+    // in favour of `{ALPINE_MIRROR_FALLBACK_LINES}` rendered from
+    // mirrors.toml. Guard two invariants:
+    //   1. Proxy OFF produces more URLs than ON (fallbacks appended).
+    //   2. Every URL a caller would inject passes shell_quote cleanly —
+    //      the template relies on single-quoted strings.
+    #[test]
+    fn apk_fallback_render_shapes() {
+        let on = AssetMirrors::get().apk_base_urls(true);
+        let off = AssetMirrors::get().apk_base_urls(false);
+        assert!(!on.is_empty(), "at least one official apk base URL");
+        assert!(off.len() > on.len(), "proxy OFF appends fallbacks");
+        for u in off {
+            let q = crate::platform::shell_quote(u.trim_end_matches('/'));
+            assert!(q.starts_with('\'') && q.ends_with('\''),
+                    "shell-quoted URL must be single-wrapped: {q}");
+            assert!(!q.contains('\n'), "no raw newlines inside URL: {q}");
+        }
     }
 }

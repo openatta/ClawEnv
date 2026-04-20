@@ -68,10 +68,7 @@ provision:
     SUCCESS=""
     USER_MIRROR="{USER_ALPINE_MIRROR}"
     [ -n "$USER_MIRROR" ] && try_install "$USER_MIRROR" && SUCCESS=1
-    [ -z "$SUCCESS" ] && try_install "https://dl-cdn.alpinelinux.org/alpine" && SUCCESS=1
-    [ -z "$SUCCESS" ] && try_install "https://mirrors.tuna.tsinghua.edu.cn/alpine" && SUCCESS=1
-    [ -z "$SUCCESS" ] && try_install "https://mirrors.aliyun.com/alpine" && SUCCESS=1
-    [ -z "$SUCCESS" ] && try_install "https://mirror.sjtu.edu.cn/alpine" && SUCCESS=1
+{ALPINE_MIRROR_FALLBACK_LINES}
     if [ -z "$SUCCESS" ]; then
       echo "ERROR: no Alpine mirror could complete update + add" >&2
       tail -60 /tmp/apk.err >&2 2>/dev/null || true

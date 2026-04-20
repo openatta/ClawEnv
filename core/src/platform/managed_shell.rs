@@ -120,17 +120,55 @@ impl ManagedShell {
     pub fn cmd(&self, command: &str) -> Command {
         let path = self.path();
         #[cfg(target_os = "windows")]
-        {
+        let mut c = {
             let mut c = super::process::silent_cmd("powershell");
             let full = format!("$env:PATH = '{}'; {}", path.replace('\'', "''"), command);
             c.args(["-Command", &full]);
             c
-        }
+        };
         #[cfg(not(target_os = "windows"))]
-        {
+        let mut c = {
             let mut c = Command::new("sh");
             c.args(["-c", &format!("export PATH='{}'; {}", path, command)]);
             c
+        };
+        // Only inject the ssh→https rewrite when a proxy is in effect.
+        // Strict semantic: proxy_on=false → do NOT modify git behaviour.
+        // Rationale: without a proxy, rewriting ssh://git@github.com/ to
+        // https://github.com/ forces HTTPS to github which is flaky in
+        // GFW networks (TLS handshake hangs 30-60s per package, cascading
+        // into multi-minute freezes on 748-package openclaw installs).
+        // When there's no proxy, let the original ssh URL fail fast on
+        // port 22 instead.
+        if proxy_is_active() {
+            apply_git_ssh_rewrite(&mut c);
+        }
+        self.apply_git_exec_path(&mut c);
+        c
+    }
+
+    /// Dugite's `git` ships its helper commands (`git-remote-https` etc.)
+    /// in `<clawenv>/git/libexec/git-core`, but the binary was built with
+    /// a hardcoded RUNTIME_PREFIX that resolves to `//libexec/git-core`
+    /// on Mac — so `git` can't find its own helpers and anything beyond
+    /// a bare `git --version` fails with `remote-https is not a git command`.
+    /// Setting `GIT_EXEC_PATH` overrides the broken auto-detection. Only
+    /// set it when the dugite install actually exists, so a user's system
+    /// git (if someone removed the bundled one) keeps its own resolution.
+    fn apply_git_exec_path(&self, cmd: &mut Command) {
+        #[cfg(not(target_os = "windows"))]
+        {
+            let exec_path = self.clawenv_dir.join("git").join("libexec").join("git-core");
+            if exec_path.exists() {
+                cmd.env("GIT_EXEC_PATH", exec_path);
+            }
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let exec_path = self.clawenv_dir.join("git").join("mingw64").join("libexec").join("git-core");
+            if exec_path.exists() {
+                cmd.env("GIT_EXEC_PATH", exec_path);
+            }
         }
     }
 
@@ -186,26 +224,54 @@ impl ManagedShell {
             );
             std::fs::write(&bat_path, bat_body)?;
 
-            // PowerShell Start-Process — the bat handles all redirection, so
-            // no -RedirectStandardOutput/Error is passed (that flag is
-            // separately buggy for long-running hidden children on Windows).
-            // Gateway readiness takes ~20s to reach the "listening" state on
-            // Windows ARM64; the outer start_instance health-check must give
-            // it enough time.
-            let bat_ps = bat_path.to_string_lossy().replace('\'', "''");
-            let ps_cmd = format!(
-                "Start-Process -WindowStyle Hidden -FilePath '{bat_ps}' | Out-Null"
+            // IMPORTANT: we must NOT use `Start-Process -WindowStyle Hidden`
+            // here. Over Windows OpenSSH (and likely any launcher running
+            // inside a server-side job object), `Start-Process` leaves the
+            // spawned child inside the caller's job object. When the outer
+            // clawcli.exe returns and the SSH channel closes, Windows kills
+            // the entire tree — including our "detached" gateway. E2E caught
+            // this: install claimed gateway-up; a /health check issued from
+            // a fresh SSH session moments later found port unbound and no
+            // node.exe alive.
+            //
+            // `Invoke-CimMethod Win32_Process Create` creates the new
+            // process through WMI. Unlike Start-Process, WMI process
+            // creation does NOT inherit the caller's job object — the child
+            // becomes a true top-level process and survives parent exit
+            // (SSH disconnect, tray-app close, etc.). Same mechanism as the
+            // deprecated `wmic process call create`, but via the modern CIM
+            // cmdlet so it keeps working on Windows 11+ where wmic is being
+            // phased out.
+            //
+            // The .bat handles redirection (stdin < NUL, stdout/stderr to
+            // gateway.log) so the spawned cmd has no live console.
+            //
+            // We drop the PS script on disk (next to the .bat) and invoke it
+            // via `powershell -File` rather than `-Command`. Much simpler
+            // escaping story — the quoted path inside Invoke-CimMethod has
+            // both `'` and `"` in a specific arrangement that's painful to
+            // thread through `-Command` argv encoding correctly.
+            let ps_path = self.install_dir.join(".clawenv-spawn.ps1");
+            let ps_body = format!(
+                "Invoke-CimMethod -ClassName Win32_Process -MethodName Create \
+                 -Arguments @{{CommandLine='cmd /c \"{}\"'}} | Out-Null\r\n",
+                bat_path.display()
             );
+            std::fs::write(&ps_path, ps_body)?;
 
             let status = super::process::silent_cmd("powershell")
-                .args(["-NoProfile", "-Command", &ps_cmd])
+                .args([
+                    "-NoProfile",
+                    "-ExecutionPolicy", "Bypass",
+                    "-File", &ps_path.to_string_lossy(),
+                ])
                 .current_dir(&self.install_dir)
                 .status()
                 .await?;
 
             if !status.success() {
                 anyhow::bail!(
-                    "Failed to spawn {cli_binary} via PowerShell Start-Process. \
+                    "Failed to spawn {cli_binary} via Invoke-CimMethod. \
                      See gateway log at {}",
                     log_path.display()
                 );
@@ -225,4 +291,37 @@ impl ManagedShell {
         }
         Ok(())
     }
+}
+
+/// Inject an ephemeral git config that rewrites `ssh://git@github.com/` →
+/// `https://github.com/` for every child process spawned through this
+/// shell. Uses the `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_N` / `GIT_CONFIG_VALUE_N`
+/// scheme (git 2.31+, 2021) so no user config file is touched.
+///
+/// Why: OpenClaw's npm dep graph includes a package (libsignal-node)
+/// whose package.json lists a git dep via `ssh://git@github.com/…`.
+/// Under an HTTP proxy (the Windows E2E proxy scenario), port 22 isn't
+/// proxied, so `npm install` fails on that git clone. Rewriting the URL
+/// at git level sends the clone over HTTPS which the proxy does handle.
+/// Safe to apply unconditionally — we never want an ssh:// clone here.
+pub(crate) fn apply_git_ssh_rewrite(cmd: &mut Command) {
+    cmd.env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "url.https://github.com/.insteadOf")
+        .env("GIT_CONFIG_VALUE_0", "ssh://git@github.com/");
+}
+
+/// Detect whether a proxy is active in the current process env. Reads
+/// the canonical env vars (`apply_env` and `apply_child_cmd` populate
+/// these) — doesn't re-enter the resolver because callers here are
+/// already downstream of it. Empty = no proxy.
+fn proxy_is_active() -> bool {
+    for key in ["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy",
+                "ALL_PROXY", "all_proxy"] {
+        if let Ok(v) = std::env::var(key) {
+            if !v.is_empty() {
+                return true;
+            }
+        }
+    }
+    false
 }

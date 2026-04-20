@@ -9,7 +9,16 @@ use tokio::sync::mpsc;
 
 use super::{InstallProgress, InstallStage, send, clawenv_node_dir, ensure_node_in_path, has_node};
 
-pub async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
+pub async fn install_nodejs(
+    tx: &mpsc::Sender<InstallProgress>,
+    nodejs_dist_base: &str,
+    _proxy_on: bool,
+) -> Result<()> {
+    // Linux Native is the "developer mode" single-URL path. Proxy-aware
+    // fallback on Linux is not wired up yet (the curl|tar pipeline here
+    // doesn't use download_with_progress). Taking proxy_on via the
+    // argument so the signature matches the unix/windows/macos trio;
+    // bringing Linux up to parity is tracked as follow-up.
     send(tx, "Downloading Node.js for Linux...", 14, InstallStage::EnsurePrerequisites).await;
 
     let arch = match std::env::consts::ARCH {

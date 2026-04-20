@@ -180,7 +180,14 @@ pub async fn install_prerequisites(app: tauri::AppHandle) -> Result<(), String> 
     }
 
     let _ = app.emit("prereq-step", &format!("{} not found, installing...", backend.name()));
-    backend.ensure_prerequisites().await.map_err(|e| e.to_string())?;
+    let mut config = clawenv_core::config::ConfigManager::load()
+        .or_else(|_| clawenv_core::config::ConfigManager::create_default(
+            clawenv_core::config::UserMode::General,
+        ))
+        .map_err(|e| e.to_string())?;
+    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
+        .resolve(&mut config).await.is_some();
+    backend.ensure_prerequisites(proxy_on).await.map_err(|e| e.to_string())?;
     let _ = app.emit("prereq-step", &format!("{} installed successfully", backend.name()));
 
     Ok(())

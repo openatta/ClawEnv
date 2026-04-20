@@ -93,7 +93,7 @@ impl WslBackend {
             .ok_or_else(|| anyhow::anyhow!("Could not find Alpine minirootfs for {arch} at {url}"))
     }
 
-    async fn download_alpine_rootfs(alpine_version: &str) -> Result<PathBuf> {
+    async fn download_alpine_rootfs(alpine_version: &str, proxy_on: bool) -> Result<PathBuf> {
         use std::io::Write;
 
         let cache_dir = Self::cache_dir()?;
@@ -126,7 +126,7 @@ impl WslBackend {
 
         // Unified mirror fallback (tuna / aliyun) via assets/mirrors.toml.
         let urls = crate::config::mirrors_asset::AssetMirrors::get()
-            .build_alpine_urls(arch, &version, &major_minor)?;
+            .build_alpine_urls(arch, &version, &major_minor, proxy_on)?;
 
         tracing::info!(target: "clawenv::proxy", "Downloading Alpine rootfs {} ...", filename);
         let bytes = crate::platform::download::download_silent(&urls, None, 15).await?;
@@ -177,7 +177,7 @@ impl SandboxBackend for WslBackend {
         Ok(wsl_status.map(|o| o.status.success()).unwrap_or(false))
     }
 
-    async fn ensure_prerequisites(&self) -> Result<()> {
+    async fn ensure_prerequisites(&self, _proxy_on: bool) -> Result<()> {
         use crate::platform::process::silent_cmd;
 
         // First check: is hardware virtualization available?
@@ -355,8 +355,10 @@ impl SandboxBackend for WslBackend {
                 ]).await?;
             }
             InstallMode::OnlineBuild => {
-                // Download Alpine minirootfs and import
-                let rootfs = Self::download_alpine_rootfs(&opts.alpine_version).await?;
+                // Download Alpine minirootfs and import. Proxy-on = any of
+                // the provision-time proxy fields populated by install.rs.
+                let proxy_on = !opts.http_proxy.is_empty() || !opts.https_proxy.is_empty();
+                let rootfs = Self::download_alpine_rootfs(&opts.alpine_version, proxy_on).await?;
                 self.wsl_cmd(&[
                     "--import", &self.distro_name, &distro_path,
                     &rootfs.to_string_lossy(), "--version", "2",

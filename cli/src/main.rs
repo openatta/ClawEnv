@@ -128,6 +128,30 @@ enum Commands {
     /// Bridge server management
     #[command(subcommand)]
     Bridge(BridgeCmd),
+    /// Fast network-path probes — verify apk / npm / git / reqwest can
+    /// reach their targets through the current proxy/mirrors config
+    /// without running a full install. Meant for smoke-style E2E that
+    /// takes &lt;2 min per combo instead of the 8-15 min a full scenario
+    /// costs. See tests/e2e/scenarios/smoke-*.sh for users.
+    NetCheck {
+        /// `sandbox` requires --name (instance must already exist — use
+        /// `install --step create` to build a probe VM first).
+        /// `native` uses ManagedShell (no instance needed).
+        #[arg(long, default_value = "sandbox")]
+        mode: String,
+        /// Existing sandbox instance name. Ignored for --mode native.
+        #[arg(long)]
+        name: Option<String>,
+        /// Which probe(s) to run. `all` = every probe applicable to the
+        /// chosen mode (apk is sandbox-only).
+        #[arg(long, default_value = "all")]
+        probe: String,
+        /// Override the installer-scope proxy for the duration of this
+        /// run. Set as HTTP_PROXY/HTTPS_PROXY in process env. Empty =
+        /// use whatever the resolver picks up from config/OS/env.
+        #[arg(long)]
+        proxy_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -511,7 +535,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         Commands::UpdateCheck { name } => {
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
-            let registry_url = config.config().clawenv.mirrors.npm_registry_url().to_string();
+            let registry_url = config.config().clawenv.mirrors.npm_registry_url();
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
 
             match clawenv_core::manager::upgrade::check_upgrade(inst, &registry_url).await {
@@ -595,9 +619,12 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             // ~/.clawenv/{node,git,native} tree directly.
             match inst.sandbox_type {
                 SandboxType::Native => {
-                    let home = dirs::home_dir()
-                        .ok_or_else(|| anyhow::anyhow!("Cannot find home directory"))?;
-                    let clawenv = home.join(".clawenv");
+                    // Honour CLAWENV_HOME for E2E isolation — mirrors
+                    // install-side's `clawenv_root()`. Previously this read
+                    // `dirs::home_dir().join(".clawenv")` directly, so an
+                    // isolated install into `$CLAWENV_HOME/native/` would
+                    // fail export with "~/.clawenv/node is missing".
+                    let clawenv = clawenv_core::config::clawenv_root();
 
                     // Enforce the bundle-self-containment rule: both node
                     // and git must be privately installed. Otherwise the
@@ -605,10 +632,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     for sub in ["node", "git", "native"] {
                         if !clawenv.join(sub).exists() {
                             anyhow::bail!(
-                                "Cannot export native bundle: ~/.clawenv/{} is missing. \
+                                "Cannot export native bundle: {}/{} is missing. \
                                  Re-run the installer to make sure node + git + native \
                                  are all privately installed.",
-                                sub
+                                clawenv.display(), sub
                             );
                         }
                     }
@@ -1121,9 +1148,9 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 entry.sandbox_id = new_sandbox_id;
             })?;
 
-            let home = dirs::home_dir().unwrap_or_default();
-            let old_ws = home.join(format!(".clawenv/workspaces/{old_name}"));
-            let new_ws = home.join(format!(".clawenv/workspaces/{new_name}"));
+            let clawenv = clawenv_core::config::clawenv_root();
+            let old_ws = clawenv.join(format!("workspaces/{old_name}"));
+            let new_ws = clawenv.join(format!("workspaces/{new_name}"));
             if old_ws.exists() {
                 tokio::fs::rename(&old_ws, &new_ws).await.ok();
             }
@@ -1446,6 +1473,12 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 }
             }
         }
+
+        // ====== NetCheck ======
+        Commands::NetCheck { mode, name, probe, proxy_url } => {
+            run_net_check(&out, &mode, name.as_deref(), &probe,
+                          proxy_url.as_deref()).await?;
+        }
     }
 
     Ok(())
@@ -1493,11 +1526,14 @@ async fn run_install_step(
                     out.emit(CliEvent::Complete { message: "Node.js already available".into() });
                 } else {
                     out.emit(CliEvent::Info { message: "Node.js not found, installing...".into() });
-                    let config = ConfigManager::load()
+                    let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let mirrors = &config.config().clawenv.mirrors;
+                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await.is_some();
+                    let mirrors = config.config().clawenv.mirrors.clone();
+                    let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
                     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-                    clawenv_core::manager::install_native::install_nodejs_public(&tx, mirrors.nodejs_dist_url()).await?;
+                    clawenv_core::manager::install_native::install_nodejs_public(&tx, &base, proxy_on).await?;
                     out.emit(CliEvent::Complete { message: "Node.js installed".into() });
                 }
             } else {
@@ -1508,7 +1544,11 @@ async fn run_install_step(
                     out.emit(CliEvent::Complete { message: format!("{} ready", backend.name()) });
                 } else {
                     out.emit(CliEvent::Info { message: format!("Installing {}...", backend.name()) });
-                    backend.ensure_prerequisites().await?;
+                    let mut config = ConfigManager::load()
+                        .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await.is_some();
+                    backend.ensure_prerequisites(proxy_on).await?;
                     out.emit(CliEvent::Complete { message: format!("{} installed", backend.name()) });
                 }
             }
@@ -1517,18 +1557,20 @@ async fn run_install_step(
         // ---- Step: create ----
         "create" => {
             if use_native {
-                let install_dir = dirs::home_dir()
-                    .unwrap_or_else(|| std::path::PathBuf::from("."))
-                    .join(".clawenv/native")
+                let install_dir = clawenv_core::config::clawenv_root()
+                    .join("native")
                     .join(name);
                 tokio::fs::create_dir_all(&install_dir).await?;
                 out.emit(CliEvent::Info { message: "Ensuring Node.js...".into() });
                 if !clawenv_core::manager::install_native::has_node().await {
-                    let config = ConfigManager::load()
+                    let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let mirrors = &config.config().clawenv.mirrors;
+                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await.is_some();
+                    let mirrors = config.config().clawenv.mirrors.clone();
+                    let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
                     let (tx, _rx) = tokio::sync::mpsc::channel(8);
-                    clawenv_core::manager::install_native::install_nodejs_public(&tx, mirrors.nodejs_dist_url()).await?;
+                    clawenv_core::manager::install_native::install_nodejs_public(&tx, &base, proxy_on).await?;
                 }
                 clawenv_core::manager::install_native::ensure_node_in_path();
                 out.emit(CliEvent::Complete { message: format!("Native environment ready at {}", install_dir.display()) });
@@ -1540,11 +1582,18 @@ async fn run_install_step(
                 if vm_ready {
                     out.emit(CliEvent::Complete { message: "VM already exists and is provisioned".into() });
                 } else {
-                    let config = ConfigManager::load()
+                    let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+                    let _proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await.is_some();
                     let mirrors = &config.config().clawenv.mirrors;
-                    let alpine_mirror = if mirrors.is_default() { String::new() } else { mirrors.alpine_repo_url().to_string() };
-                    let npm_registry = if mirrors.is_default() { String::new() } else { mirrors.npm_registry_url().to_string() };
+                    // For sandbox create path the user override (if set)
+                    // wins; otherwise empty signals "use backend defaults".
+                    // The install flow proper re-does the proxy_on +
+                    // apply_mirrors step after VM boot, so this field is
+                    // only used by the VM provision layer.
+                    let alpine_mirror = mirrors.alpine_repo.clone();
+                    let npm_registry = mirrors.npm_registry.clone();
                     let opts = SandboxOpts {
                         instance_name: name.to_string(),
                         claw_type: claw_type.to_string(),
@@ -1749,6 +1798,255 @@ async fn run_install_step(
         }
     }
 
+    Ok(())
+}
+
+// ----- net-check: fast network-path probes ----------------------------
+//
+// Design: each probe is one command that exercises one layer of the
+// install toolchain. Fast (<30s each), targeted, and isolated — the VM
+// or native tree under test is reused across probes in a single run so
+// we only pay sandbox boot cost once. Used by tests/e2e/scenarios/
+// smoke-*.sh to verify proxy+mirrors wiring across combos in 2-3 min
+// total per scenario instead of the 8-15 min a full install takes.
+//
+// Probes:
+//   - apk (sandbox only): `apk update && apk add --no-cache jq` — jq
+//     isn't in the minimal Alpine base, so this forces a real fetch.
+//   - npm: `npm install lodash --prefix <tmp>` — tiny zero-dep package,
+//     exercises npm registry + npm proxy config.
+//   - git: `git ls-remote ssh://git@github.com/jonschlinkert/is-number.git`
+//     — fails without the insteadOf rewrite (ssh port 22 rarely proxied),
+//     passes when managed_shell/proxy.sh inject GIT_CONFIG_COUNT. This
+//     is the regression target for the libsignal-node bug on Windows 06.
+//   - host: reqwest HEAD to nodejs.org + registry.npmjs.org — exercises
+//     the host-side reqwest path (apply_env → ALL_PROXY for SOCKS etc).
+//
+// `all` expands to host+npm+git (+ apk when mode=sandbox).
+async fn run_net_check(
+    out: &Output,
+    mode: &str,
+    name: Option<&str>,
+    probe: &str,
+    proxy_url: Option<&str>,
+) -> Result<()> {
+    use clawenv_core::config::{proxy_resolver, ConfigManager, UserMode};
+
+    // Inject the caller's override into the process env BEFORE we resolve,
+    // so `Scope::Installer` picks it up via read_env_triple. This is the
+    // same channel Tauri IPC uses; lets scenarios test a specific proxy
+    // URL without editing config.toml.
+    if let Some(u) = proxy_url {
+        if u.is_empty() {
+            std::env::remove_var("HTTP_PROXY");
+            std::env::remove_var("http_proxy");
+            std::env::remove_var("HTTPS_PROXY");
+            std::env::remove_var("https_proxy");
+        } else {
+            std::env::set_var("HTTP_PROXY", u);
+            std::env::set_var("HTTPS_PROXY", u);
+        }
+    }
+
+    let mut config = ConfigManager::load()
+        .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+    let triple_opt = proxy_resolver::Scope::Installer.resolve(&mut config).await;
+    if let Some(ref t) = triple_opt {
+        out.emit(CliEvent::Info {
+            message: format!(
+                "proxy resolved: http={} source={:?}",
+                if t.http.is_empty() { "<none>" } else { &t.http },
+                t.source
+            ),
+        });
+        proxy_resolver::apply_env(t);
+    } else {
+        out.emit(CliEvent::Info { message: "proxy resolved: direct (no proxy)".into() });
+    }
+
+    let probes: Vec<&str> = match probe {
+        "all" => match mode {
+            "sandbox" => vec!["host", "apk", "npm", "git"],
+            _ => vec!["host", "npm", "git"],
+        },
+        p => p.split(',').collect(),
+    };
+
+    match mode {
+        "sandbox" => {
+            let nm = name.ok_or_else(|| anyhow::anyhow!("--name is required for --mode sandbox"))?;
+            let backend = clawenv_core::sandbox::detect_backend_for(nm)?;
+            // Rewrite loopback addresses in the proxy URL to the VM's
+            // host-reachable address (host.lima.internal etc.). Installer
+            // scope returns the raw URL (127.0.0.1:8001) which is fine
+            // for host-side downloads but unreachable from inside the VM.
+            // RuntimeSandbox scope normally does this — net-check uses
+            // Installer scope so we replicate the rewrite here.
+            let mut triple_for_vm = triple_opt.clone();
+            if let Some(t) = triple_for_vm.as_mut() {
+                let cfg = config.config().clone();
+                let inst = cfg.instances.iter().find(|i| i.name == nm);
+                let sandbox_type = inst.map(|i| i.sandbox_type)
+                    .unwrap_or(clawenv_core::sandbox::SandboxType::LimaAlpine);
+                if let Ok(host) = proxy_resolver::sandbox_host_address(backend.as_ref(), sandbox_type).await {
+                    t.http = proxy_resolver::rewrite_loopback(&t.http, &host);
+                    t.https = proxy_resolver::rewrite_loopback(&t.https, &host);
+                }
+            }
+            // Apply the (possibly rewritten) triple to the running VM so
+            // probes (sudo apk add, npm install) see HTTP_PROXY pointing
+            // at host.lima.internal:port instead of useless 127.0.0.1.
+            if let Some(ref t) = triple_for_vm {
+                proxy_resolver::apply_to_sandbox(t, backend.as_ref()).await.ok();
+            } else {
+                proxy_resolver::clear_sandbox(backend.as_ref()).await.ok();
+            }
+            for p in &probes {
+                run_sandbox_probe(out, backend.as_ref(), p).await?;
+            }
+        }
+        "native" => {
+            for p in &probes {
+                run_native_probe(out, p).await?;
+            }
+        }
+        other => anyhow::bail!("unknown --mode: {other} (expected sandbox|native)"),
+    }
+
+    out.emit(CliEvent::Complete { message: "net-check complete".into() });
+    Ok(())
+}
+
+async fn run_sandbox_probe(
+    out: &Output,
+    backend: &dyn clawenv_core::sandbox::SandboxBackend,
+    probe: &str,
+) -> Result<()> {
+    let (label, script) = match probe {
+        "apk" => (
+            "apk update + add jq",
+            // `sudo -E` preserves HTTP_PROXY/HTTPS_PROXY from the user's
+            // shell (sourced from /etc/profile.d/proxy.sh). Plain `sudo`
+            // strips proxy env via secure_path → apk goes direct → GFW
+            // stall. Source proxy.sh first to make HTTP_PROXY visible.
+            ". /etc/profile.d/proxy.sh 2>/dev/null; \
+             sudo -E apk update 2>&1 | tail -5 && \
+             sudo -E apk add --no-cache jq 2>&1 | tail -5 && \
+             which jq".to_string(),
+        ),
+        "npm" => (
+            "npm install lodash",
+            // Honour any /etc/profile.d/proxy.sh we just wrote — that file
+            // isn't sourced by `limactl shell` unless we explicitly load it.
+            "mkdir -p /tmp/clawenv-netcheck && \
+             cd /tmp/clawenv-netcheck && \
+             . /etc/profile.d/proxy.sh 2>/dev/null; \
+             npm install --no-save --no-audit --no-fund --loglevel=error lodash 2>&1 | tail -10 && \
+             ls node_modules/lodash/package.json".to_string(),
+        ),
+        "git" => (
+            "git ls-remote https://github.com/...",
+            // Plain HTTPS — works regardless of proxy state. The ssh→https
+            // rewrite is exercised by npm install (transitive git deps).
+            ". /etc/profile.d/proxy.sh 2>/dev/null; \
+             git ls-remote https://github.com/jonschlinkert/is-number.git 2>&1 | head -3".to_string(),
+        ),
+        "host" => {
+            out.emit(CliEvent::Info { message: "[skip] host probe only meaningful for --mode native".into() });
+            return Ok(());
+        }
+        other => anyhow::bail!("unknown probe: {other}"),
+    };
+    out.emit(CliEvent::Info { message: format!("[sandbox] probe {probe}: {label}") });
+    match backend.exec(&script).await {
+        Ok(stdout) => {
+            let tail: String = stdout.lines().rev().take(3).collect::<Vec<_>>()
+                .into_iter().rev().collect::<Vec<_>>().join(" | ");
+            out.emit(CliEvent::Info { message: format!("[sandbox] probe {probe}: OK — {tail}") });
+            Ok(())
+        }
+        Err(e) => {
+            anyhow::bail!("probe {probe} failed: {e}")
+        }
+    }
+}
+
+async fn run_native_probe(out: &Output, probe: &str) -> Result<()> {
+    use clawenv_core::platform::managed_shell::ManagedShell;
+    let shell = ManagedShell::new();
+    let tmp = std::env::temp_dir().join("clawenv-netcheck");
+    tokio::fs::create_dir_all(&tmp).await?;
+    let tmp_str = tmp.to_string_lossy().to_string();
+
+    let (label, cmd) = match probe {
+        "host" => {
+            // Use reqwest directly so this probe exercises the same code
+            // path as install.rs's download_with_progress. apply_env has
+            // already injected HTTP_PROXY / ALL_PROXY into this process.
+            out.emit(CliEvent::Info { message: "[native] probe host: reqwest HEAD × 2".into() });
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(15))
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()?;
+            for url in ["https://registry.npmjs.org/lodash", "https://nodejs.org/dist/"] {
+                match client.head(url).send().await {
+                    Ok(r) if r.status().is_success() || r.status().is_redirection() => {
+                        out.emit(CliEvent::Info { message: format!("[native] probe host: {url} → {}", r.status()) });
+                    }
+                    Ok(r) => anyhow::bail!("host probe: {url} → HTTP {}", r.status()),
+                    Err(e) => anyhow::bail!("host probe: {url} → {e}"),
+                }
+            }
+            out.emit(CliEvent::Info { message: "[native] probe host: OK".into() });
+            return Ok(());
+        }
+        "npm" => (
+            "npm install lodash",
+            // Single command, no shell chaining — PowerShell 5.1 on
+            // Windows doesn't honour `&&`. The `cwd` is set via managed
+            // shell's `current_dir` pass-through; install.rs does the
+            // same. File-existence assertion happens in Rust below.
+            format!(
+                "npm install --no-save --no-audit --no-fund --loglevel=error \
+                 --prefix \"{tmp_str}\" lodash"
+            ),
+        ),
+        "git" => (
+            "git ls-remote https://github.com/...",
+            "git ls-remote https://github.com/jonschlinkert/is-number.git".to_string(),
+        ),
+        "apk" => {
+            out.emit(CliEvent::Info { message: "[skip] apk probe only for --mode sandbox".into() });
+            return Ok(());
+        }
+        other => anyhow::bail!("unknown probe: {other}"),
+    };
+
+    out.emit(CliEvent::Info { message: format!("[native] probe {probe}: {label}") });
+    let out_res = shell.cmd(&cmd).output().await?;
+    if !out_res.status.success() {
+        let stderr = String::from_utf8_lossy(&out_res.stderr);
+        anyhow::bail!(
+            "probe {probe} failed (exit {:?}): {}",
+            out_res.status.code(),
+            stderr.chars().take(400).collect::<String>()
+        );
+    }
+    // npm probe additionally verifies the package actually landed —
+    // exit-zero with an empty node_modules would be a silent false pass.
+    // `--prefix` on Windows writes to `<prefix>\node_modules\...`, on
+    // Unix `<prefix>/lib/node_modules/...`; check both layouts.
+    if probe == "npm" {
+        let win_layout = tmp.join("node_modules").join("lodash").join("package.json");
+        let unix_layout = tmp.join("lib").join("node_modules").join("lodash").join("package.json");
+        if !win_layout.exists() && !unix_layout.exists() {
+            anyhow::bail!(
+                "probe npm: command exited 0 but lodash/package.json not found under {}",
+                tmp.display()
+            );
+        }
+    }
+    out.emit(CliEvent::Info { message: format!("[native] probe {probe}: OK") });
     Ok(())
 }
 

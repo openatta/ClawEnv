@@ -237,17 +237,15 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
     } else {
         // Process is not running — read log for error details
         let log_cmd = if instance.sandbox_type == SandboxType::Native {
+            let log_path = crate::config::clawenv_root()
+                .join("native").join("gateway.log");
             #[cfg(target_os = "windows")]
             {
-                let log_path = dirs::home_dir().unwrap_or_default()
-                    .join(".clawenv").join("native").join("gateway.log");
                 format!("powershell -ExecutionPolicy Bypass -Command \"Get-Content '{}' -Tail 20 -ErrorAction SilentlyContinue\"",
                     log_path.display())
             }
             #[cfg(not(target_os = "windows"))]
             {
-                let log_path = dirs::home_dir().unwrap_or_default()
-                    .join(".clawenv").join("native").join("gateway.log");
                 format!("tail -20 '{}' 2>/dev/null || echo 'no log'", log_path.display())
             }
         } else {

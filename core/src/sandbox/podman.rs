@@ -143,7 +143,7 @@ impl SandboxBackend for PodmanBackend {
         Ok(result.map(|o| o.status.success()).unwrap_or(false))
     }
 
-    async fn ensure_prerequisites(&self) -> Result<()> {
+    async fn ensure_prerequisites(&self, _proxy_on: bool) -> Result<()> {
         if self.is_available().await? {
             return Ok(());
         }

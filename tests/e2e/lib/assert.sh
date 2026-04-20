@@ -10,6 +10,10 @@ e2e_assert_init() { e2e_assert_count=0; e2e_assert_passed=0; }
 
 _ok()   { e2e_assert_count=$((e2e_assert_count+1)); e2e_assert_passed=$((e2e_assert_passed+1)); echo "  ✓ $1" >&2; return 0; }
 _fail() { e2e_assert_count=$((e2e_assert_count+1)); echo "  ✗ $1" >&2; return 1; }
+# `_skip <reason>` — exit with GNU SKIP code (77). run.sh promotes this
+# to the SKIPPED bucket instead of PASSED/FAILED. Use for preconditions
+# the scenario can't satisfy (e.g. SOCKS proxy not configured on host).
+_skip() { echo "  ↷ skipped: $1" >&2; exit 77; }
 
 # Wait for URL to return HTTP 200. Used for gateway health checks.
 expect_http_200() {

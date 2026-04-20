@@ -29,24 +29,40 @@ WIN_BUNDLE="%USERPROFILE%\\Desktop\\ClawEnv\\${NAME}-$(date +%Y%m%d-%H%M%S).tar.
 
 e2e_assert_init
 
-# Resolve Mac's IP as seen from Windows. UTM default network puts the
-# Mac at the gateway address of the Windows NIC.
-MAC_IP="${E2E_WIN_HOST_PROXY:-}"
-if [ -z "$MAC_IP" ]; then
-    MAC_IP=$(win_exec "powershell -NoProfile -Command \"(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop\"" 2>/dev/null | tail -1 | tr -d '\r\n')
+# Resolve Windows-side proxy URL. Two paths:
+#
+#   1. `E2E_WIN_PROXY_URL` set (via --win-proxy-url) — use verbatim. This
+#      is the fast path: point Windows directly at the user's real HTTP
+#      proxy on the Mac (e.g. http://172.18.0.2:8001 for Xray), skipping
+#      the mini_proxy relay entirely.
+#
+#   2. Otherwise, derive from UTM default gateway + E2E_PROXY_LISTEN and
+#      go through the Mac-side mini_proxy (~2× latency per request but
+#      lets us test with stub upstreams / transcript-style logs).
+if [ -n "${E2E_WIN_PROXY_URL:-}" ]; then
+    WIN_PROXY_URL="$E2E_WIN_PROXY_URL"
+    MAC_IP=$(echo "$WIN_PROXY_URL" | sed -E 's|^https?://||; s|:.*$||')
+    PROXY_PORT=$(echo "$WIN_PROXY_URL" | sed -E 's|^https?://[^:]+:||; s|/.*$||')
+    echo "[06] Windows → Mac proxy direct: $WIN_PROXY_URL (mini_proxy bypassed)" >&2
+else
+    MAC_IP="${E2E_WIN_HOST_PROXY:-}"
     if [ -z "$MAC_IP" ]; then
-        echo "✗ Could not resolve Mac IP from Windows. Set E2E_WIN_HOST_PROXY to Mac's UTM IP." >&2
-        exit 4
+        MAC_IP=$(win_exec "powershell -NoProfile -Command \"(Get-NetRoute -DestinationPrefix 0.0.0.0/0 | Select-Object -First 1).NextHop\"" 2>/dev/null | tail -1 | tr -d '\r\n')
+        if [ -z "$MAC_IP" ]; then
+            echo "✗ Could not resolve Mac IP from Windows. Set E2E_WIN_HOST_PROXY to Mac's UTM IP." >&2
+            exit 4
+        fi
     fi
+    PROXY_PORT="$E2E_PROXY_LISTEN"
+    WIN_PROXY_URL="http://${MAC_IP}:${PROXY_PORT}"
+    echo "[06] Windows will use proxy (via mini_proxy): $WIN_PROXY_URL" >&2
 fi
-WIN_PROXY_URL="http://${MAC_IP}:${E2E_PROXY_LISTEN}"
-echo "[06] Windows will use proxy: $WIN_PROXY_URL" >&2
 
-# Probe from Windows side that the proxy is reachable.
-win_exec "powershell -NoProfile -Command \"Test-NetConnection -ComputerName ${MAC_IP} -Port ${E2E_PROXY_LISTEN} -InformationLevel Quiet\"" 2>&1 | \
+# Probe from Windows side that the proxy port is reachable.
+win_exec "powershell -NoProfile -Command \"Test-NetConnection -ComputerName ${MAC_IP} -Port ${PROXY_PORT} -InformationLevel Quiet\"" 2>&1 | \
     grep -q "True" \
-    && _ok "Windows can reach Mac mini-proxy at ${MAC_IP}:${E2E_PROXY_LISTEN}" \
-    || { _fail "Windows cannot reach Mac mini-proxy at ${MAC_IP}:${E2E_PROXY_LISTEN} — Mac firewall?"; exit 5; }
+    && _ok "Windows can reach Mac proxy at ${MAC_IP}:${PROXY_PORT}" \
+    || { _fail "Windows cannot reach Mac proxy at ${MAC_IP}:${PROXY_PORT} — firewall or unreachable upstream"; exit 5; }
 
 # Ensure bundle dir + clean slate. Same pre-existing-native handling as
 # scenario 05 — Windows allows only one native at a time.

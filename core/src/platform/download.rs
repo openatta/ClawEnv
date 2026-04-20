@@ -51,6 +51,14 @@ pub async fn download_with_progress(
     const CHUNK_STALL: Duration = Duration::from_secs(60);
     const PROGRESS_BYTES: u64 = 1024 * 1024;
     const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+    // Throughput floor: if the first MIN_BYTES_BY_DEADLINE (256 KB) hasn't
+    // arrived within MIN_THROUGHPUT_DEADLINE (30s) we abort this URL and
+    // try the next mirror. Pure CHUNK_STALL doesn't catch GFW "trickle
+    // mode" where the connection delivers 1 byte every 29s indefinitely
+    // — chunk timer resets per byte and the URL never fails. This floor
+    // forces fallback (e.g. ghfast.top) to take over within 30s.
+    const MIN_BYTES_BY_DEADLINE: u64 = 256 * 1024;
+    const MIN_THROUGHPUT_DEADLINE: Duration = Duration::from_secs(30);
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
@@ -100,6 +108,18 @@ pub async fn download_with_progress(
                     buf.extend_from_slice(&chunk);
 
                     let downloaded = buf.len() as u64;
+
+                    // Throughput floor check (only fires once per URL, at the deadline).
+                    if t0.elapsed() >= MIN_THROUGHPUT_DEADLINE
+                        && downloaded < MIN_BYTES_BY_DEADLINE
+                    {
+                        url_failed = Some(format!(
+                            "{url}: throughput floor — only {} bytes in {}s",
+                            downloaded, MIN_THROUGHPUT_DEADLINE.as_secs()
+                        ));
+                        break;
+                    }
+
                     let since_bytes = downloaded - last_emit_bytes;
                     if since_bytes >= PROGRESS_BYTES || last_emit_at.elapsed() >= PROGRESS_INTERVAL {
                         let pct = if let Some(t) = total {
@@ -169,10 +189,14 @@ pub async fn download_silent(
     connect_timeout_secs: u64,
 ) -> Result<Vec<u8>> {
     use sha2::{Digest, Sha256};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
     use tokio::time::timeout;
 
     const CHUNK_STALL: Duration = Duration::from_secs(30);
+    // Same throughput floor as download_with_progress — see that fn for
+    // rationale (GFW trickle-mode bypass).
+    const MIN_BYTES_BY_DEADLINE: u64 = 256 * 1024;
+    const MIN_THROUGHPUT_DEADLINE: Duration = Duration::from_secs(30);
 
     let client = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(connect_timeout_secs))
@@ -188,15 +212,28 @@ pub async fn download_silent(
         };
         let mut buf = Vec::new();
         let mut hasher = Sha256::new();
-        let mut failed = false;
+        let mut failed: Option<String> = None;
+        let t0 = Instant::now();
         loop {
             match timeout(CHUNK_STALL, resp.chunk()).await {
-                Err(_) | Ok(Err(_)) => { failed = true; break; }
+                Err(_) | Ok(Err(_)) => { failed = Some(format!("{url}: stalled")); break; }
                 Ok(Ok(None)) => break,
-                Ok(Ok(Some(c))) => { hasher.update(&c); buf.extend_from_slice(&c); }
+                Ok(Ok(Some(c))) => {
+                    hasher.update(&c);
+                    buf.extend_from_slice(&c);
+                    if t0.elapsed() >= MIN_THROUGHPUT_DEADLINE
+                        && (buf.len() as u64) < MIN_BYTES_BY_DEADLINE
+                    {
+                        failed = Some(format!(
+                            "{url}: throughput floor — only {} bytes in {}s",
+                            buf.len(), MIN_THROUGHPUT_DEADLINE.as_secs()
+                        ));
+                        break;
+                    }
+                }
             }
         }
-        if failed { last_err = Some(format!("{url}: stalled")); continue; }
+        if let Some(e) = failed { last_err = Some(e); continue; }
         if let Some(expected) = expected_sha256 {
             let hex = hex::encode(hasher.finalize());
             if hex != expected { last_err = Some(format!("{url}: sha mismatch")); continue; }

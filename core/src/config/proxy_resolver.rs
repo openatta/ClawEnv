@@ -22,6 +22,12 @@ use crate::sandbox::{SandboxBackend, SandboxType};
 /// Fully resolved proxy values. Callers don't need to touch env vars,
 /// config fields, or keychain themselves — they just feed this into
 /// `apply_env` / `apply_child_cmd` / `apply_to_sandbox`.
+///
+/// HTTP/HTTPS only — SOCKS support was removed in v0.2.13 because Alpine's
+/// apk and several npm postinstall tools don't honour ALL_PROXY, and
+/// shipping a SOCKS-aware sandbox would require a per-VM SOCKS→HTTP
+/// bridge that's out of scope. Users with SOCKS-only proxies should
+/// configure their proxy daemon to expose an HTTP inbound.
 #[derive(Debug, Clone)]
 pub struct ProxyTriple {
     pub http: String,
@@ -364,8 +370,31 @@ pub async fn apply_to_sandbox(
     let http_sq = esc_sq(&triple.http);
     let https_sq = esc_sq(&triple.https);
 
+    // Two locations:
+    //   /etc/environment — system-wide PAM env. Loaded by every login
+    //     and (critically) by service spawns. npm-spawned `git clone`
+    //     subprocesses inherit it. Without this, the GIT_CONFIG_*
+    //     rewrite in profile.d isn't seen by background npm postinstall
+    //     git invocations and they fall back to direct → port 22 → fail.
+    //   /etc/profile.d/proxy.sh — interactive shell convenience (apk,
+    //     interactive npm install verbose, etc).
+    // Both written transactionally so a partial failure doesn't leave
+    // an inconsistent proxy state.
     let combined = format!(
         r#"set -e
+# /etc/environment: PAM-loaded, inherited by npm postinstall children.
+sudo tee /etc/environment > /dev/null << 'ENVEOF'
+http_proxy={http}
+https_proxy={https}
+HTTP_PROXY={http}
+HTTPS_PROXY={https}
+no_proxy={np}
+NO_PROXY={np}
+GIT_CONFIG_COUNT=1
+GIT_CONFIG_KEY_0=url.https://github.com/.insteadOf
+GIT_CONFIG_VALUE_0=ssh://git@github.com/
+ENVEOF
+# /etc/profile.d/proxy.sh: interactive shells (apk + ad-hoc).
 sudo tee /etc/profile.d/proxy.sh > /dev/null << 'PROXYEOF'
 export http_proxy="{http}"
 export https_proxy="{https}"
@@ -373,6 +402,9 @@ export HTTP_PROXY="{http}"
 export HTTPS_PROXY="{https}"
 export no_proxy="{np}"
 export NO_PROXY="{np}"
+export GIT_CONFIG_COUNT=1
+export GIT_CONFIG_KEY_0="url.https://github.com/.insteadOf"
+export GIT_CONFIG_VALUE_0="ssh://git@github.com/"
 PROXYEOF
 sudo chmod +x /etc/profile.d/proxy.sh
 # npm config is per-user — write to $HOME/.npmrc, not root's. Tolerate
@@ -393,7 +425,11 @@ npm config set https-proxy '{https_sq}' 2>/dev/null || true
 /// Clear proxy inside sandbox — `mode == "none"` path. Same
 /// sudo-for-root-files, non-sudo-for-npm pattern as apply_to_sandbox.
 pub async fn clear_sandbox(backend: &dyn SandboxBackend) -> Result<()> {
+    // Wipe both proxy stores written by apply_to_sandbox. /etc/environment
+    // is reset to empty (PAM accepts an empty file) rather than removed
+    // because some distros warn about missing /etc/environment.
     let script = r#"sudo rm -f /etc/profile.d/proxy.sh
+sudo tee /etc/environment > /dev/null < /dev/null
 npm config delete proxy 2>/dev/null || true
 npm config delete https-proxy 2>/dev/null || true
 "#;

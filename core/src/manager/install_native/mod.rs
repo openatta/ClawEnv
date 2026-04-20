@@ -88,8 +88,8 @@ impl GitRelease {
             .ok_or_else(|| anyhow::anyhow!("mirrors.toml missing [dugite.sha256.{sha_key}]"))?;
         Ok((plat, sha))
     }
-    fn render_urls(&self, platform: &str) -> Result<Vec<(String, String)>> {
-        crate::config::mirrors_asset::AssetMirrors::get().build_urls("dugite", platform)
+    fn render_urls(&self, platform: &str, proxy_on: bool) -> Result<Vec<(String, String)>> {
+        crate::config::mirrors_asset::AssetMirrors::get().build_urls("dugite", platform, proxy_on)
     }
 }
 
@@ -98,7 +98,7 @@ impl GitRelease {
 /// The extracted tree is self-contained (bin/git + libexec/git-core + share/)
 /// so bundle exports on this machine can be imported on any peer machine of
 /// the same OS/arch without requiring system git on the target.
-async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
+async fn install_git(tx: &mpsc::Sender<InstallProgress>, proxy_on: bool) -> Result<()> {
     let git_dir = clawenv_git_dir();
     let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
     tokio::fs::create_dir_all(&parent).await?;
@@ -106,17 +106,10 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
         let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "64-bit" };
-        // github.com primary, public CN-accessible GitHub mirrors as fallback.
-        // No sha256 pinned for MinGit yet — TLS + HTTP 200 is the safety net.
-        // (See git-release.toml for the dugite sha256 pattern we could adopt.)
-        let base_path = format!(
-            "github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-{arch}.zip"
-        );
-        let urls: Vec<(String, String)> = vec![
-            (format!("https://{base_path}"), String::new()),
-            (format!("https://ghfast.top/https://{base_path}"), String::new()),
-            (format!("https://mirror.ghproxy.com/https://{base_path}"), String::new()),
-        ];
+        // URLs come from assets/mirrors.toml [mingit] — proxy_on drives
+        // the official-only vs official+fallback tier selection.
+        let urls = crate::config::mirrors_asset::AssetMirrors::get()
+            .build_urls("mingit", arch, proxy_on)?;
 
         let bytes = download_with_progress(
             &urls, None, tx,
@@ -150,7 +143,7 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     {
         let release = GitRelease::load()?;
         let (platform, expected_sha) = release.current_platform()?;
-        let urls = release.render_urls(platform)?;
+        let urls = release.render_urls(platform, proxy_on)?;
         let (_url, filename) = urls.first()
             .ok_or_else(|| anyhow::anyhow!("mirrors.toml [dugite] produced no URLs"))?;
         let filename = filename.clone();
@@ -222,7 +215,11 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
 /// The primary_base arg (from `mirrors.nodejs_dist_url()` config) is used
 /// to prepend a user-pinned mirror ahead of the bundled list.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(super) fn build_node_urls(primary_base: &str, platform_with_ext: &str) -> Result<Vec<(String, String)>> {
+pub(super) fn build_node_urls(
+    primary_base: &str,
+    platform_with_ext: &str,
+    proxy_on: bool,
+) -> Result<Vec<(String, String)>> {
     use crate::config::mirrors_asset::AssetMirrors;
     // `platform_with_ext` is something like "darwin-arm64.tar.gz" or
     // "win-arm64.zip" — split on the last dot to separate platform from ext.
@@ -237,17 +234,15 @@ pub(super) fn build_node_urls(primary_base: &str, platform_with_ext: &str) -> Re
         _ => anyhow::bail!("malformed node platform key: {platform_with_ext}"),
     };
     let mirrors = AssetMirrors::get();
-    // AssetMirrors templates use {platform} and {ext}; pass platform and
-    // rely on the loader to substitute via its generic scalar-var mechanism.
-    // `ext` isn't a section field by default — we synthesise it.
-    let mut urls = mirrors.build_urls("node", platform)?;
+    // Proxy-aware URL list: proxy_on → official only; off → + fallback.
+    let mut urls = mirrors.build_urls("node", platform, proxy_on)?;
     // Substitute {ext} in each URL manually since it's not a section scalar.
     for (u, _) in urls.iter_mut() {
         *u = u.replace("{ext}", &ext);
     }
-    // User-pinned primary base takes precedence if non-default.
-    if primary_base != "https://nodejs.org/dist"
-        && !primary_base.is_empty()
+    // User-pinned primary base takes precedence if non-empty.
+    if !primary_base.is_empty()
+        && primary_base != "https://nodejs.org/dist"
     {
         if let Some((first_url, first_file)) = urls.first().cloned() {
             // Rewrite the first url's base to primary_base.
@@ -311,20 +306,62 @@ async fn node_version() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
+/// Host-side npm registry preflight (used by native install). HEAD each
+/// candidate via reqwest with a short timeout; first 2xx/3xx wins.
+/// Returns the first candidate on total failure so npm config at least
+/// gets set to something sensible.
+async fn select_reachable_npm_host(candidates: &[String]) -> Option<String> {
+    // reqwest honours system / env proxy automatically; no explicit proxy
+    // plumbing needed here — the installer-scope proxy will already be in
+    // the process env thanks to apply_env() at install start.
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+    {
+        Ok(c) => c,
+        Err(_) => return candidates.first().cloned(),
+    };
+    for url in candidates {
+        let probe = format!("{}/-/ping", url.trim_end_matches('/'));
+        match client.head(&probe).send().await {
+            Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
+                tracing::info!("npm preflight (native): {url} reachable");
+                return Some(url.clone());
+            }
+            Ok(resp) => {
+                tracing::info!("npm preflight (native): {url} returned {}", resp.status());
+            }
+            Err(e) => {
+                tracing::info!("npm preflight (native): {url} unreachable: {e}");
+            }
+        }
+    }
+    candidates.first().cloned()
+}
+
 // ---- Platform-dispatched Node.js install ----
 
-async fn install_nodejs(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
+async fn install_nodejs(
+    tx: &mpsc::Sender<InstallProgress>,
+    nodejs_dist_base: &str,
+    proxy_on: bool,
+) -> Result<()> {
     #[cfg(target_os = "macos")]
-    { macos::install_nodejs(tx, nodejs_dist_base).await }
+    { macos::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
     #[cfg(target_os = "windows")]
-    { windows::install_nodejs(tx, nodejs_dist_base).await }
+    { windows::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
     #[cfg(target_os = "linux")]
-    { linux::install_nodejs(tx, nodejs_dist_base).await }
+    { linux::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
 }
 
 /// Public API for CLI step-by-step install: install Node.js only.
-pub async fn install_nodejs_public(tx: &mpsc::Sender<InstallProgress>, nodejs_dist_base: &str) -> Result<()> {
-    install_nodejs(tx, nodejs_dist_base).await
+pub async fn install_nodejs_public(
+    tx: &mpsc::Sender<InstallProgress>,
+    nodejs_dist_base: &str,
+    proxy_on: bool,
+) -> Result<()> {
+    install_nodejs(tx, nodejs_dist_base, proxy_on).await
 }
 
 // ---- Main install flow (shared across platforms) ----
@@ -345,11 +382,17 @@ pub async fn install_native(
         return install_from_bundle(opts, config, tx, path, &install_dir).await;
     }
 
-    let mirrors = &config.config().clawenv.mirrors;
+    let mirrors = config.config().clawenv.mirrors.clone();
+
+    // Install-time proxy snapshot — identical rationale to the sandbox
+    // install path in manager/install.rs. One resolution at top of flow,
+    // threaded down through every mirror consumer.
+    let proxy_on = crate::config::proxy_resolver::Scope::Installer
+        .resolve(config).await.is_some();
 
     // Step 0: Ensure Git (needed by npm for some dependencies)
     if !has_git().await {
-        install_git(tx).await?;
+        install_git(tx, proxy_on).await?;
     }
 
     // Step 1: Ensure Node.js
@@ -357,19 +400,25 @@ pub async fn install_native(
 
     if !has_node().await {
         send(tx, "Node.js not found, installing...", 12, InstallStage::EnsurePrerequisites).await;
-        install_nodejs(tx, mirrors.nodejs_dist_url()).await?;
+        let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
+        install_nodejs(tx, &base, proxy_on).await?;
         send(tx, "Node.js installed", 25, InstallStage::EnsurePrerequisites).await;
     } else {
         let ver = node_version().await;
         send(tx, &format!("Node.js {ver} ready"), 25, InstallStage::EnsurePrerequisites).await;
     }
 
-    // Configure npm registry mirror — use our managed npm
-    let npm_registry = mirrors.npm_registry_url();
-    if npm_registry != "https://registry.npmjs.org" {
+    // Configure npm registry. Native mode's preflight is simple: try each
+    // candidate from mirrors.toml (proxy-aware list) via a plain HEAD, pick
+    // the first 2xx. Unlike sandbox mode we can use the host's reqwest
+    // directly — no need to exec curl through a backend.
+    let npm_candidates = mirrors.npm_registry_urls(proxy_on);
+    let chosen = select_reachable_npm_host(&npm_candidates).await;
+    if let Some(registry) = chosen.filter(|r| r != "https://registry.npmjs.org") {
         let shell = crate::platform::managed_shell::ManagedShell::new();
-        shell.cmd(&format!("npm config set registry {npm_registry}"))
+        shell.cmd(&format!("npm config set registry {registry}"))
             .status().await.ok();
+        tracing::info!("npm registry set to {registry} (native)");
     }
 
     // Step 2: Install claw product
@@ -499,9 +548,13 @@ pub async fn install_native(
     // Poll instead of a bare 2s sleep so slow Windows ARM64 boxes
     // (openclaw loads ~750 packages on each start) still get an honest
     // success signal and don't race the subsequent install stages.
+    //
+    // Budget: 120s total — openclaw cold-start on Windows ARM64 regularly
+    // spends 30-60s on ESM module resolution before `listen()` even fires.
+    // Earlier 30s window gave false negatives during E2E.
     let probe_port = opts.gateway_port;
     let mut gateway_up = false;
-    for i in 0..10 {
+    for i in 0..40 {
         tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 2 } else { 3 })).await;
         if crate::monitor::InstanceMonitor::check_health_native(probe_port).await
             == crate::monitor::InstanceHealth::Running
@@ -518,7 +571,7 @@ pub async fn install_native(
             .map(|s| s.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
             .unwrap_or_else(|| "(no gateway.log produced — spawn likely failed to execute)".into());
         anyhow::bail!(
-            "{} gateway failed to come up on port {probe_port} after ~30s.\n\nGateway log tail:\n{log_tail}",
+            "{} gateway failed to come up on port {probe_port} after ~120s.\n\nGateway log tail:\n{log_tail}",
             desc.display_name
         );
     }
@@ -688,9 +741,10 @@ async fn install_from_bundle(
 
     // Same port-readiness polling as the online-install path above —
     // refuse to claim "gateway started" until it actually listens.
+    // 120s budget (Windows ARM64 cold-start).
     let probe_port = opts.gateway_port;
     let mut gateway_up = false;
-    for i in 0..10 {
+    for i in 0..40 {
         tokio::time::sleep(std::time::Duration::from_secs(if i == 0 { 2 } else { 3 })).await;
         if crate::monitor::InstanceMonitor::check_health_native(probe_port).await
             == crate::monitor::InstanceHealth::Running
@@ -705,7 +759,7 @@ async fn install_from_bundle(
             .map(|s| s.lines().rev().take(30).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n"))
             .unwrap_or_else(|| "(no gateway.log produced)".into());
         anyhow::bail!(
-            "{} gateway failed to come up on port {probe_port} after ~30s.\n\nGateway log tail:\n{log_tail}",
+            "{} gateway failed to come up on port {probe_port} after ~120s.\n\nGateway log tail:\n{log_tail}",
             desc.display_name
         );
     }
@@ -752,7 +806,7 @@ mod git_release_tests {
     #[test]
     fn mirrors_toml_renders_dugite_url_correctly() {
         let m = AssetMirrors::get();
-        let urls = m.build_urls("dugite", "macOS-arm64").expect("dugite urls");
+        let urls = m.build_urls("dugite", "macOS-arm64", false).expect("dugite urls");
         assert!(!urls.is_empty(), "urls array must have at least one entry");
         let (url, filename) = &urls[0];
 
