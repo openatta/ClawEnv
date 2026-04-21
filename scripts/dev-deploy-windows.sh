@@ -54,17 +54,22 @@ echo "--- Building ClawLite on Windows ---"
 bash "$SCRIPT_DIR/win-remote.sh" run \
     "cd tauri && C:\\Users\\$WIN_USER\\.cargo\\bin\\cargo.exe tauri build --config ..\\lite\\clawlite.tauri.conf.json"
 
-# 5) scp all four installers back to the Mac desktop folder.
+# 5) scp all installers back to the Mac desktop folder.
+# Version string comes from core/Cargo.toml so the script doesn't go
+# stale on every release bump (we shipped 0.3.2 once with 0.3.1
+# hardcoded paths — scp silently copied nothing and left last-release
+# files on disk). Paths use forward slashes — OpenSSH scp handles them
+# fine even on Windows targets.
 echo ""
 echo "--- Copying artifacts back to $DEST ---"
-# Paths are relative to the Win VM's project root (forward slashes work
-# fine for scp even on Windows paths).
+VERSION=$(awk '/^\[package\]/{p=1} p && /^version/{gsub(/[" ]/,"",$3); print $3; exit}' "$PROJECT_DIR/core/Cargo.toml")
+[ -n "$VERSION" ] || { echo "ERROR: couldn't parse version from core/Cargo.toml"; exit 1; }
 REMOTE_ROOT="C:/Users/$WIN_USER/ClawEnv"
 for src in \
-    "target/release/bundle/msi/ClawEnv_0.3.1_arm64_en-US.msi" \
-    "target/release/bundle/msi/ClawLite_0.3.1_arm64_en-US.msi" \
-    "target/release/bundle/nsis/ClawEnv_0.3.1_arm64-setup.exe" \
-    "target/release/bundle/nsis/ClawLite_0.3.1_arm64-setup.exe"; do
+    "target/release/bundle/msi/ClawEnv_${VERSION}_arm64_en-US.msi" \
+    "target/release/bundle/msi/ClawLite_${VERSION}_arm64_en-US.msi" \
+    "target/release/bundle/nsis/ClawEnv_${VERSION}_arm64-setup.exe" \
+    "target/release/bundle/nsis/ClawLite_${VERSION}_arm64-setup.exe"; do
     scp -o ConnectTimeout=10 -q "$WIN_USER@$WIN_HOST:$REMOTE_ROOT/$src" "$DEST/"
     base=$(basename "$src")
     if [ -f "$DEST/$base" ]; then
