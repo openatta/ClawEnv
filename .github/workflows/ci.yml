@@ -293,8 +293,20 @@ jobs:
       - name: npm install
         run: npm ci --no-audit --no-fund
 
-      - name: cargo tauri build
+      - name: cargo tauri build (ClawEnv — main)
         run: cargo tauri build
+
+      # ClawLite — same Rust binary + same frontend dist, rebundled with
+      # an override config that changes productName / identifier / window.
+      # Output lands in the SAME bundle subdirs (different filenames since
+      # productName is "ClawLite" vs "ClawEnv"), so the glob upload later
+      # picks both flavors up together. See docs/06-lite.md for the
+      # "cd tauri &&" requirement (Tauri CLI treats --config's parent dir
+      # as the project root and lite/ has no Cargo.toml).
+      - name: cargo tauri build (ClawLite)
+        shell: bash
+        run: |
+          cd tauri && cargo tauri build --config ../lite/clawlite.tauri.conf.json
 
       # Rename the standalone clawcli to a platform-specific filename so
       # the Release page can hold all three side-by-side without asset
