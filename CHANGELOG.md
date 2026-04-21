@@ -4,6 +4,60 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.3.1 — 2026-04-21
+
+Windows polish + export reliability. Ships on top of v0.3.0 with four
+user-visible fixes, all Windows-specific except the export ticker which
+all platforms benefit from.
+
+**Export progress heartbeat**
+- `cli/src/main.rs` + `core/src/export/manifest.rs`: every second while
+  tar / `wsl --export` / `podman save` runs, a `CliEvent::Progress` fires
+  with `X.Y MB @ Z.Z MB/s (Ns elapsed)`. Two problems fixed at once:
+  1. `cli_bridge` used to SIGKILL the clawcli child after 10 minutes of
+     silent tar output, leaving an orphan tar to run to completion —
+     user saw "timeout" but a valid file still appeared. Heartbeats
+     reset the idle timer.
+  2. The frozen 15% progress bar during the 1-3 min (Mac) / 10-20 min
+     (Windows ARM64) compress phase now shows a live MB/s read-out.
+- `.kill_on_drop(true)` on all spawned tar/podman/wsl children — if the
+  future holding them is cancelled, the child dies with it. No more
+  orphans.
+- New `wrap_with_inner_tar_ticked(inner, out, on_tick)` variant in
+  `core::export::manifest`. Old `wrap_with_inner_tar` kept as a thin
+  no-op-callback wrapper (podman_roundtrip integration test unchanged).
+
+**Windows native gateway — no terminal window + reliable start**
+- `core/src/platform/managed_shell.rs::spawn_detached` (Windows
+  branch) now uses `Start-Process -WindowStyle Hidden` instead of the
+  v0.3.0 WMI `Invoke-CimMethod Win32_Process Create` path.
+  - The WMI approach with `ProcessStartupInformation.CreateFlags =
+    CREATE_NO_WINDOW` returned rc=21 ("Privilege not held") for
+    non-admin users, so on a normal desktop install the gateway
+    silently failed to start.
+  - The old WMI without CreateFlags spawned the gateway fine but left
+    a visible `cmd.exe` console window that the user could close,
+    killing the gateway — breaking the design invariant that GUI
+    lifecycle is orthogonal to claw lifecycle.
+  - `Start-Process -WindowStyle Hidden` needs no elevation, pops no
+    window, and matches the non-SSH GUI use case. Known caveat: SSH
+    sessions (E2E runner) may hit the job-object inheritance issue
+    and need a different path — acceptable trade-off.
+
+**CLI heartbeat for start/stop/restart**
+- `cli/src/main.rs`: new `spawn_operation_heartbeat(out, stage, label)`
+  returns an RAII `HeartbeatGuard` that emits `CliEvent::Info` every
+  5 seconds while the wrapped operation runs. Wrapped around each of
+  `Commands::Start`, `Stop`, `Restart`. Same purpose as the export
+  ticker: keep `cli_bridge`'s 10-min idle timer alive on slow Windows
+  ARM64 VM, and surface "still working... (15s)" to the GUI.
+
+**CI**
+- New `.github/workflows/release.yml`: on `v*` tag push, builds macOS
+  (aarch64) and Windows (arm64) release artifacts in parallel and
+  attaches them to the corresponding GitHub Release. Replaces the
+  manual "rebuild-both-platforms-and-upload" dance.
+
 ## v0.3.0 — 2026-04-21
 
 Policy reversal: **connectivity is the user's problem, not ours**. Prior

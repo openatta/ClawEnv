@@ -49,6 +49,11 @@ export default function StepProgress(props: {
     // apk progress — e.g. `(1/25) Installing busybox (1.37.0-r12)`
     m = msg.match(/\(\d+\/\d+\)\s+Installing\s+(\S+)/);
     if (m) return `apk: ${m[1]}`;
+    // Export compress/wrap heartbeat — "12.3 MB @ 4.5 MB/s (8s)"
+    // from run_with_progress_ticker / wrap_with_inner_tar_ticked.
+    // Surfaces live compression throughput instead of a frozen bar.
+    m = msg.match(/(\d+(?:\.\d+)?\s*MB\s*@\s*\d+(?:\.\d+)?\s*MB\/s(?:\s*\(\d+s\))?)/);
+    if (m) return m[1];
     return null;
   }
 

@@ -224,37 +224,49 @@ impl ManagedShell {
             );
             std::fs::write(&bat_path, bat_body)?;
 
-            // IMPORTANT: we must NOT use `Start-Process -WindowStyle Hidden`
-            // here. Over Windows OpenSSH (and likely any launcher running
-            // inside a server-side job object), `Start-Process` leaves the
-            // spawned child inside the caller's job object. When the outer
-            // clawcli.exe returns and the SSH channel closes, Windows kills
-            // the entire tree — including our "detached" gateway. E2E caught
-            // this: install claimed gateway-up; a /health check issued from
-            // a fresh SSH session moments later found port unbound and no
-            // node.exe alive.
+            // Spawning strategy (Windows):
             //
-            // `Invoke-CimMethod Win32_Process Create` creates the new
-            // process through WMI. Unlike Start-Process, WMI process
-            // creation does NOT inherit the caller's job object — the child
-            // becomes a true top-level process and survives parent exit
-            // (SSH disconnect, tray-app close, etc.). Same mechanism as the
-            // deprecated `wmic process call create`, but via the modern CIM
-            // cmdlet so it keeps working on Windows 11+ where wmic is being
-            // phased out.
+            // We use `Start-Process -WindowStyle Hidden` for two reasons:
             //
-            // The .bat handles redirection (stdin < NUL, stdout/stderr to
-            // gateway.log) so the spawned cmd has no live console.
+            // 1. **No console window** — the whole point of "detached
+            //    gateway": GUI lifecycle must stay orthogonal to claw
+            //    lifecycle (close the tray app → gateway keeps running).
+            //    A visible `cmd.exe` window would tempt the user to close
+            //    it, which kills the cmd chain and the node gateway with
+            //    it.
+            // 2. **No admin privilege required**. The earlier attempt to
+            //    pass `CreateFlags = CREATE_NO_WINDOW` via a WMI
+            //    `Win32_ProcessStartup` struct failed with WMI return code
+            //    21 (`Privilege not held`) — only elevated callers can
+            //    pass those flags. `Start-Process -WindowStyle Hidden`
+            //    uses the normal CreateProcess path and respects the
+            //    caller's own privilege, so non-admin users work.
             //
-            // We drop the PS script on disk (next to the .bat) and invoke it
-            // via `powershell -File` rather than `-Command`. Much simpler
-            // escaping story — the quoted path inside Invoke-CimMethod has
-            // both `'` and `"` in a specific arrangement that's painful to
-            // thread through `-Command` argv encoding correctly.
+            // **Known caveat (E2E only)**: Windows OpenSSH sessions run
+            // inside a server-side job object. `Start-Process` does NOT
+            // break the child out of that job, so when the SSH channel
+            // closes Windows kills the entire job tree — including our
+            // "detached" gateway. For GUI users this is irrelevant
+            // (ClawEnv.exe is launched interactively, no restrictive
+            // job), but the SSH-based E2E smoke tests (`tests/e2e/lib/
+            // win-remote.sh`) need to explicitly handle lifecycle.
+            //
+            // The .bat it spawns handles PATH + redirection (stdin < NUL,
+            // stdout/stderr → gateway.log) so node runs with no live
+            // console even after cmd.exe exits.
+            //
+            // -PassThru swallowed into Out-Null so nothing leaks to the
+            // caller's stdout — our JSON-over-stdout channel must stay
+            // clean for cli_bridge to parse events.
+            // ArgumentList uses two elements: '/c' and the quoted bat
+            // path. Single-quoted PS string keeps backslashes literal;
+            // embedded double-quotes survive unchanged so cmd.exe sees
+            // `cmd /c "<bat>"` (literal quotes) and parses the bat path
+            // correctly even if it contains spaces.
             let ps_path = self.install_dir.join(".clawenv-spawn.ps1");
             let ps_body = format!(
-                "Invoke-CimMethod -ClassName Win32_Process -MethodName Create \
-                 -Arguments @{{CommandLine='cmd /c \"{}\"'}} | Out-Null\r\n",
+                "Start-Process -FilePath cmd -ArgumentList '/c','\"{}\"' \
+                 -WindowStyle Hidden -PassThru | Out-Null\r\n",
                 bat_path.display()
             );
             std::fs::write(&ps_path, ps_body)?;

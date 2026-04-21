@@ -159,6 +159,37 @@ impl BundleManifest {
         inner_tar: &Path,
         out_path: &Path,
     ) -> Result<()> {
+        self.wrap_with_inner_tar_ticked(inner_tar, out_path,
+            |_bytes, _elapsed| {}).await
+    }
+
+    /// Variant of `wrap_with_inner_tar` that fires `on_tick` once per
+    /// second while the outer `tar czf` runs. Two problems this solves
+    /// (both surfaced on Windows ARM64 where export of a multi-GB WSL
+    /// distro takes 10-20 minutes):
+    ///
+    /// 1. **cli_bridge's idle-timeout**. The parent Tauri process kills
+    ///    the clawcli child after 10 minutes of stdout silence. Without
+    ///    per-second heartbeats the export used to get SIGKILL'd right
+    ///    as tar was ~60% done; clawcli exited but tar kept running as
+    ///    an orphan (no kill_on_drop + no explicit kill), so the user
+    ///    saw an error in the UI but a valid file eventually appeared.
+    /// 2. **Frozen progress bar**. One emit at 90% then 20 minutes of
+    ///    silence looked identical to a hang.
+    ///
+    /// `on_tick(bytes_written, elapsed)` — caller decides how to render.
+    /// `kill_on_drop(true)` on the tar child ensures that if the enclosing
+    /// future is cancelled (parent death, explicit abort) the tar process
+    /// also dies — no more orphan tar running past the user's UI state.
+    pub async fn wrap_with_inner_tar_ticked<F>(
+        &self,
+        inner_tar: &Path,
+        out_path: &Path,
+        mut on_tick: F,
+    ) -> Result<()>
+    where
+        F: FnMut(u64, std::time::Duration) + Send,
+    {
         let parent = out_path.parent()
             .ok_or_else(|| anyhow!("output path has no parent: {}", out_path.display()))?;
         let work = parent.join(format!(".clawenv-bundle-work-{}", std::process::id()));
@@ -193,7 +224,7 @@ impl BundleManifest {
             let _ = tokio::fs::remove_file(inner_tar).await;
         }
 
-        let status = tokio::process::Command::new("tar")
+        let mut child = tokio::process::Command::new("tar")
             .args([
                 "czf",
                 &out_path.to_string_lossy(),
@@ -201,9 +232,25 @@ impl BundleManifest {
                 MANIFEST_FILENAME,
                 Self::INNER_PAYLOAD_FILENAME,
             ])
-            .status()
-            .await
+            .kill_on_drop(true)
+            .spawn()
             .map_err(|e| anyhow!("spawn tar (wrap): {e}"))?;
+
+        let start = std::time::Instant::now();
+        let status = loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                child.wait(),
+            ).await {
+                Ok(r) => break r.map_err(|e| anyhow!("tar (wrap) wait: {e}"))?,
+                Err(_) => {
+                    // Not done yet — stat the output and tick.
+                    let bytes = tokio::fs::metadata(out_path).await
+                        .map(|m| m.len()).unwrap_or(0);
+                    on_tick(bytes, start.elapsed());
+                }
+            }
+        };
 
         if !status.success() {
             anyhow::bail!("tar wrap exited with status {:?}", status.code());

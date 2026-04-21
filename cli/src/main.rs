@@ -455,6 +455,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
             out.emit(CliEvent::Info { message: format!("Starting '{name}'...") });
+            let _heartbeat = spawn_operation_heartbeat(out.clone(), "start", "Starting instance");
             clawenv_core::manager::instance::start_instance(inst).await?;
             out.emit(CliEvent::Complete { message: format!("Instance '{name}' started") });
         }
@@ -464,6 +465,8 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
+            out.emit(CliEvent::Info { message: format!("Stopping '{name}'...") });
+            let _heartbeat = spawn_operation_heartbeat(out.clone(), "stop", "Stopping instance");
             clawenv_core::manager::instance::stop_instance(inst).await?;
             out.emit(CliEvent::Complete { message: format!("Instance '{name}' stopped") });
         }
@@ -473,6 +476,8 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let name = resolve_name(name);
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
+            out.emit(CliEvent::Info { message: format!("Restarting '{name}'...") });
+            let _heartbeat = spawn_operation_heartbeat(out.clone(), "restart", "Restarting instance");
             clawenv_core::manager::instance::restart_instance(inst).await?;
             out.emit(CliEvent::Complete { message: format!("Instance '{name}' restarted") });
         }
@@ -676,14 +681,19 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     // Windows' built-in tar.exe (BSD tar + gzip). `-C clawenv`
                     // so archive paths are "node/..", "git/..", "native/.."
                     // and a receiving machine can untar directly into its own
-                    // ~/.clawenv/ to restore the bundle.
-                    let status = tokio::process::Command::new("tar")
-                        .args(["czf",
-                               &out_path.to_string_lossy(),
-                               "-C", &clawenv.to_string_lossy(),
-                               clawenv_core::export::manifest::MANIFEST_FILENAME,
-                               "node", "git", "native"])
-                        .status().await;
+                    // ~/.clawenv/ to restore the bundle. Goes through
+                    // `run_with_progress_ticker` so cli_bridge's idle timer
+                    // stays alive across the 1-10 min compress on Windows.
+                    let mut cmd = tokio::process::Command::new("tar");
+                    cmd.args(["czf",
+                              &out_path.to_string_lossy(),
+                              "-C", &clawenv.to_string_lossy(),
+                              clawenv_core::export::manifest::MANIFEST_FILENAME,
+                              "node", "git", "native"]);
+                    let status = run_with_progress_ticker(
+                        cmd, &out_path, "compress", 15, 85,
+                        "Compressing native bundle", out,
+                    ).await;
 
                     // Remove the manifest sidecar once it's in the archive.
                     let _ = std::fs::remove_file(
@@ -704,7 +714,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             });
                         }
                         Ok(s) => anyhow::bail!("tar exited with status {:?}", s.code()),
-                        Err(e) => anyhow::bail!("failed to run tar: {e}"),
+                        Err(e) => anyhow::bail!("tar failed: {e}"),
                     }
                 }
                 SandboxType::LimaAlpine => {
@@ -739,19 +749,23 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     // Exclude runtime-only artefacts so the tarball doesn't
                     // carry dead sockets / stale pids into the receiving
                     // machine. cidata.iso IS included (cloud-init seed for
-                    // first-boot provisioning on the target).
-                    let status = tokio::process::Command::new("tar")
-                        .args([
-                            "czf",
-                            &out_path.to_string_lossy(),
-                            "-C", &lima_home.to_string_lossy(),
-                            "--exclude", &format!("{vm_name}/*.sock"),
-                            "--exclude", &format!("{vm_name}/*.pid"),
-                            "--exclude", &format!("{vm_name}/*.log"),
-                            clawenv_core::export::manifest::MANIFEST_FILENAME,
-                            vm_name,
-                        ])
-                        .status().await;
+                    // first-boot provisioning on the target). Heartbeat
+                    // ticker keeps cli_bridge alive + surfaces MB/s to UI.
+                    let mut cmd = tokio::process::Command::new("tar");
+                    cmd.args([
+                        "czf",
+                        &out_path.to_string_lossy(),
+                        "-C", &lima_home.to_string_lossy(),
+                        "--exclude", &format!("{vm_name}/*.sock"),
+                        "--exclude", &format!("{vm_name}/*.pid"),
+                        "--exclude", &format!("{vm_name}/*.log"),
+                        clawenv_core::export::manifest::MANIFEST_FILENAME,
+                        vm_name,
+                    ]);
+                    let status = run_with_progress_ticker(
+                        cmd, &out_path, "compress", 15, 85,
+                        "Compressing Lima VM", out,
+                    ).await;
 
                     let _ = std::fs::remove_file(
                         lima_home.join(clawenv_core::export::manifest::MANIFEST_FILENAME),
@@ -770,7 +784,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             });
                         }
                         Ok(s) => anyhow::bail!("tar exited with status {:?}", s.code()),
-                        Err(e) => anyhow::bail!("failed to run tar: {e}"),
+                        Err(e) => anyhow::bail!("tar failed: {e}"),
                     }
                 }
                 SandboxType::PodmanAlpine => {
@@ -806,9 +820,12 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         stage: "compress".into(), percent: 40,
                         message: "podman save (image → tar)...".into(),
                     });
-                    let save = tokio::process::Command::new("podman")
-                        .args(["save", "-o", &inner_path.to_string_lossy(), &image_tag])
-                        .status().await?;
+                    let mut save_cmd = tokio::process::Command::new("podman");
+                    save_cmd.args(["save", "-o", &inner_path.to_string_lossy(), &image_tag]);
+                    let save = run_with_progress_ticker(
+                        save_cmd, &inner_path, "compress", 40, 85,
+                        "podman save", out,
+                    ).await?;
                     if !save.success() {
                         let _ = std::fs::remove_file(&inner_path);
                         anyhow::bail!("podman save failed");
@@ -818,7 +835,28 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         stage: "wrap".into(), percent: 90,
                         message: "Wrapping payload + manifest...".into(),
                     });
-                    let wrap_result = manifest.wrap_with_inner_tar(&inner_path, &out_path).await;
+                    let out_clone = out.clone();
+                    let wrap_out_path = out_path.clone();
+                    let wrap_result = manifest.wrap_with_inner_tar_ticked(
+                        &inner_path, &out_path,
+                        move |bytes, elapsed| {
+                            let mb = bytes as f64 / 1024.0 / 1024.0;
+                            let secs = elapsed.as_secs_f64();
+                            let rate = mb / secs.max(0.1);
+                            // Wrap is smaller than compress — ramp 60s.
+                            let ratio = (secs / 60.0).min(1.0);
+                            let pct = 90 + (8.0 * ratio) as u8;
+                            out_clone.emit(CliEvent::Progress {
+                                stage: "wrap".into(),
+                                percent: pct,
+                                message: format!(
+                                    "Wrapping: {mb:.1} MB @ {rate:.1} MB/s ({:.0}s)",
+                                    secs,
+                                ),
+                            });
+                        },
+                    ).await;
+                    let _ = wrap_out_path; // silence unused (kept for readability)
                     // wrap_with_inner_tar renames/copies the inner in — clean
                     // up any leftover if wrap bailed mid-flight.
                     let _ = std::fs::remove_file(&inner_path);
@@ -848,9 +886,12 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         stage: "compress".into(), percent: 20,
                         message: "wsl --export (distro → tar)...".into(),
                     });
-                    let status = tokio::process::Command::new("wsl")
-                        .args(["--export", vm_name, &inner_path.to_string_lossy()])
-                        .status().await?;
+                    let mut wsl_cmd = tokio::process::Command::new("wsl");
+                    wsl_cmd.args(["--export", vm_name, &inner_path.to_string_lossy()]);
+                    let status = run_with_progress_ticker(
+                        wsl_cmd, &inner_path, "compress", 20, 85,
+                        "wsl --export", out,
+                    ).await?;
                     if !status.success() {
                         let _ = std::fs::remove_file(&inner_path);
                         anyhow::bail!("wsl --export failed");
@@ -860,7 +901,25 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         stage: "wrap".into(), percent: 90,
                         message: "Wrapping payload + manifest...".into(),
                     });
-                    let wrap_result = manifest.wrap_with_inner_tar(&inner_path, &out_path).await;
+                    let out_clone = out.clone();
+                    let wrap_result = manifest.wrap_with_inner_tar_ticked(
+                        &inner_path, &out_path,
+                        move |bytes, elapsed| {
+                            let mb = bytes as f64 / 1024.0 / 1024.0;
+                            let secs = elapsed.as_secs_f64();
+                            let rate = mb / secs.max(0.1);
+                            let ratio = (secs / 60.0).min(1.0);
+                            let pct = 90 + (8.0 * ratio) as u8;
+                            out_clone.emit(CliEvent::Progress {
+                                stage: "wrap".into(),
+                                percent: pct,
+                                message: format!(
+                                    "Wrapping: {mb:.1} MB @ {rate:.1} MB/s ({:.0}s)",
+                                    secs,
+                                ),
+                            });
+                        },
+                    ).await;
                     let _ = std::fs::remove_file(&inner_path);
                     wrap_result?;
 
@@ -1591,6 +1650,106 @@ fn spawn_progress_forwarder(out: Output) -> ProgressForwarder {
         }
     });
     ProgressForwarder { tx, join }
+}
+
+/// Per-operation heartbeat — emits an `Info` event every 5s while some
+/// other async work runs, so cli_bridge's 10-minute idle-timeout stays
+/// alive and the GUI can show a "still working" hint.
+///
+/// Primary motivation: Windows start/stop/restart go through
+/// `ManagedShell::spawn_detached` → PowerShell → WMI `Win32_Process
+/// Create`. On a slow ARM64 VM the powershell cold-start + WMI round-
+/// trip can stretch past the 10-min silence threshold, after which the
+/// Tauri parent SIGKILLs clawcli and the user sees a bogus "timeout"
+/// while the actual gateway boots successfully in the background.
+/// Heartbeat emits reset cli_bridge's timer and also give the GUI a
+/// concrete "X seconds in" hint instead of a frozen spinner.
+///
+/// Returns an RAII guard: dropping it aborts the heartbeat task. Bind
+/// as `let _h = spawn_operation_heartbeat(...);` and let scope exit
+/// clean it up automatically. (A bare `tokio::task::JoinHandle` does
+/// NOT abort on drop — the task keeps running until natural exit, so
+/// we need the guard.)
+struct HeartbeatGuard(tokio::task::JoinHandle<()>);
+
+impl Drop for HeartbeatGuard {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+fn spawn_operation_heartbeat(
+    out: Output,
+    stage: &'static str,
+    label: &'static str,
+) -> HeartbeatGuard {
+    let handle = tokio::spawn(async move {
+        let mut tick: u64 = 0;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tick += 5;
+            out.emit(CliEvent::Info {
+                message: format!("[heartbeat:{stage}] {label}... ({tick}s)"),
+            });
+        }
+    });
+    HeartbeatGuard(handle)
+}
+
+/// Spawn a long-running child process (tar / podman / wsl --export) and
+/// emit a `CliEvent::Progress` every second while it runs. Two jobs:
+///
+/// 1. **Keep cli_bridge's idle-timeout alive.** Without heartbeats
+///    Windows exports > 10 min get SIGKILL'd by the Tauri parent
+///    ("CLI command timed out — no output for 10 minutes") while tar
+///    runs on as an orphan. `kill_on_drop(true)` reaps the orphan if
+///    this future itself is cancelled.
+/// 2. **Give the user a live MB/s read-out.** The progress bar ramps
+///    linearly over a 180s baseline (caps at `pct_end`, so a faster
+///    completion just gets bumped by the next stage's emit). The
+///    message line contains accumulated bytes + rate + elapsed, which
+///    `StepProgress.tsx::extractActivity` surfaces as a "Current
+///    activity" hint.
+///
+/// `out_path` is the file being written so we can stat it each tick.
+async fn run_with_progress_ticker(
+    mut cmd: tokio::process::Command,
+    out_path: &std::path::Path,
+    stage: &str,
+    pct_start: u8,
+    pct_end: u8,
+    label: &str,
+    out: &Output,
+) -> Result<std::process::ExitStatus> {
+    use std::time::Instant;
+    let mut child = cmd.kill_on_drop(true).spawn()?;
+    let start = Instant::now();
+    loop {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            child.wait(),
+        ).await {
+            Ok(st)  => return Ok(st?),
+            Err(_)  => {
+                let bytes = tokio::fs::metadata(out_path).await
+                    .map(|m| m.len()).unwrap_or(0);
+                let mb = bytes as f64 / 1024.0 / 1024.0;
+                let secs = start.elapsed().as_secs_f64();
+                let rate = mb / secs.max(0.1);
+                let ratio = (secs / 180.0).min(1.0);
+                let pct = pct_start
+                    + ((pct_end.saturating_sub(pct_start)) as f64 * ratio) as u8;
+                out.emit(CliEvent::Progress {
+                    stage: stage.into(),
+                    percent: pct,
+                    message: format!(
+                        "{label}: {mb:.1} MB @ {rate:.1} MB/s ({:.0}s)",
+                        secs,
+                    ),
+                });
+            }
+        }
+    }
 }
 
 /// Developer mode: run a single install step.

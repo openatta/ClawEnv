@@ -296,6 +296,28 @@ jobs:
       - name: cargo tauri build
         run: cargo tauri build
 
+      # Rename the standalone clawcli to a platform-specific filename so
+      # the Release page can hold all three side-by-side without asset
+      # name collisions. v0.3.x manual releases followed the same
+      # naming (`clawcli-macos-aarch64`, `clawcli-windows-arm64.exe`,
+      # `clawcli-linux-x86_64`); CI now mirrors it so CI-produced
+      # releases look identical to hand-cut ones.
+      - name: Stage clawcli binary (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          mkdir -p release-artifacts
+          case "$RUNNER_OS" in
+            macOS) cp target/release/clawcli release-artifacts/clawcli-macos-aarch64 ;;
+            Linux) cp target/release/clawcli release-artifacts/clawcli-linux-x86_64 ;;
+          esac
+      - name: Stage clawcli binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-artifacts | Out-Null
+          Copy-Item target/release/clawcli.exe release-artifacts/clawcli-windows-x86_64.exe
+
       # Workflow-level upload so users can still grab artifacts even when
       # no release_tag was provided (CI run → Actions tab → Artifacts).
       # Glob covers every Tauri output the three matrix rows can produce;
@@ -312,6 +334,7 @@ jobs:
             target/release/bundle/nsis/*-setup.exe
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+            release-artifacts/clawcli-*
 
       # Attach to the GH release — either the tag being pushed, or an
       # explicit tag passed to workflow_dispatch. Missing-file patterns
@@ -328,4 +351,5 @@ jobs:
             target/release/bundle/nsis/*-setup.exe
             target/release/bundle/deb/*.deb
             target/release/bundle/appimage/*.AppImage
+            release-artifacts/clawcli-*
           fail_on_unmatched_files: false

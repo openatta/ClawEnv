@@ -448,14 +448,35 @@ pub async fn install(
         // Probe the three canonical endpoints the subsequent install
         // will hit: npm (for `npm install <claw>`), github (for any
         // git-based dependency the claw pulls), dl-cdn (for `apk add`).
-        // Collect per-endpoint results so the bail message tells the
-        // user exactly which one broke — the three have independent
-        // failure modes.
+        //
+        // The Alpine minirootfs ships without `curl`, so we first do
+        // `sudo apk add --no-cache curl`. That serves double duty — it
+        // also directly tests `apk add` against the dl-cdn mirror
+        // `apply_mirrors` just wrote, with the proxy env from proxy.sh
+        // already in effect (sudo -E preserves it). If this step fails
+        // we bail immediately with a clear "apk can't reach dl-cdn"
+        // signal; otherwise curl is available for the npm / github
+        // probes below, and we report dl-cdn as OK (it demonstrably is
+        // — apk just pulled through it).
         let probe = r#". /etc/profile.d/proxy.sh 2>/dev/null
+
+if ! command -v curl >/dev/null 2>&1; then
+    if ! sudo -E apk add --no-cache curl >/tmp/clawenv-preflight-apk.log 2>&1; then
+        printf 'FAIL alpine https://dl-cdn.alpinelinux.org/alpine/latest-stable/\n'
+        printf 'FAIL npm https://registry.npmjs.org/ (skipped: no curl)\n'
+        printf 'FAIL github https://github.com/ (skipped: no curl)\n'
+        echo '--- apk add curl log tail ---'
+        tail -10 /tmp/clawenv-preflight-apk.log
+        exit 0
+    fi
+fi
+
+# apk add curl succeeded → dl-cdn is reachable. The subsequent curl
+# probes cover the other two endpoints independently.
+printf 'OK alpine\n'
 for name_url in \
     "npm https://registry.npmjs.org/" \
-    "github https://github.com/" \
-    "alpine https://dl-cdn.alpinelinux.org/alpine/latest-stable/"
+    "github https://github.com/"
 do
     name="${name_url%% *}"
     url="${name_url##* }"
