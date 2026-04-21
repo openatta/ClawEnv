@@ -1,12 +1,28 @@
-import { createSignal, onMount, onCleanup, Show, For, Switch, Match } from "solid-js";
+import { createSignal, onMount, onCleanup, Show, For, Switch, Match, type Component } from "solid-js";
+import { Dynamic } from "solid-js/web";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { getName } from "@tauri-apps/api/app";
 import { emit, listen } from "@tauri-apps/api/event";
 import MainLayout from "./layouts/MainLayout";
 import { t } from "./i18n";
-import InstallWizard from "./pages/Install";
+import DefaultInstallWizard from "./pages/Install";
+import LiteInstallFlow from "./pages/Install/lite/LiteInstallFlow";
 import UpgradePrompt from "./components/UpgradePrompt";
-import type { Instance } from "./types";
+import type { Instance, ClawType } from "./types";
+
+/** Shape every install UI must honour. ClawEnv uses `src/pages/Install`
+ *  (online + local + native); ClawLite swaps in its offline-bundle flow.
+ *  Keep this shape in sync with `src/pages/Install/index.tsx::InstallWizard`
+ *  so either implementation is a drop-in replacement.
+ */
+export type InstallComponentProps = {
+  onComplete: (instances: Instance[]) => void;
+  onBack?: () => void;
+  defaultInstanceName?: string;
+  clawType?: string;
+  clawTypes?: ClawType[];
+};
 
 /** Tray popup — a small borderless window acting as the tray right-click menu. */
 function TrayPopup() {
@@ -66,7 +82,23 @@ type LaunchState =
   | { type: "install_window"; instanceName: string; clawType: string }
   | { type: "tray_popup" };
 
-export default function App() {
+export default function App(props: { installComponent?: Component<InstallComponentProps> } = {}) {
+  // Flavor detection: ClawEnv and ClawLite ship the SAME frontend bundle.
+  // Which install UI to use is decided at runtime by reading the Tauri app
+  // name — the only user-visible difference is which `tauri.conf.json`
+  // productName the binary was bundled with. This eliminates the need for
+  // a separate lite frontend build / dist, keeping a single source of
+  // truth. The `installComponent` prop is kept as an explicit override
+  // for tests / edge cases.
+  const [Install, setInstall] = createSignal<Component<InstallComponentProps>>(
+    props.installComponent ?? DefaultInstallWizard
+  );
+  if (!props.installComponent) {
+    getName().then((name) => {
+      if (name === "ClawLite") setInstall(() => LiteInstallFlow);
+    }).catch(() => { /* keep default */ });
+  }
+
   const [state, setState] = createSignal<LaunchState>({ type: "loading" });
   const [showQuitDialog, setShowQuitDialog] = createSignal(false);
   const [runningCount, setRunningCount] = createSignal(0);
@@ -139,7 +171,7 @@ export default function App() {
           const s = state();
           if (s.type !== "install_window") return null;
           return (
-            <InstallWizard
+            <Dynamic component={Install()}
               defaultInstanceName={s.instanceName}
               clawType={s.clawType}
               onComplete={async () => {
@@ -164,7 +196,7 @@ export default function App() {
 
       {/* First run — go straight to install */}
       <Match when={state().type === "first_run" || state().type === "not_installed"}>
-        <InstallWizard
+        <Dynamic component={Install()}
           onComplete={(instances: Instance[]) =>
             setState({ type: "ready", instances })
           }

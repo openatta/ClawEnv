@@ -16,7 +16,42 @@ export default function ClawPage(props: {
   onInstancesChanged?: () => void;
   onAddInstance?: () => void;
 }) {
-  const [activeTab, setActiveTab] = createSignal(props.instances[0]?.name ?? "");
+  // Remember the last active tab per claw type in localStorage so that
+  // flipping between Home ↔ OpenClaw ↔ Hermes lands back on the instance
+  // the user was just looking at, not a fresh reset to the first tab.
+  // Keyed by claw_type.id so different claws don't stomp each other.
+  const storageKey = () => `clawPage:lastActiveTab:${props.clawType.id}`;
+
+  // Initial value picks, in order:
+  //   1. Persisted name from localStorage (if it's still in the list)
+  //   2. First instance
+  //   3. Empty string (user has zero instances → "Create Instance" CTA)
+  const initialTab = () => {
+    const stored = localStorage.getItem(storageKey()) || "";
+    if (stored && props.instances.some(i => i.name === stored)) return stored;
+    return props.instances[0]?.name ?? "";
+  };
+  const [activeTab, setActiveTab] = createSignal(initialTab());
+
+  // Persist every change so the next mount (after tab flip / restart) can
+  // restore. Empty string means "no selection" — don't overwrite the last
+  // good pick with empty.
+  createEffect(() => {
+    const name = activeTab();
+    if (name) localStorage.setItem(storageKey(), name);
+  });
+
+  // Self-heal: if the current selection isn't in props.instances any more
+  // (rename / delete / props arrived late after mount), fall back to the
+  // first instance. Without this the view sticks on the "Create Instance"
+  // CTA even when instances exist.
+  createEffect(() => {
+    const current = activeTab();
+    const exists = props.instances.some(i => i.name === current);
+    if (!exists && props.instances.length > 0) {
+      setActiveTab(props.instances[0].name);
+    }
+  });
 
   const activeInstance = () => props.instances.find((i) => i.name === activeTab());
   const activeHealth = () => props.healths[activeTab()] || "unreachable";

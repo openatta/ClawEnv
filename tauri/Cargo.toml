@@ -1,11 +1,11 @@
 [package]
 name = "clawgui"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 
 [dependencies]
 clawenv-core = { path = "../core" }
-tauri = { version = "2", features = ["tray-icon"] }
+tauri = { version = "2", features = ["tray-icon", "devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-autostart = "2"

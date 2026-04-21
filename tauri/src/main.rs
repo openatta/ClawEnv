@@ -354,6 +354,7 @@ fn main() {
             ipc::export_native_bundle,
             ipc::export_cancel,
             ipc::lite::lite_scan_packages,
+            ipc::lite::pick_import_folder,
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {

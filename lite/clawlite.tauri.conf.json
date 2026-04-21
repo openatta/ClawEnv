@@ -1,0 +1,19 @@
+{
+  "$schema": "https://raw.githubusercontent.com/nicholasrice/application-config-schema/master/tauri-v2.json",
+  "productName": "ClawLite",
+  "version": "0.3.2",
+  "identifier": "com.attaspace.clawlite",
+  "app": {
+    "windows": [
+      {
+        "title": "ClawLite",
+        "width": 820,
+        "height": 620,
+        "resizable": true,
+        "fullscreen": false,
+        "minWidth": 720,
+        "minHeight": 520
+      }
+    ]
+  }
+}

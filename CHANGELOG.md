@@ -4,6 +4,88 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.3.2 — 2026-04-21
+
+Introduces **ClawLite** — an offline-installer flavor for end users who
+receive a folder of pre-packaged `.tar.gz` bundles from a technician.
+Ships from the same codebase as ClawEnv: one Rust binary, one frontend
+bundle, runtime-switched install flow via `tauri::app::getName()`.
+Single fat commit rather than a multi-iteration rollout because the
+Lite architecture went through a few redesigns mid-release.
+
+**ClawLite architecture — one binary, one frontend, config-switched install**
+- `lite/clawlite.tauri.conf.json` — Tauri config override that changes
+  `productName` / `identifier` / `version` / window dimensions only.
+  Does NOT override `frontendDist` or run a separate Vite build;
+  ClawEnv and ClawLite share the exact same embedded web assets.
+  - Renamed from `lite/tauri.conf.json` to sidestep Tauri CLI's
+    sibling-project auto-scan which spammed `failed to watch
+    lite/Cargo.toml` warnings on every build.
+- `src/App.tsx` — reads `getName()` at mount, swaps the install
+  component from `InstallWizard` to `LiteInstallFlow` when the binary
+  was bundled as "ClawLite". `<Dynamic component={Install()}/>` makes
+  the swap reactive.
+- `src/pages/Install/lite/` — Lite-specific components live in the
+  main src tree now (was a separate `lite/src/` dist). One less build
+  variable during debugging.
+  - `LiteInstallFlow.tsx` — 5-step offline orchestrator (Welcome →
+    Scan → Confirm → Install → API-key hint). No Network step since
+    bundles are self-contained.
+  - `LiteStepScan.tsx` — directory scanner. Reads each `.tar.gz`'s
+    `clawenv-bundle.toml` manifest for authoritative `claw_type` /
+    `claw_version`; lists all bundles with greyed-out incompatible
+    ones. "Choose folder..." escape hatch re-scans an arbitrary
+    directory (USB stick, network drive, Downloads).
+  - `LiteStepApiKeyHint.tsx` — web-UI-only API-key guidance per claw
+    type, plus a baked-proxy advisory banner when the imported
+    sandbox bundle carried `/etc/profile.d/proxy.sh`.
+
+**Backend IPCs for Lite**
+- `tauri/src/ipc/lite.rs`:
+  - `lite_scan_packages(scan_dir: Option<String>)` — walks the given
+    directory (or the app's own folder when `None`), peeks each
+    `.tar.gz`'s manifest via `BundleManifest::peek_from_tarball`,
+    returns `Vec<PackageInfo>` with compatibility + native-conflict
+    flags, sorted compatible-first.
+  - `pick_import_folder(app)` — native folder-picker dialog, returns
+    the chosen path or `None` on cancel. Used by "Choose folder..."
+    in the scanner.
+
+**Install window → Lite-aware**
+- The `open_install_window` IPC path (Home's "+ Add" button) rebuilds
+  the secondary install webview from the same frontend bundle, so
+  `getName()` resolves the same way and Lite's install flow takes
+  over in both the first-run and + Add paths.
+
+**ClawPage tab persistence**
+- `src/pages/ClawPage/index.tsx` — active instance per claw type is
+  now persisted in `localStorage` keyed by `clawType.id`. Self-heal
+  effect resets to the first instance when the persisted tab points
+  at a deleted / renamed instance. Fixes the "create instance" empty
+  state flashing every time the user flipped from Home to a claw tab
+  or back (pre-existing bug surfaced by the Lite redesign).
+
+**Build + deploy scripts**
+- `scripts/dev-deploy-macos.sh` — builds both ClawEnv + ClawLite,
+  deploys each flavor's `.app` + `.dmg` to `~/Desktop/ClawEnv/`
+  IMMEDIATELY after its own build so the shared `bundle/dmg/` dir
+  doesn't clobber the first flavor's output.
+- `scripts/dev-deploy-windows.sh` — symmetric: syncs source to the
+  UTM VM, builds both on Windows over SSH, scp's all four installers
+  (MSI + NSIS for each flavor) back to `~/Desktop/ClawEnv/`.
+- `scripts/build-lite-{macos.sh,windows.ps1}` — standalone lite-only
+  builds for release prep. Documents the `cd tauri &&` requirement
+  (Tauri CLI treats `--config` parent dir as the Tauri project root).
+
+**Miscellaneous**
+- `tauri/Cargo.toml` — `tauri` dep gained the `devtools` feature
+  flag (shipped in release for right-click-inspect access; zero
+  runtime cost when not opened).
+- `scripts/check-version-sync.sh` — now enforces agreement across
+  SIX files (lite's `package.json` is gone since lite doesn't have a
+  separate frontend project any more).
+- `docs/06-lite.md` — full rewrite for the config-swap architecture.
+
 ## v0.3.1 — 2026-04-21
 
 Windows polish + export reliability. Ships on top of v0.3.0 with four
