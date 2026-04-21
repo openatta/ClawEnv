@@ -17,10 +17,10 @@ use tokio::sync::mpsc;
 
 use crate::claw::ClawRegistry;
 use crate::platform::download::download_with_progress;
-use crate::config::{keychain, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
+use crate::config::{ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig};
 use crate::sandbox::{InstallMode, SandboxType, native_backend, SandboxBackend};
 
-use super::install::{InstallOptions, InstallProgress, InstallStage, send, shell_escape};
+use super::install::{InstallOptions, InstallProgress, InstallStage, send};
 
 // ---- Self-managed tool directories ----
 
@@ -88,8 +88,8 @@ impl GitRelease {
             .ok_or_else(|| anyhow::anyhow!("mirrors.toml missing [dugite.sha256.{sha_key}]"))?;
         Ok((plat, sha))
     }
-    fn render_urls(&self, platform: &str, proxy_on: bool) -> Result<Vec<(String, String)>> {
-        crate::config::mirrors_asset::AssetMirrors::get().build_urls("dugite", platform, proxy_on)
+    fn render_urls(&self, platform: &str) -> Result<Vec<(String, String)>> {
+        crate::config::mirrors_asset::AssetMirrors::get().build_urls("dugite", platform)
     }
 }
 
@@ -98,7 +98,10 @@ impl GitRelease {
 /// The extracted tree is self-contained (bin/git + libexec/git-core + share/)
 /// so bundle exports on this machine can be imported on any peer machine of
 /// the same OS/arch without requiring system git on the target.
-async fn install_git(tx: &mpsc::Sender<InstallProgress>, proxy_on: bool) -> Result<()> {
+/// Install ClawEnv-private Git into `~/.clawenv/git/`. Pub so the
+/// CLI `--step prereq` path can call it directly without going through
+/// the full `install_native` flow.
+pub async fn install_git(tx: &mpsc::Sender<InstallProgress>) -> Result<()> {
     let git_dir = clawenv_git_dir();
     let parent = git_dir.parent().unwrap_or(&git_dir).to_path_buf();
     tokio::fs::create_dir_all(&parent).await?;
@@ -106,10 +109,8 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>, proxy_on: bool) -> Resu
     #[cfg(target_os = "windows")]
     {
         let arch = if std::env::consts::ARCH == "aarch64" { "arm64" } else { "64-bit" };
-        // URLs come from assets/mirrors.toml [mingit] — proxy_on drives
-        // the official-only vs official+fallback tier selection.
         let urls = crate::config::mirrors_asset::AssetMirrors::get()
-            .build_urls("mingit", arch, proxy_on)?;
+            .build_urls("mingit", arch)?;
 
         let bytes = download_with_progress(
             &urls, None, tx,
@@ -143,7 +144,7 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>, proxy_on: bool) -> Resu
     {
         let release = GitRelease::load()?;
         let (platform, expected_sha) = release.current_platform()?;
-        let urls = release.render_urls(platform, proxy_on)?;
+        let urls = release.render_urls(platform)?;
         let (_url, filename) = urls.first()
             .ok_or_else(|| anyhow::anyhow!("mirrors.toml [dugite] produced no URLs"))?;
         let filename = filename.clone();
@@ -218,7 +219,6 @@ async fn install_git(tx: &mpsc::Sender<InstallProgress>, proxy_on: bool) -> Resu
 pub(super) fn build_node_urls(
     primary_base: &str,
     platform_with_ext: &str,
-    proxy_on: bool,
 ) -> Result<Vec<(String, String)>> {
     use crate::config::mirrors_asset::AssetMirrors;
     // `platform_with_ext` is something like "darwin-arm64.tar.gz" or
@@ -234,8 +234,7 @@ pub(super) fn build_node_urls(
         _ => anyhow::bail!("malformed node platform key: {platform_with_ext}"),
     };
     let mirrors = AssetMirrors::get();
-    // Proxy-aware URL list: proxy_on → official only; off → + fallback.
-    let mut urls = mirrors.build_urls("node", platform, proxy_on)?;
+    let mut urls = mirrors.build_urls("node", platform)?;
     // Substitute {ext} in each URL manually since it's not a section scalar.
     for (u, _) in urls.iter_mut() {
         *u = u.replace("{ext}", &ext);
@@ -306,62 +305,26 @@ async fn node_version() -> String {
         .unwrap_or_else(|_| "unknown".into())
 }
 
-/// Host-side npm registry preflight (used by native install). HEAD each
-/// candidate via reqwest with a short timeout; first 2xx/3xx wins.
-/// Returns the first candidate on total failure so npm config at least
-/// gets set to something sensible.
-async fn select_reachable_npm_host(candidates: &[String]) -> Option<String> {
-    // reqwest honours system / env proxy automatically; no explicit proxy
-    // plumbing needed here — the installer-scope proxy will already be in
-    // the process env thanks to apply_env() at install start.
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .connect_timeout(std::time::Duration::from_secs(3))
-        .build()
-    {
-        Ok(c) => c,
-        Err(_) => return candidates.first().cloned(),
-    };
-    for url in candidates {
-        let probe = format!("{}/-/ping", url.trim_end_matches('/'));
-        match client.head(&probe).send().await {
-            Ok(resp) if resp.status().is_success() || resp.status().is_redirection() => {
-                tracing::info!("npm preflight (native): {url} reachable");
-                return Some(url.clone());
-            }
-            Ok(resp) => {
-                tracing::info!("npm preflight (native): {url} returned {}", resp.status());
-            }
-            Err(e) => {
-                tracing::info!("npm preflight (native): {url} unreachable: {e}");
-            }
-        }
-    }
-    candidates.first().cloned()
-}
-
 // ---- Platform-dispatched Node.js install ----
 
 async fn install_nodejs(
     tx: &mpsc::Sender<InstallProgress>,
     nodejs_dist_base: &str,
-    proxy_on: bool,
 ) -> Result<()> {
     #[cfg(target_os = "macos")]
-    { macos::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
+    { macos::install_nodejs(tx, nodejs_dist_base).await }
     #[cfg(target_os = "windows")]
-    { windows::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
+    { windows::install_nodejs(tx, nodejs_dist_base).await }
     #[cfg(target_os = "linux")]
-    { linux::install_nodejs(tx, nodejs_dist_base, proxy_on).await }
+    { linux::install_nodejs(tx, nodejs_dist_base).await }
 }
 
 /// Public API for CLI step-by-step install: install Node.js only.
 pub async fn install_nodejs_public(
     tx: &mpsc::Sender<InstallProgress>,
     nodejs_dist_base: &str,
-    proxy_on: bool,
 ) -> Result<()> {
-    install_nodejs(tx, nodejs_dist_base, proxy_on).await
+    install_nodejs(tx, nodejs_dist_base).await
 }
 
 // ---- Main install flow (shared across platforms) ----
@@ -384,15 +347,16 @@ pub async fn install_native(
 
     let mirrors = config.config().clawenv.mirrors.clone();
 
-    // Install-time proxy snapshot — identical rationale to the sandbox
-    // install path in manager/install.rs. One resolution at top of flow,
-    // threaded down through every mirror consumer.
-    let proxy_on = crate::config::proxy_resolver::Scope::Installer
-        .resolve(config).await.is_some();
+    // Install-time proxy resolution: still needed to inject HTTP_PROXY
+    // into the downloader's process env (so reqwest + npm see it), but
+    // no longer used to switch mirror tiers — in v0.3.0 the URL list is
+    // always upstream-only.
+    let _ = crate::config::proxy_resolver::Scope::Installer
+        .resolve(config).await;
 
     // Step 0: Ensure Git (needed by npm for some dependencies)
     if !has_git().await {
-        install_git(tx, proxy_on).await?;
+        install_git(tx).await?;
     }
 
     // Step 1: Ensure Node.js
@@ -400,25 +364,23 @@ pub async fn install_native(
 
     if !has_node().await {
         send(tx, "Node.js not found, installing...", 12, InstallStage::EnsurePrerequisites).await;
-        let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
-        install_nodejs(tx, &base, proxy_on).await?;
+        let base = mirrors.nodejs_dist_urls().into_iter().next().unwrap_or_default();
+        install_nodejs(tx, &base).await?;
         send(tx, "Node.js installed", 25, InstallStage::EnsurePrerequisites).await;
     } else {
         let ver = node_version().await;
         send(tx, &format!("Node.js {ver} ready"), 25, InstallStage::EnsurePrerequisites).await;
     }
 
-    // Configure npm registry. Native mode's preflight is simple: try each
-    // candidate from mirrors.toml (proxy-aware list) via a plain HEAD, pick
-    // the first 2xx. Unlike sandbox mode we can use the host's reqwest
-    // directly — no need to exec curl through a backend.
-    let npm_candidates = mirrors.npm_registry_urls(proxy_on);
-    let chosen = select_reachable_npm_host(&npm_candidates).await;
-    if let Some(registry) = chosen.filter(|r| r != "https://registry.npmjs.org") {
+    // Configure npm registry. Only touch config when the user has an
+    // override — default upstream is npm's baked-in value, setting it
+    // explicitly is a no-op.
+    let reg = mirrors.npm_registry_url();
+    if reg != "https://registry.npmjs.org" {
         let shell = crate::platform::managed_shell::ManagedShell::new();
-        shell.cmd(&format!("npm config set registry {registry}"))
+        shell.cmd(&format!("npm config set registry {reg}"))
             .status().await.ok();
-        tracing::info!("npm registry set to {registry} (native)");
+        tracing::info!("npm registry set to {reg} (native)");
     }
 
     // Step 2: Install claw product
@@ -462,14 +424,8 @@ pub async fn install_native(
 
     let claw_version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
 
-    // Step 3: API Key
-    if let Some(ref api_key) = opts.api_key {
-        send(tx, "Storing API key...", 72, InstallStage::StoreApiKey).await;
-        keychain::store_api_key(&opts.instance_name, api_key)?;
-        if let Some(cmd) = desc.set_apikey_cmd(&shell_escape(api_key)) {
-            backend.exec(&format!("{cmd} 2>/dev/null || true")).await?;
-        }
-    }
+    // Step 3: (removed in v0.3.0) — API key collection moved to each
+    // claw's ClawPage management UI. See core/src/manager/install.rs.
 
     // Step 4: Deploy MCP plugins (native mode — same plugins as sandbox)
     if desc.supports_mcp {
@@ -534,7 +490,20 @@ pub async fn install_native(
     //   - PATH is injected via the .bat wrapper
     //   - log path explicit (gateway.log)
     //   - PowerShell Start-Process with Hidden window = real detach
+    // Run the claw's init command (if any) to seed its config before
+    // the gateway's first boot. For OpenClaw: `config set
+    // gateway.mode local` — OC refuses to start with a partially-
+    // initialised config file, even under --allow-unconfigured, so
+    // this step is load-bearing. Best-effort (`|| true`): a claw that
+    // doesn't need init has no init_cmd and this is a no-op.
+    if let Some(init_cmd) = desc.init_cmd() {
+        let shell = crate::platform::managed_shell::ManagedShell::new();
+        let _ = shell.cmd(&format!("{init_cmd} 2>&1")).output().await;
+        tracing::info!(target: "clawenv::init", "ran init_cmd: {init_cmd}");
+    }
+
     send(tx, &format!("Starting {} gateway...", desc.display_name), 80, InstallStage::StartOpenClaw).await;
+
     let port = opts.gateway_port;
     if let Some(gateway_cmd) = desc.gateway_start_cmd(port) {
         let parts: Vec<&str> = gateway_cmd.split_whitespace().collect();
@@ -720,13 +689,16 @@ async fn install_from_bundle(
     let oc_version = claw_ok.unwrap_or_default().trim().to_string();
     send(tx, &format!("{} {oc_version} ready (from bundle)", desc.display_name), 68, InstallStage::InstallOpenClaw).await;
 
-    // API Key
-    if let Some(ref api_key) = opts.api_key {
-        send(tx, "Storing API key...", 72, InstallStage::StoreApiKey).await;
-        keychain::store_api_key(&opts.instance_name, api_key)?;
-        if let Some(cmd) = desc.set_apikey_cmd(&shell_escape(api_key)) {
-            backend.exec(&format!("{cmd} 2>/dev/null || true")).await?;
-        }
+    // API key collection: removed in v0.3.0. Each claw collects its
+    // own credential via its management UI post-install.
+
+    // Seed the claw's config (gateway.mode etc.) via init_cmd before
+    // first gateway start. See the online-install branch for why
+    // this is load-bearing for OpenClaw.
+    if let Some(init_cmd) = desc.init_cmd() {
+        let shell = crate::platform::managed_shell::ManagedShell::new();
+        let _ = shell.cmd(&format!("{init_cmd} 2>&1")).output().await;
+        tracing::info!(target: "clawenv::init", "ran init_cmd (bundle): {init_cmd}");
     }
 
     // Start gateway via ManagedShell::spawn_detached (works on all platforms)
@@ -806,7 +778,7 @@ mod git_release_tests {
     #[test]
     fn mirrors_toml_renders_dugite_url_correctly() {
         let m = AssetMirrors::get();
-        let urls = m.build_urls("dugite", "macOS-arm64", false).expect("dugite urls");
+        let urls = m.build_urls("dugite", "macOS-arm64").expect("dugite urls");
         assert!(!urls.is_empty(), "urls array must have at least one entry");
         let (url, filename) = &urls[0];
 
@@ -831,5 +803,51 @@ mod git_release_tests {
         // sha256 pinned
         let sha = m.expected_sha256("dugite", "macos-arm64").expect("sha256");
         assert_eq!(sha.len(), 64);
+    }
+}
+
+/// Tests for `has_node` / `has_git` — the gates that `run_native_probe`
+/// and the `prereq` step rely on to refuse the system toolchain when
+/// ClawEnv-private binaries aren't installed. The previous silent
+/// fallthrough produced fake "PASS" on Windows boxes with system node,
+/// so these guards carry the integrity of the smoke suite.
+#[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
+mod presence_gate_tests {
+    use super::{has_git, has_node, clawenv_node_bin, clawenv_git_bin};
+
+    /// Serial mutex — tests mutate the process-wide CLAWENV_HOME env
+    /// var, so they must not race.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[tokio::test]
+    async fn has_node_and_has_git_false_when_missing() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAWENV_HOME", dir.path());
+        let node_bin = clawenv_node_bin();
+        let git_bin = clawenv_git_bin();
+        assert!(node_bin.starts_with(dir.path()),
+                "clawenv_node_bin must honour CLAWENV_HOME, got {node_bin:?}");
+        assert!(git_bin.starts_with(dir.path()),
+                "clawenv_git_bin must honour CLAWENV_HOME, got {git_bin:?}");
+        assert!(!node_bin.exists());
+        assert!(!git_bin.exists());
+        assert!(!has_node().await, "has_node must be false in empty scratch root");
+        assert!(!has_git().await,  "has_git must be false in empty scratch root");
+        std::env::remove_var("CLAWENV_HOME");
+    }
+
+    #[tokio::test]
+    async fn has_node_true_when_binary_exists() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("CLAWENV_HOME", dir.path());
+        let bin = clawenv_node_bin();
+        tokio::fs::create_dir_all(bin.parent().unwrap()).await.unwrap();
+        // Placeholder file at the expected path — has_node checks
+        // existence, not executability.
+        tokio::fs::write(&bin, b"#!/bin/sh\necho v22.0.0\n").await.unwrap();
+        assert!(has_node().await, "has_node should be true once binary exists: {bin:?}");
+        std::env::remove_var("CLAWENV_HOME");
     }
 }

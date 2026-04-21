@@ -23,15 +23,11 @@ pub fn delete(key: &str) -> Result<()> {
     Ok(())
 }
 
-/// Store API key for an instance
-pub fn store_api_key(instance_name: &str, api_key: &str) -> Result<()> {
-    store(&format!("apikey-{instance_name}"), api_key)
-}
-
-/// Retrieve API key for an instance
-pub fn get_api_key(instance_name: &str) -> Result<String> {
-    retrieve(&format!("apikey-{instance_name}"))
-}
+// API key management was removed in v0.3.0: credentials for individual
+// claws (OpenAI, Anthropic, etc.) are collected by each claw's own
+// management UI inside its sandbox/native webview, not by ClawEnv. This
+// module intentionally no longer exposes store_api_key / get_api_key.
+// Remaining helpers are scoped to ClawEnv-owned secrets (proxy passwords).
 
 /// Store proxy password (global / Installer scope)
 pub fn store_proxy_password(password: &str) -> Result<()> {

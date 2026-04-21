@@ -4,6 +4,93 @@ Notable changes per release. This project loosely follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); dates are the tag
 date. Entries group by area so users can skim the bits that matter to them.
 
+## v0.3.0 — 2026-04-21
+
+Policy reversal: **connectivity is the user's problem, not ours**. Prior
+versions quietly tried to paper over restricted networks by threading a
+multi-tier regional-mirror list through every download. v0.3.0 rips that
+machinery out — upstream URLs only, and if the user's network can't
+reach them, the install fails cleanly with a message that tells them to
+enable a proxy. This makes test results truthful and cuts ~500 LoC of
+dead branching out of the downloader.
+
+**Install wizard (GUI)**:
+- **Network step is now a hard gate**. Mode switch triggers an auto
+  connectivity probe; "Next" stays disabled until the test reports all
+  endpoints reachable under the chosen proxy. Users can't proceed on a
+  broken network.
+- **API-key step removed**. Each claw's management UI (ClawPage) owns
+  its own credential UX post-install — the installer no longer knows
+  about specific claws' credentials. `install_openclaw` IPC lost
+  `api_key`; `clawcli install` lost `--api-key`; `test_api_key` Tauri
+  command deleted; `InstallStage::StoreApiKey` variant removed.
+- **Pre-install connectivity gate** in `tauri/src/ipc/install.rs`.
+  Before spawning the CLI subprocess, Tauri probes the selected proxy;
+  on failure emits `install-failed` with a bilingual message.
+
+**Mirrors / downloads**:
+- `assets/mirrors.toml` — all `fallback_urls` / `fallback_base_urls`
+  deleted. Every asset (dugite / mingit / node / lima / alpine
+  minirootfs / apk / npm) now has `official_urls` only.
+- `mirrors_asset.rs` — `build_urls` / `apk_base_urls` /
+  `npm_registry_urls` / `build_alpine_urls` lost their `proxy_on`
+  parameter. Same for `MirrorsConfig::{alpine_repo_urls,
+  npm_registry_urls, nodejs_dist_urls}` and
+  `SandboxBackend::ensure_prerequisites`. ~20 call sites updated.
+- `MirrorsConfig.preset` field removed from the struct. Legacy
+  config.toml files carrying `preset = "china"` still parse (serde
+  ignores unknown keys); the value is discarded at runtime.
+- `apply_mirrors` / `alpine_repo_script` / `npm_registry_script`
+  simplified to single-URL writers. `/etc/apk/repositories` is always
+  two lines (main + community) from one base.
+- npm-reachability preflight loop in the sandbox removed. Default
+  registry is a no-op (npm's baked-in value), user override is trusted.
+
+**CLI + progress**:
+- `clawcli install --step prereq` / `--step create` previously dropped
+  the rx half of the download progress channel. The 28MB Node.js
+  download ran silently and looked like a hang. New
+  `spawn_progress_forwarder` helper forwards each `InstallProgress`
+  event as `CliEvent::Progress`, so `--json` consumers and human stderr
+  both see `Downloading Node.js: 8.4 / 28.1 MB (0.45 MB/s)`.
+
+**Sandbox**:
+- Post-boot in-VM connectivity preflight added (`manager/install.rs`).
+  After `apply_mirrors` writes the repos file but before heavy install,
+  probes `registry.npmjs.org` and `github.com` from inside the VM via
+  its own curl. Fails with bilingual message if either is unreachable
+  — saves 5-10 minutes on doomed installs.
+
+**E2E smoke**:
+- Shared `tests/e2e/lib/preflight.sh` with `e2e_preflight_noproxy` /
+  `e2e_preflight_proxy` for Mac, `e2e_preflight_noproxy_on_win` /
+  `e2e_preflight_proxy_on_win` for Windows (curls over SSH so the
+  probe runs on the VM's own network, not the driving Mac's).
+- `net-check --mode native` hard-fails when ClawEnv-private node / git
+  aren't installed. Previously PATH composition silently fell through
+  to system node, producing fake "PASS" on Windows where
+  `C:\Program Files\nodejs` existed.
+- `lib/win-remote.sh` no longer prepends `C:\Program Files\nodejs`
+  and `\Git\cmd` to the Windows PATH — was masking the fallthrough.
+- All `smoke-*-native-*` scenarios now run `cli install --step prereq`
+  before `net-check`.
+- New: `smoke-linux-podman-{noproxy,http-proxy}.sh` (skipped on non-Linux),
+  `smoke-mac-import-export.sh` (full export/import roundtrip).
+
+**UI**:
+- `ProxyModal` lost the "国内 / 国外 / 全部" three-button connectivity
+  test — collapsed to one neutral "测试 / Test" button that probes all
+  known presets.
+
+**Breaking**:
+- `StoreApiKey` install stage variant removed.
+- `install_openclaw` IPC + `clawcli install` + `test_api_key` all lose
+  their API-key-related parameters/commands.
+- `SandboxBackend::ensure_prerequisites(proxy_on: bool)` → `ensure_prerequisites()`.
+- `AssetMirrors::build_urls(asset, platform, proxy_on)` →
+  `build_urls(asset, platform)` (and siblings).
+- `MirrorsConfig.preset` field gone.
+
 ## v0.2.13 — 2026-04-19
 
 Two Windows-native fixes + CLAWENV_HOME for test isolation:

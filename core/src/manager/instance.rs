@@ -8,31 +8,114 @@ use crate::sandbox::{
     native_backend, LimaBackend, PodmanBackend, WslBackend, SandboxBackend, SandboxType,
 };
 
-/// Kill native gateway process — pure Rust, no shell dependency.
-async fn kill_native_gateway(_port: u16) {
-    kill_native_gateway_public(_port).await;
+/// Kill native gateway process — handles both the process kill AND
+/// any user-scope launchd agent the claw installed to self-respawn.
+/// Wrapper kept for existing internal callers; new code should pass
+/// `claw_id` directly via `kill_native_gateway_public`.
+async fn kill_native_gateway(claw_id: &str, port: u16) {
+    kill_native_gateway_public(claw_id, port).await;
 }
 
-/// Public version for use from IPC handlers.
-pub async fn kill_native_gateway_public(_port: u16) {
+/// Stop a native claw's gateway process and any self-registered
+/// auto-respawn agent.
+///
+/// macOS in particular: OpenClaw (and claws that follow its pattern)
+/// registers itself with launchd as e.g. `ai.openclaw.gateway`. A
+/// plain `pkill` just kicks launchd into spawning a fresh gateway
+/// instantly — from the user's point of view the Stop button does
+/// nothing. Always bootout the launchd agent FIRST, then pkill to
+/// catch any straggler that was mid-spawn.
+///
+/// Windows: no launchd equivalent; just `taskkill /f /im node.exe`
+/// (native mode pins a single instance, so this is safe). Linux:
+/// pkill by command-line pattern — systemd --user auto-respawn is
+/// possible but rare for claws we ship; if it becomes an issue we'll
+/// add `systemctl --user stop` here the same way we added launchctl
+/// for macOS.
+pub async fn kill_native_gateway_public(claw_id: &str, _port: u16) {
     #[cfg(target_os = "windows")]
     {
-        // taskkill /f /im node.exe kills all node processes — acceptable for native mode
-        // (only one native instance allowed, all node.exe are ours)
+        let _ = claw_id; // unused on windows — node.exe catch-all
+        // taskkill /f /im node.exe kills all node processes — acceptable
+        // for native mode (only one native instance allowed, all node.exe
+        // are ours).
         let _ = crate::platform::process::silent_cmd("taskkill")
             .args(["/f", "/im", "node.exe"])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status().await;
     }
-    #[cfg(not(target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     {
+        // Step 1: unload any user-scope launchd agent whose label
+        // mentions this claw's id. `launchctl list` output columns:
+        //   PID  ExitStatus  Label
+        // Typical match: "ai.openclaw.gateway" for claw_id="openclaw".
+        // bootout requires the full service path: gui/<uid>/<Label>.
+        // We get <uid> via libc::getuid (stdlib doesn't expose it on
+        // macOS without extras). Best-effort throughout — if launchctl
+        // isn't available or the agent doesn't exist, we fall through
+        // to pkill.
+        if let Some(uid) = current_uid().await {
+            if let Ok(out) = tokio::process::Command::new("launchctl")
+                .arg("list").output().await
+            {
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                let id_lc = claw_id.to_lowercase();
+                for line in stdout.lines() {
+                    let label = match line.split_whitespace().nth(2) {
+                        Some(l) => l,
+                        None => continue,
+                    };
+                    if !label.to_lowercase().contains(&id_lc) {
+                        continue;
+                    }
+                    tracing::info!(
+                        target: "clawenv::launchd",
+                        "bootout {label} (gui/{uid})"
+                    );
+                    let _ = tokio::process::Command::new("launchctl")
+                        .args(["bootout", &format!("gui/{uid}/{label}")])
+                        .stdout(std::process::Stdio::null())
+                        .stderr(std::process::Stdio::null())
+                        .status().await;
+                }
+            }
+        }
+        // Step 2: pkill any straggler. Pattern is derived from claw_id
+        // so different claws (hermes etc.) match too.
+        let pattern = format!("{claw_id}.*gateway");
         let _ = tokio::process::Command::new("pkill")
-            .args(["-9", "-f", "openclaw.*gateway"])
+            .args(["-9", "-f", &pattern])
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status().await;
     }
+    #[cfg(target_os = "linux")]
+    {
+        let pattern = format!("{claw_id}.*gateway");
+        let _ = tokio::process::Command::new("pkill")
+            .args(["-9", "-f", &pattern])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status().await;
+    }
+}
+
+/// Fetch the current process's numeric UID by shelling out to `id -u`.
+/// launchctl's `gui/<uid>/<label>` service path needs it. A
+/// libc::getuid() call would be faster but would require adding the
+/// `libc` crate as a dependency for a single number — shell-out is
+/// cheap enough here (runs once per stop) and avoids the dep churn.
+#[cfg(target_os = "macos")]
+async fn current_uid() -> Option<u32> {
+    let out = tokio::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .await
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    s.trim().parse::<u32>().ok()
 }
 
 /// Get the appropriate sandbox backend for an instance
@@ -116,13 +199,24 @@ pub async fn start_instance(instance: &InstanceConfig) -> Result<()> {
 
     // Always kill stale gateway before starting — ensures clean state
     if instance.sandbox_type == SandboxType::Native {
-        kill_native_gateway(port).await;
+        kill_native_gateway(&desc.id, port).await;
     } else {
         for pn in &desc.process_names() {
             backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
         }
     }
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // NOTE: an earlier v0.3.0 iteration purged `~/.{id}/{id}.json` here
+    // to "force the gateway to regenerate a fresh token". That turned
+    // out to be wrong — OpenClaw's config file carries gateway.mode +
+    // other bootstrap state, not just the token, and deleting it makes
+    // the gateway refuse to start ("Gateway start blocked: existing
+    // config is missing gateway.mode", even with --allow-unconfigured).
+    // The real token-mismatch fix lives in the install flow's `init_cmd`
+    // invocation (see ClawDescriptor.init_cmd / install.rs), which
+    // properly seeds gateway.mode via `openclaw config set` instead of
+    // nuking the file.
 
     // For Lima: bind gateway on 0.0.0.0 so guestagent can detect and forward the port.
     // Use --allow-unconfigured flag instead of config set to avoid ConfigMutationConflictError.
@@ -269,8 +363,10 @@ pub async fn stop_instance(instance: &InstanceConfig) -> Result<()> {
 
     // Kill gateway
     if instance.sandbox_type == SandboxType::Native {
-        // Native: kill all node processes directly (pure Rust, no shell)
-        kill_native_gateway(port).await;
+        // Native: launchctl bootout any self-registered auto-respawn
+        // agent first, THEN pkill. See kill_native_gateway_public for
+        // why the bootout step is load-bearing on macOS.
+        kill_native_gateway(&desc.id, port).await;
     } else {
         for pn in &desc.process_names() {
             backend.exec(&process::kill_by_name_cmd(pn)).await.ok();
@@ -448,7 +544,7 @@ pub async fn remove_instance(config: &mut ConfigManager, name: &str) -> Result<(
 
     // Force kill any remaining native gateway
     if instance.sandbox_type == SandboxType::Native {
-        kill_native_gateway(instance.gateway.gateway_port).await;
+        kill_native_gateway(&instance.claw_type, instance.gateway.gateway_port).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
 

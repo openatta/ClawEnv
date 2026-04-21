@@ -46,16 +46,19 @@ export default function ProxyModal(props: {
   const [testResults, setTestResults] = createSignal<TestResult[] | null>(null);
   const [testing, setTesting] = createSignal(false);
 
-  async function runConnTest(group: "international" | "china" | "all") {
+  // Connectivity test: probe a fixed set of well-known endpoints
+  // that `test_instance_network` knows about. A failed row surfaces
+  // as "your current network can't reach <target>", not as a
+  // regional problem — v0.3.0 treats connectivity failures as the
+  // user's environment issue rather than something we steer around.
+  async function runConnTest() {
     setTesting(true);
     setTestResults([]);
     try {
-      const intl = ["github", "npm", "openai", "anthropic"];
-      const cn = ["deepseek", "qwen", "npmmirror"];
-      const picks = group === "international" ? intl : group === "china" ? cn : [...intl, ...cn];
+      const targets = ["github", "npm", "openai", "anthropic", "deepseek", "qwen", "npmmirror"];
       const results = await invoke<TestResult[]>("test_instance_network", {
         name: props.instanceName,
-        targets: picks,
+        targets,
       });
       setTestResults(results);
     } catch (e) {
@@ -282,16 +285,8 @@ export default function ProxyModal(props: {
           <div class="flex items-center gap-2 mb-2">
             <span class="text-xs text-gray-400">{t("连通性测试:", "Test connectivity:")}</span>
             <button class="px-2 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
-              disabled={testing()} onClick={() => runConnTest("international")}>
-              {t("国外", "Intl")}
-            </button>
-            <button class="px-2 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
-              disabled={testing()} onClick={() => runConnTest("china")}>
-              {t("国内", "CN")}
-            </button>
-            <button class="px-2 py-0.5 text-[11px] bg-gray-700 hover:bg-gray-600 rounded disabled:opacity-50"
-              disabled={testing()} onClick={() => runConnTest("all")}>
-              {t("全部", "All")}
+              disabled={testing()} onClick={runConnTest}>
+              {t("测试", "Test")}
             </button>
           </div>
           <Show when={testing()}>

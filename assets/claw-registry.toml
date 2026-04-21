@@ -22,7 +22,12 @@ npm_package = "openclaw"
 cli_binary = "openclaw"
 gateway_cmd = "gateway --port {port} --allow-unconfigured"
 version_cmd = "--version"
-config_apikey_cmd = "config set apiKey '{key}'"
+# Post-install, pre-first-gateway-start seed for OpenClaw's config
+# file. Without gateway.mode set, `openclaw gateway` bails with
+# "existing config is missing gateway.mode" even under
+# --allow-unconfigured. Setting it via `config set` once is sufficient;
+# OC persists the value in openclaw.json.
+config_init_cmd = "config set gateway.mode local"
 mcp_set_cmd = "mcp set {name} '{json}'"
 default_port = 3000
 supports_mcp = true
@@ -73,7 +78,6 @@ gateway_cmd = ""                                              # no messaging aut
 dashboard_cmd = "dashboard --port {port} --host 127.0.0.1 --no-open"
 dashboard_port_offset = 5                                     # dashboard at gateway_port+5
 version_cmd = "--version"
-config_apikey_cmd = "config set api_key '{key}'"
 mcp_set_cmd = "mcp add {name} --config '{json}'"
 default_port = 3000
 supports_mcp = true

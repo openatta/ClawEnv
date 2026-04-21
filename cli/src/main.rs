@@ -33,9 +33,6 @@ enum Commands {
         browser: bool,
         #[arg(long, default_value = "0")]
         port: u16,
-        /// API key for the claw product
-        #[arg(long)]
-        api_key: Option<String>,
         /// Developer mode: run a single install step instead of full install.
         /// Steps: prereq, create, claw, config, gateway.
         /// Omit for full install (normal user flow).
@@ -335,7 +332,7 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
 
     match command {
         // ====== Install ======
-        Commands::Install { mode, claw_type, version, name, image, browser, port, api_key, step } => {
+        Commands::Install { mode, claw_type, version, name, image, browser, port, step } => {
             use clawenv_core::manager::install::{self, InstallOptions};
             use clawenv_core::sandbox::{InstallMode, ImageSource};
 
@@ -359,14 +356,28 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                 port
             };
 
+            // Connectivity preflight. The GUI wizard's StepNetwork is a
+            // hard gate; the CLI entry was previously a soft path — users
+            // running `clawcli install` direct from the terminal would
+            // hit the same failures deep inside the install without a
+            // clean gate. Runs BEFORE the step dispatch so even
+            // `--step prereq` / `--step claw` benefit.
+            //
+            // Skipped for `--mode native --image <path>` (offline bundle
+            // import) — network isn't strictly needed for that path.
+            if image.is_none() {
+                cli_connectivity_gate(out).await?;
+            }
+
             // Developer mode: --step <name> runs a single step
             if let Some(step_name) = step {
                 run_install_step(
                     out, &step_name, &name, &claw_type, &version,
-                    use_native, actual_port, api_key.as_deref(), browser,
+                    use_native, actual_port, browser,
                 ).await?;
             } else {
-                // Normal user flow: full install
+                // Normal user flow: full install. v0.3.0: no api_key —
+                // each claw collects its own credential post-install.
                 let opts = InstallOptions {
                     instance_name: name.clone(),
                     claw_type: claw_type.clone(),
@@ -374,7 +385,6 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                     install_mode,
                     install_browser: browser,
                     install_mcp_bridge: desc.supports_mcp,
-                    api_key,
                     use_native,
                     gateway_port: actual_port,
                 };
@@ -509,6 +519,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         Commands::Upgrade { name, version } => {
             let name = resolve_name(name);
             let mut config = ConfigManager::load()?;
+            // Upgrade pulls a new claw version via npm/git in the VM or
+            // native tree — same network reach required as a fresh
+            // install, so the same gate applies.
+            cli_connectivity_gate(out).await?;
             out.emit(CliEvent::Info { message: format!("Upgrading '{name}'...") });
 
             let (tx, mut rx) = tokio::sync::mpsc::channel::<clawenv_core::manager::upgrade::UpgradeProgress>(16);
@@ -1396,7 +1410,6 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         proxy_http: c.clawenv.proxy.http_proxy.clone(),
                         proxy_https: c.clawenv.proxy.https_proxy.clone(),
                         proxy_no_proxy: c.clawenv.proxy.no_proxy.clone(),
-                        mirrors_preset: c.clawenv.mirrors.preset.clone(),
                         bridge_enabled: c.clawenv.bridge.enabled,
                         bridge_port: c.clawenv.bridge.port,
                         updates_auto_check: c.clawenv.updates.auto_check,
@@ -1418,11 +1431,13 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         "proxy.http" => c.clawenv.proxy.http_proxy = value,
                         "proxy.https" => c.clawenv.proxy.https_proxy = value,
                         "proxy.no_proxy" => c.clawenv.proxy.no_proxy = value,
-                        "mirrors.preset" => c.clawenv.mirrors.preset = value,
+                        "mirrors.alpine_repo" => c.clawenv.mirrors.alpine_repo = value,
+                        "mirrors.npm_registry" => c.clawenv.mirrors.npm_registry = value,
+                        "mirrors.nodejs_dist" => c.clawenv.mirrors.nodejs_dist = value,
                         "bridge.enabled" => c.clawenv.bridge.enabled = value.parse().unwrap_or(true),
                         "bridge.port" => c.clawenv.bridge.port = value.parse().unwrap_or(3100),
                         "updates.auto_check" => c.clawenv.updates.auto_check = value.parse().unwrap_or(true),
-                        _ => anyhow::bail!("Unknown config key: '{key}'. Valid keys: language, theme, proxy.enabled, proxy.http, proxy.https, proxy.no_proxy, mirrors.preset, bridge.enabled, bridge.port, updates.auto_check"),
+                        _ => anyhow::bail!("Unknown config key: '{key}'. Valid keys: language, theme, proxy.enabled, proxy.http, proxy.https, proxy.no_proxy, mirrors.alpine_repo, mirrors.npm_registry, mirrors.nodejs_dist, bridge.enabled, bridge.port, updates.auto_check"),
                     }
 
                     config.save()?;
@@ -1484,6 +1499,100 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
     Ok(())
 }
 
+/// Connectivity gate for long-running CLI entries (install / upgrade /
+/// import). Runs the shared `core::platform::preflight` probe against
+/// whatever proxy is active in the current process env.
+///
+/// Emits one `CliEvent::Progress` per endpoint with a percent in the
+/// pre-install band (1-5%), mirroring StepNetwork's one-at-a-time UX.
+/// Earlier versions emitted `CliEvent::Info` (no percent field), which
+/// the Tauri GUI rendered as `[undefined%] ...` — visually broken.
+///
+/// Parallels the Tauri wizard's StepNetwork gate.
+async fn cli_connectivity_gate(out: &Output) -> Result<()> {
+    use clawenv_core::platform::preflight;
+
+    let endpoints = preflight::canonical_endpoints();
+    let count = endpoints.len().max(1) as u8;
+    // Percent band: start→1%, then step up to end→5% as each endpoint
+    // lands. Keeps the progress bar moving during the 1-15s preflight
+    // window rather than freezing at "Starting..." until the batch
+    // emit hits.
+    let end_pct: u8 = 5;
+
+    // Initial "starting" event so the GUI progress bar leaves 0%.
+    out.emit(CliEvent::Progress {
+        stage: "ensure_prerequisites".into(),
+        percent: 1,
+        message: format!(
+            "Connectivity preflight — probing {} endpoints...", count
+        ),
+    });
+
+    let mut idx: u8 = 0;
+    let results = preflight::run_with_callback(None, &endpoints, |r| {
+        idx += 1;
+        let pct = 1 + (end_pct - 1) * idx / count;
+        out.emit(CliEvent::Progress {
+            stage: "ensure_prerequisites".into(),
+            percent: pct,
+            message: format!(
+                "  {} {} — {}",
+                if r.ok { "✓" } else { "✗" }, r.endpoint, r.message
+            ),
+        });
+    }).await?;
+
+    preflight::bail_if_unreachable(&results)?;
+    Ok(())
+}
+
+/// Handle pair returned by `spawn_progress_forwarder`. `tx` is the channel
+/// the caller hands to the downloader / installer API; the spawned forwarder
+/// task drains the rx half and re-emits every event as a `CliEvent::Progress`
+/// on the CLI output stream. Dropping `tx` (either via `finish()` or the
+/// owning scope ending) closes the channel and lets the forwarder task
+/// exit cleanly.
+struct ProgressForwarder {
+    tx: tokio::sync::mpsc::Sender<clawenv_core::manager::install::InstallProgress>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl ProgressForwarder {
+    /// Close the sender side and wait for the forwarder to drain any
+    /// in-flight events. Call after the downloader returns so the final
+    /// "100% complete" emit isn't cut off.
+    async fn finish(self) {
+        drop(self.tx);
+        let _ = self.join.await;
+    }
+}
+
+/// Spawn a task that drains `InstallProgress` events from the returned
+/// channel and forwards each to the CLI output as `CliEvent::Progress`.
+///
+/// Motivation: several install steps (e.g. `install --step prereq` for a
+/// native install that needs to fetch the 28 MB Node.js tarball) take
+/// minutes. Prior to v0.3.0 these call-sites dropped the rx half of the
+/// progress channel, so the download ran silently and looked
+/// indistinguishable from a hang. Any caller that hands a channel tx to
+/// an installer/downloader should use this helper so the user sees live
+/// progress on stdout.
+fn spawn_progress_forwarder(out: Output) -> ProgressForwarder {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<clawenv_core::manager::install::InstallProgress>(32);
+    let join = tokio::spawn(async move {
+        while let Some(p) = rx.recv().await {
+            out.emit(CliEvent::Progress {
+                stage: serde_json::to_value(&p.stage).unwrap_or_default()
+                    .as_str().unwrap_or("unknown").to_string(),
+                percent: p.percent,
+                message: p.message,
+            });
+        }
+    });
+    ProgressForwarder { tx, join }
+}
+
 /// Developer mode: run a single install step.
 ///
 /// Steps:
@@ -1507,7 +1616,6 @@ async fn run_install_step(
     version: &str,
     use_native: bool,
     port: u16,
-    api_key: Option<&str>,
     install_browser: bool,
 ) -> Result<()> {
     use clawenv_core::config::{ConfigManager, UserMode, InstanceConfig, GatewayConfig, ResourceConfig};
@@ -1521,20 +1629,44 @@ async fn run_install_step(
         // ---- Step: prereq ----
         "prereq" => {
             if use_native {
+                // Native prereq needs BOTH node AND git: net-check's npm /
+                // git probes hard-gate on both being present in
+                // ~/.clawenv/{node,git}/. Installing only one (the old
+                // behaviour) made the subsequent probe fail with a
+                // misleading "ClawEnv-private Git missing" even though
+                // the user had just run `--step prereq`.
+                let mut config = ConfigManager::load()
+                    .or_else(|_| ConfigManager::create_default(UserMode::General))?;
+                let _ = clawenv_core::config::proxy_resolver::Scope::Installer
+                    .resolve(&mut config).await;
+                let mirrors = config.config().clawenv.mirrors.clone();
+
+                out.emit(CliEvent::Info { message: "Checking Git...".into() });
+                if clawenv_core::manager::install_native::has_git().await {
+                    out.emit(CliEvent::Info { message: "Git already available".into() });
+                } else {
+                    out.emit(CliEvent::Info { message: "Git not found, installing...".into() });
+                    let progress_task = spawn_progress_forwarder(out.clone());
+                    clawenv_core::manager::install_native::install_git(&progress_task.tx).await?;
+                    progress_task.finish().await;
+                    out.emit(CliEvent::Info { message: "Git installed".into() });
+                }
+
                 out.emit(CliEvent::Info { message: "Checking Node.js...".into() });
                 if clawenv_core::manager::install_native::has_node().await {
-                    out.emit(CliEvent::Complete { message: "Node.js already available".into() });
+                    out.emit(CliEvent::Complete { message: "Node.js + Git ready".into() });
                 } else {
                     out.emit(CliEvent::Info { message: "Node.js not found, installing...".into() });
-                    let mut config = ConfigManager::load()
-                        .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
-                        .resolve(&mut config).await.is_some();
-                    let mirrors = config.config().clawenv.mirrors.clone();
-                    let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
-                    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-                    clawenv_core::manager::install_native::install_nodejs_public(&tx, &base, proxy_on).await?;
-                    out.emit(CliEvent::Complete { message: "Node.js installed".into() });
+                    let base = mirrors.nodejs_dist_urls().into_iter().next().unwrap_or_default();
+                    // Forward the downloader's progress events to the CLI
+                    // event stream so the ~28 MB Node.js tarball doesn't
+                    // look like a hang.
+                    let progress_task = spawn_progress_forwarder(out.clone());
+                    clawenv_core::manager::install_native::install_nodejs_public(
+                        &progress_task.tx, &base,
+                    ).await?;
+                    progress_task.finish().await;
+                    out.emit(CliEvent::Complete { message: "Node.js + Git ready".into() });
                 }
             } else {
                 out.emit(CliEvent::Info { message: "Checking sandbox backend...".into() });
@@ -1546,9 +1678,9 @@ async fn run_install_step(
                     out.emit(CliEvent::Info { message: format!("Installing {}...", backend.name()) });
                     let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
-                        .resolve(&mut config).await.is_some();
-                    backend.ensure_prerequisites(proxy_on).await?;
+                    let _ = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await;
+                    backend.ensure_prerequisites().await?;
                     out.emit(CliEvent::Complete { message: format!("{} installed", backend.name()) });
                 }
             }
@@ -1565,12 +1697,15 @@ async fn run_install_step(
                 if !clawenv_core::manager::install_native::has_node().await {
                     let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
-                        .resolve(&mut config).await.is_some();
+                    let _ = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await;
                     let mirrors = config.config().clawenv.mirrors.clone();
-                    let base = mirrors.nodejs_dist_urls(proxy_on).into_iter().next().unwrap_or_default();
-                    let (tx, _rx) = tokio::sync::mpsc::channel(8);
-                    clawenv_core::manager::install_native::install_nodejs_public(&tx, &base, proxy_on).await?;
+                    let base = mirrors.nodejs_dist_urls().into_iter().next().unwrap_or_default();
+                    let progress_task = spawn_progress_forwarder(out.clone());
+                    clawenv_core::manager::install_native::install_nodejs_public(
+                        &progress_task.tx, &base,
+                    ).await?;
+                    progress_task.finish().await;
                 }
                 clawenv_core::manager::install_native::ensure_node_in_path();
                 out.emit(CliEvent::Complete { message: format!("Native environment ready at {}", install_dir.display()) });
@@ -1584,14 +1719,13 @@ async fn run_install_step(
                 } else {
                     let mut config = ConfigManager::load()
                         .or_else(|_| ConfigManager::create_default(UserMode::General))?;
-                    let _proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
-                        .resolve(&mut config).await.is_some();
+                    let _ = clawenv_core::config::proxy_resolver::Scope::Installer
+                        .resolve(&mut config).await;
                     let mirrors = &config.config().clawenv.mirrors;
-                    // For sandbox create path the user override (if set)
-                    // wins; otherwise empty signals "use backend defaults".
-                    // The install flow proper re-does the proxy_on +
-                    // apply_mirrors step after VM boot, so this field is
-                    // only used by the VM provision layer.
+                    // User override (if set) wins; otherwise empty
+                    // signals "use backend defaults". The full install
+                    // flow re-runs apply_mirrors after VM boot, so this
+                    // only lands in the VM's provision layer.
                     let alpine_mirror = mirrors.alpine_repo.clone();
                     let npm_registry = mirrors.npm_registry.clone();
                     let opts = SandboxOpts {
@@ -1699,21 +1833,9 @@ async fn run_install_step(
             // Validate port uniqueness
             clawenv_core::manager::install::validate_port_available(&config, name, port)?;
 
-            // Store API key
-            if let Some(key) = api_key {
-                out.emit(CliEvent::Info { message: "Storing API key...".into() });
-                clawenv_core::config::keychain::store_api_key(name, key)?;
-                // Also set in sandbox/native
-                if let Some(cmd) = desc.set_apikey_cmd(&clawenv_core::manager::install::shell_escape(key)) {
-                    if use_native {
-                        let b = clawenv_core::sandbox::native_backend(name);
-                        b.exec(&format!("{cmd} 2>/dev/null || true")).await?;
-                    } else {
-                        let b = detect_backend_for(name)?;
-                        b.exec(&format!("{cmd} 2>/dev/null || true")).await?;
-                    }
-                }
-            }
+            // v0.3.0: installer no longer collects an API key. The claw's
+            // own management UI (ClawPage) is responsible for credential
+            // configuration post-install. Keychain write happens there.
 
             // Get version
             let claw_version = if use_native {
@@ -1973,10 +2095,35 @@ async fn run_sandbox_probe(
 
 async fn run_native_probe(out: &Output, probe: &str) -> Result<()> {
     use clawenv_core::platform::managed_shell::ManagedShell;
+    use clawenv_core::manager::install_native;
     let shell = ManagedShell::new();
     let tmp = std::env::temp_dir().join("clawenv-netcheck");
     tokio::fs::create_dir_all(&tmp).await?;
     let tmp_str = tmp.to_string_lossy().to_string();
+
+    // HARD GATE: native probes must exercise ClawEnv's *own* node/git,
+    // never fall through to system. Previously `ManagedShell::path()`
+    // appends `$PATH` after the clawenv dirs, so a missing clawenv-node
+    // would silently resolve `npm` from /usr/local/bin or
+    // C:\Program Files\nodejs — producing a fake "PASS" that tells us
+    // nothing about whether ClawEnv's install-native flow works. Refuse.
+    // Only gate npm/git probes; `host` is pure reqwest (no toolchain).
+    if matches!(probe, "npm" | "git") {
+        if !install_native::has_node().await {
+            anyhow::bail!(
+                "native {probe} probe requires ClawEnv-private Node at ~/.clawenv/node/bin/node \
+                 (or node.exe on Windows). Run `clawcli install --mode native --step prereq` first. \
+                 This check is intentional — the probe must not fall through to the system toolchain, \
+                 otherwise it would 'pass' without ever exercising ClawEnv's install path."
+            );
+        }
+        if !install_native::has_git().await {
+            anyhow::bail!(
+                "native {probe} probe requires ClawEnv-private Git at ~/.clawenv/git/. \
+                 Run `clawcli install --mode native --step prereq` first."
+            );
+        }
+    }
 
     let (label, cmd) = match probe {
         "host" => {

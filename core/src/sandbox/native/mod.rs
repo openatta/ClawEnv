@@ -48,7 +48,7 @@ impl SandboxBackend for NativeBackend {
         Ok(check)
     }
 
-    async fn ensure_prerequisites(&self, _proxy_on: bool) -> Result<()> {
+    async fn ensure_prerequisites(&self) -> Result<()> {
         if !self.is_available().await? {
             anyhow::bail!("Native mode requires Node.js. Please run the installer first.");
         }

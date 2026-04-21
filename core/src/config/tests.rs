@@ -100,24 +100,19 @@ fn mirrors_default_no_override() {
 }
 
 #[test]
-fn mirrors_legacy_china_preset_ignored() {
-    // Pre-v0.2.14 config.toml may have `preset = "china"`. The field is
-    // retained for compatibility but no longer branches URL selection —
-    // all tiering is now proxy-aware and comes from assets/mirrors.toml.
-    // A user who selected "china" now sees upstream-first with
-    // corporate-CN fallback appended when proxy is OFF — which is
-    // actually BETTER than the old static china-only behaviour.
-    let m = MirrorsConfig {
-        preset: "china".into(),
-        ..Default::default()
-    };
-    // No URL override set → same as default. is_default() now keys on
-    // *overrides*, not on preset value.
+fn mirrors_legacy_preset_config_parses() {
+    // Pre-v0.2.14 config.toml files may carry a `preset = "china"` key
+    // at the `[clawenv.mirrors]` table level. The field was removed from
+    // the struct in v0.3.0; serde's default behaviour is to silently
+    // ignore unknown keys, so upgrading shouldn't force users to edit
+    // their config.toml.
+    let legacy = r#"
+        preset = "china"
+    "#;
+    let m: MirrorsConfig = toml::from_str(legacy).expect("legacy preset key should parse (ignored)");
     assert!(m.is_default());
     assert_eq!(m.alpine_repo_url(), "https://dl-cdn.alpinelinux.org/alpine");
-    // Proxy-off list includes the corporate-CN fallbacks.
-    let urls = m.alpine_repo_urls(false);
-    assert!(urls.iter().any(|u| u.contains("aliyun")), "fallback should include aliyun");
+    assert_eq!(m.alpine_repo_urls(), vec!["https://dl-cdn.alpinelinux.org/alpine".to_string()]);
 }
 
 #[test]
@@ -126,21 +121,11 @@ fn mirrors_user_override_wins() {
         npm_registry: "https://my.custom.registry".into(),
         ..Default::default()
     };
-    // Custom URL overrides — both legacy accessor and new list.
+    // Custom URL overrides — both singular accessor and list.
     assert_eq!(m.npm_registry_url(), "https://my.custom.registry");
-    assert_eq!(m.npm_registry_urls(true), vec!["https://my.custom.registry".to_string()]);
-    assert_eq!(m.npm_registry_urls(false), vec!["https://my.custom.registry".to_string()]);
+    assert_eq!(m.npm_registry_urls(), vec!["https://my.custom.registry".to_string()]);
     // alpine untouched — goes through mirrors.toml.
     assert_eq!(m.alpine_repo_url(), "https://dl-cdn.alpinelinux.org/alpine");
-}
-
-#[test]
-fn mirrors_proxy_on_is_official_only() {
-    let m = MirrorsConfig::default();
-    let alpine_on = m.alpine_repo_urls(true);
-    let alpine_off = m.alpine_repo_urls(false);
-    assert_eq!(alpine_on.len(), 1, "proxy on → official only");
-    assert!(alpine_off.len() > alpine_on.len(), "proxy off → more URLs");
 }
 
 #[test]

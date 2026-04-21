@@ -85,11 +85,16 @@ pub struct ClawDescriptor {
     pub dashboard_port_offset: u16,
     /// Command to check version (e.g., "--version")
     pub version_cmd: String,
-    /// Command to set API key, with `{key}` placeholder
-    /// e.g., "config set apiKey '{key}'"
-    /// Empty string means this claw doesn't support API key configuration via CLI.
+    /// Optional one-shot initialisation command run AFTER the claw is
+    /// installed and BEFORE its gateway starts for the first time.
+    /// Used to seed mandatory config entries that the claw can't
+    /// auto-synthesise on its own. For OpenClaw this is
+    /// `config set gateway.mode local` — without it, `openclaw
+    /// gateway` bails with "existing config is missing gateway.mode"
+    /// even under `--allow-unconfigured`.
+    /// Empty string means "no init needed".
     #[serde(default)]
-    pub config_apikey_cmd: String,
+    pub config_init_cmd: String,
     /// Command to register an MCP server, with `{name}` and `{json}` placeholders
     /// e.g., "mcp set {name} '{json}'"
     /// Empty string means MCP is not supported.
@@ -166,16 +171,13 @@ impl ClawDescriptor {
         format!("{} {}", self.cli_binary, self.version_cmd)
     }
 
-    /// Format the API key configuration command. Returns None if not supported.
-    pub fn set_apikey_cmd(&self, key: &str) -> Option<String> {
-        if self.config_apikey_cmd.is_empty() {
+    /// Fully-qualified post-install init command. Returns None when
+    /// `config_init_cmd` is empty (= "no init needed for this claw").
+    pub fn init_cmd(&self) -> Option<String> {
+        if self.config_init_cmd.is_empty() {
             return None;
         }
-        Some(format!(
-            "{} {}",
-            self.cli_binary,
-            self.config_apikey_cmd.replace("{key}", key)
-        ))
+        Some(format!("{} {}", self.cli_binary, self.config_init_cmd))
     }
 
     /// Format the MCP set command. Returns None if not supported.
@@ -291,7 +293,7 @@ pub fn openclaw_descriptor() -> ClawDescriptor {
         dashboard_cmd: String::new(),
         dashboard_port_offset: 0,
         version_cmd: "--version".into(),
-        config_apikey_cmd: "config set apiKey '{key}'".into(),
+        config_init_cmd: "config set gateway.mode local".into(),
         mcp_set_cmd: "mcp set {name} '{json}'".into(),
         default_port: 3000,
         supports_mcp: true,

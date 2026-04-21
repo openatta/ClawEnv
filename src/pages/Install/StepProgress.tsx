@@ -132,7 +132,7 @@ export default function StepProgress(props: {
       if (method === "native-import") {
         await invoke("install_openclaw", {
           instanceName: props.state.instanceName, clawType: props.state.clawType, clawVersion: "latest",
-          apiKey: props.state.apiKey || null, useNative: true,
+          useNative: true,
           installBrowser: false, installMcpBridge: false,
           gatewayPort: 0, image: props.state.localFilePath,
           proxyJson: props.state.proxyJson,
@@ -140,7 +140,7 @@ export default function StepProgress(props: {
       } else {
         await invoke("install_openclaw", {
           instanceName: props.state.instanceName, clawType: props.state.clawType, clawVersion: "latest",
-          apiKey: props.state.apiKey || null, useNative: method === "native",
+          useNative: method === "native",
           installBrowser: props.state.installBrowser && method !== "native",
           installMcpBridge: props.state.installMcpBridge,
           gatewayPort: 0,

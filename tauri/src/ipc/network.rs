@@ -10,56 +10,65 @@ pub struct ConnTestResult {
     pub message: String,
 }
 
-#[tauri::command]
-pub async fn test_connectivity(
-    app: tauri::AppHandle,
-    proxy_json: Option<String>,
+/// Core connectivity probe. Separated from the Tauri command so install
+/// pre-flight can reuse the exact same endpoint list and client-build logic
+/// without any special-casing. `app` is optional — when Some, each endpoint's
+/// progress is streamed via `conn-test-step`; when None (pre-flight use) the
+/// probe runs silently and only the return value matters.
+///
+/// Rationale: v0.3.0 makes connectivity a gate, not a "helpful indicator".
+/// Both the explicit wizard test and the pre-install gate must agree on what
+/// "reachable" means — one shared implementation avoids drift between them.
+pub async fn run_connectivity_probes(
+    app: Option<&tauri::AppHandle>,
+    proxy_json: Option<&str>,
 ) -> Result<Vec<ConnTestResult>, String> {
-    // Build client: if proxy specified use it, otherwise use system default
-    let client = if let Some(ref pj) = proxy_json {
+    let client = if let Some(pj) = proxy_json {
         if let Ok(proxy) = serde_json::from_str::<ProxyConfig>(pj) {
             if proxy.enabled && !proxy.http_proxy.is_empty() {
-                // Explicit proxy — disable system proxy auto-detection
                 let rp = reqwest::Proxy::all(&proxy.http_proxy).map_err(|e| e.to_string())?;
                 reqwest::Client::builder()
                     .proxy(rp)
-                    .no_proxy()  // don't also use system proxy
+                    .no_proxy()
                     .build()
                     .map_err(|e| e.to_string())?
             } else {
-                // "none" mode — no proxy at all
                 reqwest::Client::builder()
                     .no_proxy()
                     .build()
                     .map_err(|e| e.to_string())?
             }
         } else {
-            // Use system default (reqwest auto-detects HTTP_PROXY etc)
             reqwest::Client::new()
         }
     } else {
-        // null = use system defaults
         reqwest::Client::new()
     };
 
+    // Endpoints chosen so each covers a distinct failure mode: npm
+    // (Cloudflare — usually works even on restricted networks), github
+    // (classic restricted target), nodejs.org (dist downloads), alpine
+    // CDN (sandbox apk). npm + github alone gives false "ready" in
+    // networks where only github is blocked — keep all four.
     let endpoints = vec![
-        ("Alpine CDN", "https://dl-cdn.alpinelinux.org/alpine/latest-stable/"),
         ("npm Registry", "https://registry.npmjs.org/"),
-        ("GitHub API", "https://api.github.com/"),
-        ("OpenClaw Registry", "https://registry.npmjs.org/openclaw"),
+        ("GitHub", "https://api.github.com/"),
+        ("Node.js dist", "https://nodejs.org/dist/"),
+        ("Alpine CDN", "https://dl-cdn.alpinelinux.org/alpine/latest-stable/"),
     ];
 
     let mut results = Vec::new();
     for (name, url) in &endpoints {
-        // Emit each step as it starts
-        let _ = app.emit("conn-test-step", serde_json::json!({
-            "endpoint": name, "status": "testing"
-        }));
+        if let Some(a) = app {
+            let _ = a.emit("conn-test-step", serde_json::json!({
+                "endpoint": name, "status": "testing"
+            }));
+        }
 
         let res = client
             .get(*url)
             .header("User-Agent", "ClawEnv/0.1")
-            .timeout(std::time::Duration::from_secs(8))
+            .timeout(std::time::Duration::from_secs(15))
             .send()
             .await;
         let (ok, msg) = match res {
@@ -69,9 +78,8 @@ pub async fn test_connectivity(
             Ok(r) => (false, format!("HTTP {}", r.status())),
             Err(e) => {
                 let err_str = e.to_string();
-                // Give friendlier messages
                 if err_str.contains("timed out") {
-                    (false, "Timeout (8s)".to_string())
+                    (false, "Timeout (15s)".to_string())
                 } else if err_str.contains("dns") || err_str.contains("resolve") {
                     (false, "DNS resolution failed".to_string())
                 } else if err_str.contains("connect") {
@@ -87,15 +95,24 @@ pub async fn test_connectivity(
             ok,
             message: msg,
         };
-        // Emit each result as it completes
-        let _ = app.emit("conn-test-step", serde_json::json!({
-            "endpoint": name,
-            "status": if result.ok { "ok" } else { "fail" },
-            "message": &result.message,
-        }));
+        if let Some(a) = app {
+            let _ = a.emit("conn-test-step", serde_json::json!({
+                "endpoint": name,
+                "status": if result.ok { "ok" } else { "fail" },
+                "message": &result.message,
+            }));
+        }
         results.push(result);
     }
     Ok(results)
+}
+
+#[tauri::command]
+pub async fn test_connectivity(
+    app: tauri::AppHandle,
+    proxy_json: Option<String>,
+) -> Result<Vec<ConnTestResult>, String> {
+    run_connectivity_probes(Some(&app), proxy_json.as_deref()).await
 }
 
 /// Synchronous, blocking variant of `detect_system_proxy` suitable for use

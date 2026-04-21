@@ -8,7 +8,6 @@ import StepWelcome from "./StepWelcome";
 import StepSystemCheck from "./StepSystemCheck";
 import StepNetwork from "./StepNetwork";
 import StepInstallPlan from "./StepInstallPlan";
-import StepApiKey from "./StepApiKey";
 import StepProgress from "./StepProgress";
 
 export default function InstallWizard(props: {
@@ -30,7 +29,7 @@ export default function InstallWizard(props: {
 
   // If clawType is locked, start at step 1 (Welcome). Otherwise, start at step 0 (Product Selection).
   const [step, setStep] = createSignal(isClawTypeLocked() ? 1 : 0);
-  const totalSteps = 8; // 0=Product, 1=Welcome...7=Complete
+  const totalSteps = 7; // 0=Product, 1=Welcome, 2=SysCheck, 3=Network, 4=Plan, 5=Progress, 6=Complete
 
   // Shared state lifted to orchestrator
   // Fetch available claw types if not provided
@@ -42,10 +41,13 @@ export default function InstallWizard(props: {
   const [existingNames, setExistingNames] = createSignal<string[]>([]);
   const [installMethod, setInstallMethod] = createSignal<"online" | "local" | "native" | "native-import">("online");
   const [localFilePath, setLocalFilePath] = createSignal("");
-  const [apiKey, setApiKey] = createSignal("");
   const [installBrowser, setInstallBrowser] = createSignal(false);
   const [installMcpBridge, setInstallMcpBridge] = createSignal(true);
   const [proxyJson, setProxyJson] = createSignal<string | null>(null);
+  // Gates the Step 3 (Network) "Next" button. StepNetwork toggles this via
+  // onConnectedChange — false on any selection edit, true only after a
+  // successful connectivity test under the current selection.
+  const [netConnected, setNetConnected] = createSignal(false);
   const [installError, setInstallError] = createSignal("");
 
   // Track whether system check is ready (controls Next button)
@@ -75,8 +77,8 @@ export default function InstallWizard(props: {
   };
 
   const baseLabelsMap = {
-    "zh-CN": ["选择产品", "欢迎", "系统检测", "网络设置", "安装方案", "API 密钥", "安装中", "完成"],
-    en: ["Product", "Welcome", "System Check", "Network", "Install Plan", "API Key", "Installing", "Complete"],
+    "zh-CN": ["选择产品", "欢迎", "系统检测", "网络设置", "安装方案", "安装中", "完成"],
+    en: ["Product", "Welcome", "System Check", "Network", "Install Plan", "Installing", "Complete"],
   };
   // If clawType is locked, skip the product selection step in labels
   const stepLabels = () => {
@@ -93,10 +95,10 @@ export default function InstallWizard(props: {
     clawDisplayName: clawDisplayName(),
     installMethod: installMethod(),
     localFilePath: localFilePath(),
-    apiKey: apiKey(),
     installBrowser: installBrowser(),
     installMcpBridge: installMcpBridge(),
     proxyJson: proxyJson(),
+    connected: netConnected(),
   });
 
   // Key to force remount of StepProgress on retry. Starts at 1 so Show/keyed
@@ -116,12 +118,12 @@ export default function InstallWizard(props: {
   }
 
   function goToStep(s: number) {
-    // Bump progressKey BEFORE transitioning into step 6. Otherwise StepProgress
-    // mounts with the old key value, runs startInstall once, then sees the key
-    // change a microtask later and runs startInstall again — the second call
-    // collides with the backend INSTALL_RUNNING guard and surfaces as a
-    // spurious "Installation already in progress" error in the stage UI.
-    if (s === 6) {
+    // Bump progressKey BEFORE transitioning into step 5 (Progress). Otherwise
+    // StepProgress mounts with the old key value, runs startInstall once, then
+    // sees the key change a microtask later and runs startInstall again — the
+    // second call collides with the backend INSTALL_RUNNING guard and surfaces
+    // as a spurious "Installation already in progress" error in the stage UI.
+    if (s === 5) {
       setInstallError("");          // clear the old failure so Retry UI shows progress, not the error
       setProgressKey(k => k + 1);   // bump key → createEffect reruns startInstall
     }
@@ -203,7 +205,7 @@ export default function InstallWizard(props: {
           {step() === 2 && (
             <StepSystemCheck onReady={() => setSysCheckReady(true)} />
           )}
-          {step() === 3 && <StepNetwork onProxyChange={setProxyJson} />}
+          {step() === 3 && <StepNetwork onProxyChange={setProxyJson} onConnectedChange={setNetConnected} />}
           {step() === 4 && (
             <StepInstallPlan
               lang={iLang()} installMethod={installMethod} onMethodChange={m => setInstallMethod(m as any)}
@@ -216,9 +218,6 @@ export default function InstallWizard(props: {
             />
           )}
           {step() === 5 && (
-            <StepApiKey apiKey={apiKey} onApiKeyChange={setApiKey} clawDisplayName={clawDisplayName()} />
-          )}
-          {step() === 6 && (
             // StepProgress stays mounted across retries; incrementing
             // progressKey() re-fires its internal createEffect, which restarts
             // the install. We deliberately avoid <Show keyed> here — that
@@ -227,13 +226,13 @@ export default function InstallWizard(props: {
             <StepProgress
               state={buildInstallState()} stages={INSTALL_STAGES()}
               retryTrigger={progressKey}
-              onComplete={() => { void checkBakedProxy(); setStep(7); }}
+              onComplete={() => { void checkBakedProxy(); setStep(6); }}
               onError={(msg) => setInstallError(msg)}
             />
           )}
 
-          {/* Step 7: Complete (inline — simple enough) */}
-          {step() === 7 && (
+          {/* Step 6: Complete (inline — simple enough) */}
+          {step() === 6 && (
             <div>
               <h2 class="text-xl font-bold mb-3">Installation Complete!</h2>
               <p class="text-sm text-gray-400 mb-3">{clawDisplayName()} is running in a secure sandbox.</p>
@@ -270,7 +269,7 @@ export default function InstallWizard(props: {
             disabled={
               (step() === 0 && !props.onBack) ||
               (step() === 1 && isClawTypeLocked() && !props.onBack) ||
-              step() === 6 || step() === 7
+              step() === 5 || step() === 6
             }
             onClick={() => {
               if ((step() === 0 || (step() === 1 && isClawTypeLocked())) && props.onBack) { props.onBack(); }
@@ -279,18 +278,17 @@ export default function InstallWizard(props: {
             {(step() === 0 || (step() === 1 && isClawTypeLocked())) ? (iLang() === "zh-CN" ? "返回" : "Back") : (iLang() === "zh-CN" ? "上一步" : "Previous")}
           </button>
           <div class="flex gap-2">
-            <Show when={step() === 5}>
-              <button class="px-4 py-1.5 text-sm bg-gray-700 hover:bg-gray-600 rounded"
-                onClick={() => { setApiKey(""); goToStep(6); }}>
-                Skip & Install
-              </button>
-              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50"
-                disabled={!apiKey()}
-                onClick={() => goToStep(6)}>
-                Install
+            {/* Step 4 (Install Plan) is the final step with editable choices.
+                Its "Install" action launches the Progress step. No more
+                dedicated API-key step — each claw collects its own key
+                post-install via its ClawPage management UI. */}
+            <Show when={step() === 4}>
+              <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
+                onClick={() => goToStep(5)}>
+                {iLang() === "zh-CN" ? "安装" : "Install"}
               </button>
             </Show>
-            <Show when={step() === 6 && installError()}>
+            <Show when={step() === 5 && installError()}>
               <Show when={installError().toLowerCase().includes("restart")}>
                 <button class="px-4 py-1.5 text-sm bg-orange-600 hover:bg-orange-500 rounded"
                   onClick={async () => {
@@ -302,23 +300,29 @@ export default function InstallWizard(props: {
               </Show>
               <Show when={!installError().toLowerCase().includes("restart")}>
                 <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded"
-                  onClick={() => goToStep(6)}>
+                  onClick={() => goToStep(5)}>
                   Retry
                 </button>
               </Show>
             </Show>
-            <Show when={step() < 5 && step() < totalSteps}>
+            <Show when={step() < 4 && step() < totalSteps}>
               <button class="px-4 py-1.5 text-sm bg-indigo-600 hover:bg-indigo-500 rounded disabled:opacity-50 disabled:cursor-not-allowed"
                 disabled={
                   (step() === 0 && !selectedClawType()) ||
                   (step() === 1 && !!nameError()) ||
-                  (step() === 2 && !sysCheckReady())
+                  (step() === 2 && !sysCheckReady()) ||
+                  (step() === 3 && !netConnected())
                 }
+                title={step() === 3 && !netConnected()
+                  ? (iLang() === "zh-CN"
+                      ? "网络不通，请先完成连通性测试"
+                      : "Network unreachable — pass connectivity test first")
+                  : undefined}
                 onClick={() => goToStep(step() + 1)}>
                 Next
               </button>
             </Show>
-            <Show when={step() === 7}>
+            <Show when={step() === 6}>
               <button class="px-4 py-1.5 text-sm bg-green-600 hover:bg-green-500 rounded" onClick={handleComplete}>
                 Enter ClawEnv
               </button>

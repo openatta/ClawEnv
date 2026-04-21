@@ -194,7 +194,7 @@ pub async fn delete_instance_with_progress(app: tauri::AppHandle, name: String) 
     emit("kill", "active", "Killing processes...");
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     if inst.sandbox_type == SandboxType::Native {
-        instance::kill_native_gateway_public(inst.gateway.gateway_port).await;
+        instance::kill_native_gateway_public(&inst.claw_type, inst.gateway.gateway_port).await;
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
     }
     emit("kill", "done", "Killed");
@@ -212,7 +212,7 @@ pub async fn delete_instance_with_progress(app: tauri::AppHandle, name: String) 
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 // Kill again in case something respawned
                 if inst.sandbox_type == SandboxType::Native {
-                    instance::kill_native_gateway_public(inst.gateway.gateway_port).await;
+                    instance::kill_native_gateway_public(&inst.claw_type, inst.gateway.gateway_port).await;
                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
                 }
             }

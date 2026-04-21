@@ -41,14 +41,6 @@ mod descriptor_tests {
     }
 
     #[test]
-    fn openclaw_apikey_cmd() {
-        let d = openclaw_descriptor();
-        let cmd = d.set_apikey_cmd("sk-test123");
-        assert!(cmd.is_some());
-        assert_eq!(cmd.unwrap(), "openclaw config set apiKey 'sk-test123'");
-    }
-
-    #[test]
     fn openclaw_mcp_cmd() {
         let d = openclaw_descriptor();
         let cmd = d.mcp_register_cmd("clawenv", r#"{"command":"node"}"#);
@@ -148,7 +140,6 @@ mod descriptor_tests {
         id: &str,
         expected_binary: &str,
         expected_port: u16,
-        has_apikey: bool,
         has_mcp: bool,
     ) {
         let registry = crate::claw::ClawRegistry::load();
@@ -192,11 +183,6 @@ mod descriptor_tests {
         let pns = d.process_names();
         assert!(pns.iter().any(|p| p.contains(expected_binary)), "process_names missing binary for {id}: {pns:?}");
 
-        // API key support
-        if has_apikey {
-            assert!(d.set_apikey_cmd("test").is_some(), "expected apikey support for {id}");
-        }
-
         // MCP support
         if has_mcp {
             assert!(d.mcp_register_cmd("x", "{}").is_some(), "expected mcp support for {id}");
@@ -207,19 +193,12 @@ mod descriptor_tests {
 
     #[test]
     fn all_builtin_claws_have_valid_commands() {
-        //       id,          binary,       port, apikey, mcp
-        assert_claw_commands("openclaw",   "openclaw",   3000, true,  true);
-        assert_claw_commands("hermes",     "hermes",     3000, true,  true);
+        //       id,          binary,       port, mcp
+        assert_claw_commands("openclaw",   "openclaw",   3000, true);
+        assert_claw_commands("hermes",     "hermes",     3000, true);
     }
 
     // ---- Edge cases ----
-
-    #[test]
-    fn empty_apikey_cmd_returns_none() {
-        let mut d = openclaw_descriptor();
-        d.config_apikey_cmd = String::new();
-        assert!(d.set_apikey_cmd("key").is_none());
-    }
 
     #[test]
     fn empty_mcp_cmd_returns_none() {
@@ -233,13 +212,6 @@ mod descriptor_tests {
         let mut d = openclaw_descriptor();
         d.gateway_cmd = String::new();
         assert!(d.gateway_start_cmd(3000).is_none());
-    }
-
-    #[test]
-    fn apikey_with_special_chars() {
-        let d = openclaw_descriptor();
-        let cmd = d.set_apikey_cmd("sk-abc'def\"ghi").unwrap();
-        assert!(cmd.contains("sk-abc'def\"ghi"));
     }
 
     #[test]
@@ -323,7 +295,7 @@ mod registry_tests {
             dashboard_cmd: String::new(),
             dashboard_port_offset: 0,
             version_cmd: "--version".into(),
-            config_apikey_cmd: String::new(),
+            config_init_cmd: String::new(),
             mcp_set_cmd: String::new(),
             default_port: 4000,
             supports_mcp: false,

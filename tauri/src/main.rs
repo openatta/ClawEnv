@@ -327,7 +327,6 @@ fn main() {
             ipc::detect_system_proxy,
             ipc::system_check,
             ipc::install_prerequisites,
-            ipc::test_api_key,
             ipc::pick_import_file,
             ipc::validate_import_file,
             ipc::has_native_instance,

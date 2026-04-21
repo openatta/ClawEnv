@@ -15,9 +15,9 @@ e2e_assert_init
 
 unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
 
-if ! curl -sSf -m 5 --head https://dl-cdn.alpinelinux.org/alpine/latest-stable/ >/dev/null 2>&1; then
-    _skip "dl-cdn.alpinelinux.org unreachable direct — sandbox no-proxy can't pass"
-fi
+# Shared preflight — direct connection must work before we spin up
+# a Lima VM that will try to apk/npm/git through the same path.
+e2e_preflight_noproxy
 
 NAME="probe-mac-sb-noproxy"
 PORT="11401"

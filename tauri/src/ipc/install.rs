@@ -28,6 +28,12 @@ impl Drop for InstallRunningGuard {
 // protocol between the install wizard frontend and the backend. Packing
 // the fields into a struct just forces every JS caller to build an object
 // with the same keys, adding indirection without simplification.
+//
+// v0.3.0 removed the `api_key` parameter: the installer no longer collects
+// the claw's API key. Each claw is responsible for its own credential UX
+// post-install, from its own ClawPage management view. This keeps the
+// installer a single-purpose tool (provisioning) and avoids baking a
+// schema for one specific claw (openclaw) into every install path.
 #[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn install_openclaw(
@@ -35,7 +41,6 @@ pub async fn install_openclaw(
     instance_name: String,
     claw_type: Option<String>,
     claw_version: String,
-    api_key: Option<String>,
     use_native: bool,
     install_browser: bool,
     _install_mcp_bridge: Option<bool>,
@@ -65,10 +70,6 @@ pub async fn install_openclaw(
     if install_browser {
         args.push("--browser".to_string());
     }
-    if let Some(key) = api_key {
-        args.push("--api-key".to_string());
-        args.push(key);
-    }
     if let Some(ref img) = image {
         if !img.is_empty() {
             args.push("--image".to_string());
@@ -95,10 +96,60 @@ pub async fn install_openclaw(
         .unwrap_or_default();
 
     let app_handle = app.clone();
+    // Move the selection JSON into the task so the pre-flight probe sees the
+    // exact same proxy the CLI subprocess will be launched under.
+    let proxy_json_for_preflight = proxy_json.clone();
     tokio::spawn(async move {
         // Guard released when this task exits, via any path (normal return,
         // early return, panic caught by tokio's spawn, task cancel).
         let _guard = InstallRunningGuard;
+
+        // Pre-flight connectivity gate. v0.3.0 contract: networking is the
+        // user's problem, not ours. Before we spend several minutes
+        // provisioning a VM / running apk + npm / pulling images, we do one
+        // fast probe under the user's chosen proxy (or no proxy). If it
+        // fails, we bail with a bilingual error rather than letting the
+        // failure surface as an opaque "apk: BAD signature" 90 seconds in.
+        //
+        // Skipped when the wizard didn't collect a selection (proxy_json is
+        // None). That only happens if the user got here through a path that
+        // bypasses StepNetwork — we don't want to block those callers.
+        if let Some(ref pj) = proxy_json_for_preflight {
+            match crate::ipc::network::run_connectivity_probes(
+                Some(&app_handle),
+                Some(pj.as_str()),
+            ).await {
+                Ok(results) => {
+                    let failed: Vec<String> = results.iter()
+                        .filter(|r| !r.ok)
+                        .map(|r| format!("{}: {}", r.endpoint, r.message))
+                        .collect();
+                    if !failed.is_empty() {
+                        let err_msg = format!(
+                            "网络不通，请先解决网络问题再重试安装 / Network unreachable — fix your network before retrying install.\n\n\
+                            失败端点 / Failed endpoints:\n  - {}",
+                            failed.join("\n  - "),
+                        );
+                        let _ = app_handle.emit("install-failed", &err_msg);
+                        crate::tray::send_notification(
+                            &app_handle,
+                            "Install Blocked / 安装阻止",
+                            "Network unreachable — see install window.",
+                        );
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let err_msg = format!(
+                        "连通性测试失败 / Connectivity test failed: {e}\n\n\
+                        请检查代理设置与网络后重试。 / Check proxy settings and network, then retry.",
+                    );
+                    let _ = app_handle.emit("install-failed", &err_msg);
+                    return;
+                }
+            }
+        }
+
         let (tx, mut rx) = tokio::sync::mpsc::channel::<CliEvent>(32);
 
         // Forward CLI events to Tauri frontend
@@ -185,9 +236,13 @@ pub async fn install_prerequisites(app: tauri::AppHandle) -> Result<(), String> 
             clawenv_core::config::UserMode::General,
         ))
         .map_err(|e| e.to_string())?;
-    let proxy_on = clawenv_core::config::proxy_resolver::Scope::Installer
-        .resolve(&mut config).await.is_some();
-    backend.ensure_prerequisites(proxy_on).await.map_err(|e| e.to_string())?;
+    // Still resolve the installer-scope proxy: `.resolve()` has the side
+    // effect of injecting HTTP_PROXY into the process env (via apply_env),
+    // which is what reqwest + subprocess downloads need. The returned
+    // triple itself is no longer consulted for URL tier selection.
+    let _ = clawenv_core::config::proxy_resolver::Scope::Installer
+        .resolve(&mut config).await;
+    backend.ensure_prerequisites().await.map_err(|e| e.to_string())?;
     let _ = app.emit("prereq-step", &format!("{} installed successfully", backend.name()));
 
     Ok(())
@@ -218,17 +273,6 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
         sandbox_available: resp.sandbox_available,
         checks: resp.checks,
     })
-}
-
-#[tauri::command]
-pub async fn test_api_key(api_key: String) -> Result<String, String> {
-    if api_key.is_empty() {
-        return Err("API key is empty".into());
-    }
-    if !api_key.starts_with("sk-") {
-        return Err("API key should start with 'sk-'".into());
-    }
-    Ok("API key format valid".into())
 }
 
 #[tauri::command]

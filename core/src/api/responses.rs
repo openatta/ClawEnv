@@ -174,8 +174,6 @@ pub struct ConfigShowResponse {
     pub proxy_https: String,
     #[serde(rename = "proxy.no_proxy")]
     pub proxy_no_proxy: String,
-    #[serde(rename = "mirrors.preset")]
-    pub mirrors_preset: String,
     #[serde(rename = "bridge.enabled")]
     pub bridge_enabled: bool,
     #[serde(rename = "bridge.port")]

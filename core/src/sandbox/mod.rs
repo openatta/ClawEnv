@@ -32,9 +32,7 @@ pub trait SandboxBackend: Send + Sync {
     async fn is_available(&self) -> Result<bool>;
 
     /// 检测并安装前提条件（WSL2 / limactl / podman）.
-    /// `proxy_on` is the install-time proxy snapshot — controls whether
-    /// fallback mirrors are tried after the official URL.
-    async fn ensure_prerequisites(&self, proxy_on: bool) -> Result<()>;
+    async fn ensure_prerequisites(&self) -> Result<()>;
 
     /// 创建并初始化沙盒（含 Alpine Linux 环境）
     async fn create(&self, opts: &SandboxOpts) -> Result<()>;

@@ -113,7 +113,6 @@ export async function installOpenclaw(params: {
   instanceName: string;
   clawType: string;
   clawVersion: string;
-  apiKey: string;
   useNative: boolean;
   installBrowser: boolean;
   installMcpBridge: boolean;
@@ -136,10 +135,6 @@ export async function testConnectivity(
   proxyJson: string,
 ): Promise<ConnTestResult[]> {
   return invoke<ConnTestResult[]>("test_connectivity", { proxyJson });
-}
-
-export async function testApiKey(apiKey: string): Promise<string> {
-  return invoke<string>("test_api_key", { apiKey });
 }
 
 export async function validateImportFile(

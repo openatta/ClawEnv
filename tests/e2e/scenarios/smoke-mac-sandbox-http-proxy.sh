@@ -13,6 +13,11 @@ e2e_assert_init
 
 [ -n "${E2E_MAC_HTTP_PROXY:-}" ] || _skip "macOS HTTPEnable=0 — no HTTP proxy configured"
 
+# Verify the proxy works before provisioning a VM that will be wired
+# to use it. No point pulling a 200MB base image only to discover the
+# proxy credentials expired last week.
+e2e_preflight_proxy "$E2E_MAC_HTTP_PROXY"
+
 export HTTP_PROXY="$E2E_MAC_HTTP_PROXY"
 export HTTPS_PROXY="$E2E_MAC_HTTP_PROXY"
 

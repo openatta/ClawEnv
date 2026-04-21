@@ -56,10 +56,8 @@ async fn install_commands_use_descriptor_for_all_claws() {
             "[{}] version check returned empty", desc.id
         );
 
-        // Step 4: configure API key (if supported)
-        if let Some(apikey_cmd) = desc.set_apikey_cmd("sk-test") {
-            let _ = backend.exec(&format!("{apikey_cmd} 2>/dev/null || true")).await;
-        }
+        // Step 4: API key configuration removed in v0.3.0 —
+        // credentials belong to each claw's own UI, not to ClawEnv.
 
         // Step 5: start gateway (if this claw has one)
         if let Some(gateway_cmd) = desc.gateway_start_cmd(desc.default_port) {

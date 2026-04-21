@@ -16,14 +16,13 @@ use crate::platform::download::download_with_progress;
 pub async fn install_nodejs(
     tx: &mpsc::Sender<InstallProgress>,
     nodejs_dist_base: &str,
-    proxy_on: bool,
 ) -> Result<()> {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         _ => "x64",
     };
     let platform_ext = format!("win-{arch}.zip");
-    let urls = build_node_urls(nodejs_dist_base, &platform_ext, proxy_on)?;
+    let urls = build_node_urls(nodejs_dist_base, &platform_ext)?;
 
     let node_dir = clawenv_node_dir();
     let parent = node_dir.parent().unwrap_or(&node_dir).to_path_buf();
@@ -77,28 +76,42 @@ pub async fn install_nodejs(
         anyhow::bail!("Failed to extract Node.js zip");
     }
 
-    // Rename old node dir out of the way (instead of deleting — avoids lock issues)
+    // Make sure node_dir is clear before the move. Rename first (keeps
+    // a rollback in bak_dir), fall back to recursive delete if that
+    // fails (e.g., locked file), and finally verify it's gone. The
+    // subsequent Move-Item -Destination would fail if node_dir still
+    // exists because PowerShell doesn't merge directories.
     if node_dir.exists() {
-        let _ = tokio::fs::rename(&node_dir, &bak_dir).await;
-        // If rename fails (locked), try harder
-        if node_dir.exists() {
+        if tokio::fs::rename(&node_dir, &bak_dir).await.is_err() {
             let _ = tokio::fs::remove_dir_all(&node_dir).await;
         }
     }
 
-    // Move the extracted nested directory to final location
+    // Move the extracted nested directory to final location.
     // Zip contains one top-level dir: node-v22.16.0-win-arm64/
     let node_dir_str = node_dir.to_string_lossy().replace('/', "\\");
+    let tmp_dir_str = tmp_dir.to_string_lossy().replace('/', "\\");
+    // Capture stderr so on failure we can tell the user WHY the move
+    // failed — previously the error surfaced as an opaque "Failed to
+    // move Node.js to final location" with no diagnostic.
     let move_cmd = format!(
-        "$src = Get-ChildItem '{}' -Directory | Select-Object -First 1; \
-         if ($src) {{ Move-Item -Path $src.FullName -Destination '{}' -Force }}",
-        tmp_dir.to_string_lossy().replace('/', "\\"), node_dir_str,
+        "$ErrorActionPreference = 'Stop'; \
+         $src = Get-ChildItem '{tmp_dir_str}' -Directory | Select-Object -First 1; \
+         if (-not $src) {{ Write-Error 'no top-level directory inside extracted zip ({tmp_dir_str})'; exit 2 }} \
+         Move-Item -LiteralPath $src.FullName -Destination '{node_dir_str}'"
     );
-    let status = crate::platform::process::silent_cmd("powershell")
+    let output = crate::platform::process::silent_cmd("powershell")
         .args(["-Command", &move_cmd])
-        .status().await?;
-    if !status.success() {
-        anyhow::bail!("Failed to move Node.js to final location");
+        .output().await?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        anyhow::bail!(
+            "Failed to move Node.js to final location (powershell exit {:?}):\n  stderr: {}\n  stdout: {}",
+            output.status.code(),
+            stderr.trim(),
+            stdout.trim()
+        );
     }
 
     // Cleanup

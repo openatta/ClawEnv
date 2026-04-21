@@ -2,6 +2,7 @@ mod detector;
 pub mod download;
 pub mod managed_shell;
 pub mod network;
+pub mod preflight;
 pub mod process;
 
 pub use detector::{detect_platform, PlatformInfo, OsType, Arch};

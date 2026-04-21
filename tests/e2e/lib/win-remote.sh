@@ -22,17 +22,33 @@ e2e_win_load_env() {
     fi
     : "${WIN_PROJECT:=C:/Users/$WIN_USER/ClawEnv}"
 
-    # Same ENV_PREFIX pattern as scripts/win-remote.sh — Windows setx
-    # system-scope PATH doesn't flow into new SSH sessions, so every
-    # command gets explicit path prepended.
+    # ENV_PREFIX for every cmd.exe invocation over SSH.
     #
-    # ALSO sets CLAWENV_HOME to isolate test state into
-    # %USERPROFILE%\Desktop\ClawEnv-e2e\ so we don't pollute the real
-    # %USERPROFILE%\.clawenv. Native clawcli uses dirs::home_dir() on
-    # Windows which reads SHGetKnownFolderPath — can't be redirected
-    # via $HOME like on macOS, so CLAWENV_HOME is the only knob.
-    export WIN_CLAWENV_HOME="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv-e2e"
-    export WIN_ENV_PREFIX='set PATH=%PATH%;C:\Program Files\nodejs;C:\Program Files\Git\cmd;C:\Users\'"$WIN_USER"'\.cargo\bin&&set CLAWENV_HOME='"$WIN_CLAWENV_HOME"'&&'
+    # CLAWENV_HOME: isolate test state into %USERPROFILE%\Desktop\ClawEnv-e2e\
+    # so we don't pollute the real %USERPROFILE%\.clawenv. Native clawcli
+    # uses dirs::home_dir() on Windows (SHGetKnownFolderPath) — can't be
+    # redirected via $HOME like on macOS, so CLAWENV_HOME is the only knob.
+    #
+    # PATH: DO NOT add `C:\Program Files\nodejs` or `C:\Program Files\Git\cmd`.
+    # The whole point of `--mode native` is that ClawEnv installs its OWN
+    # node + git into %CLAWENV_HOME%\node\ and %CLAWENV_HOME%\git\ — the
+    # net-check probes must exercise THOSE, not the system ones. A prior
+    # version of this prefix pushed both system dirs onto PATH, which
+    # caused `npm install` to silently resolve to `C:\Program Files\nodejs\npm.cmd`
+    # when ClawEnv-native wasn't installed — producing a fake "PASS" that
+    # told us nothing. Keep .cargo\bin (harmless; for any rust-tooling
+    # sub-invocations) but nothing else.
+    # Suffix the Windows-side CLAWENV_HOME with E2E_HOME_SUFFIX (set by
+    # run.sh --parallel or --home-suffix) so two concurrent Win
+    # scenarios don't clobber each other's %CLAWENV_HOME%\node\. Empty
+    # suffix (serial mode) falls through to the shared dir — fine
+    # because only one scenario runs at a time.
+    local clawenv_suffix=""
+    if [ -n "${E2E_HOME_SUFFIX:-}" ]; then
+        clawenv_suffix="-${E2E_HOME_SUFFIX}"
+    fi
+    export WIN_CLAWENV_HOME="C:\\Users\\$WIN_USER\\Desktop\\ClawEnv-e2e${clawenv_suffix}"
+    export WIN_ENV_PREFIX='set PATH=%PATH%;C:\Users\'"$WIN_USER"'\.cargo\bin&&set CLAWENV_HOME='"$WIN_CLAWENV_HOME"'&&'
 
     # clawcli.exe lives at target/release/clawcli.exe under the project.
     # Windows path — use backslashes for cmd.exe line + forward slashes

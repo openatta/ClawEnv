@@ -132,7 +132,7 @@ impl SandboxBackend for MockBackend {
         Ok(true)
     }
 
-    async fn ensure_prerequisites(&self, _proxy_on: bool) -> Result<()> {
+    async fn ensure_prerequisites(&self) -> Result<()> {
         Ok(())
     }
 

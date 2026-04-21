@@ -1,8 +1,8 @@
 //! macOS-specific Node.js installation for Native mode.
 //!
-//! Streams the .tar.gz from nodejs.org (with CN mirror fallback) and
-//! extracts into ~/.clawenv/node/. No admin privileges — fully self-
-//! contained in the user directory.
+//! Streams the .tar.gz from nodejs.org (upstream only, per v0.3.0
+//! policy) and extracts into ~/.clawenv/node/. No admin privileges —
+//! fully self-contained in the user directory.
 
 use anyhow::Result;
 use tokio::sync::mpsc;
@@ -16,14 +16,13 @@ use crate::platform::download::download_with_progress;
 pub async fn install_nodejs(
     tx: &mpsc::Sender<InstallProgress>,
     nodejs_dist_base: &str,
-    proxy_on: bool,
 ) -> Result<()> {
     let arch = match std::env::consts::ARCH {
         "aarch64" => "arm64",
         _ => "x64",
     };
     let platform_ext = format!("darwin-{arch}.tar.gz");
-    let urls = build_node_urls(nodejs_dist_base, &platform_ext, proxy_on)?;
+    let urls = build_node_urls(nodejs_dist_base, &platform_ext)?;
 
     let node_dir = clawenv_node_dir();
     tokio::fs::create_dir_all(&node_dir).await?;

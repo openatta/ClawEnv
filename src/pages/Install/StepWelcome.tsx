@@ -25,7 +25,7 @@ export default function StepWelcome(props: {
             <li>检查系统是否满足要求（操作系统、内存、磁盘空间）</li>
             <li>配置网络和代理设置</li>
             <li>下载并在沙盒中安装 {props.clawDisplayName}</li>
-            <li>安全地将 API Key 存储在系统钥匙串中</li>
+            <li>安装完成后，{props.clawDisplayName} 自己的管理界面会收集 API Key（ClawEnv 不经手凭证）</li>
           </ul>
           <p class="text-gray-500 text-xs mt-2">支持平台：macOS (Lima)、Windows (WSL2)、Linux (Podman)</p>
         </>) : (<>
@@ -36,7 +36,7 @@ export default function StepWelcome(props: {
             <li>Check your system meets requirements (OS, memory, disk)</li>
             <li>Configure network & proxy settings</li>
             <li>Download and install {props.clawDisplayName} in a sandbox</li>
-            <li>Securely store your API key in system keychain</li>
+            <li>Post-install, {props.clawDisplayName}'s own management UI collects your API key — ClawEnv never handles credentials</li>
           </ul>
           <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
         </>)}

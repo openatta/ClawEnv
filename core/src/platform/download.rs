@@ -27,11 +27,19 @@ pub use super::super::manager::install::{InstallProgress, InstallStage};
 /// through `tx` and drive the UI progress bar as well as keeping the
 /// CLI-bridge idle watcher alive.
 ///
-/// - `urls` — (full_url, filename) pairs. First success returns. Filename
-///   is only used in log lines — the caller writes the resulting bytes
-///   wherever it wants.
+/// v0.3.0: the `urls` slice is effectively always length 1 (upstream
+/// only — fallback tiers removed). We still accept a slice for the
+/// benefit of legacy callers (and in case a user override later gets
+/// plumbed in as a pre-pended alt URL), but the body takes the first
+/// entry and treats its failure as a chance for a single retry with
+/// exponential backoff — *not* as a cue to cycle through a tier list.
+/// The old `last_err + continue` state machine was dead code once the
+/// URL list collapsed.
+///
+/// - `urls` — (full_url, filename) pairs. First entry is used; rest are
+///   ignored. Filename is only used in log lines — caller writes bytes.
 /// - `expected_sha256` — hex digest. `None` = trust TLS, don't verify.
-///   Any mismatch bails (moves to next URL, doesn't return bad bytes).
+///   Any mismatch fails the download (no silent wrong-bytes return).
 /// - `tx` / `stage` / `start_percent` / `end_percent` — progress mapping.
 /// - `label` — user-facing description ("portable Git (macOS-arm64)").
 pub async fn download_with_progress(
@@ -43,121 +51,143 @@ pub async fn download_with_progress(
     end_percent: u8,
     label: &str,
 ) -> Result<Vec<u8>> {
-    use sha2::{Digest, Sha256};
-    use std::time::{Duration, Instant};
-    use tokio::time::timeout;
+    use std::time::Duration;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-    const CHUNK_STALL: Duration = Duration::from_secs(60);
-    const PROGRESS_BYTES: u64 = 1024 * 1024;
-    const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
-    // Throughput floor: if the first MIN_BYTES_BY_DEADLINE (256 KB) hasn't
-    // arrived within MIN_THROUGHPUT_DEADLINE (30s) we abort this URL and
-    // try the next mirror. Pure CHUNK_STALL doesn't catch GFW "trickle
-    // mode" where the connection delivers 1 byte every 29s indefinitely
-    // — chunk timer resets per byte and the URL never fails. This floor
-    // forces fallback (e.g. ghfast.top) to take over within 30s.
-    const MIN_BYTES_BY_DEADLINE: u64 = 256 * 1024;
-    const MIN_THROUGHPUT_DEADLINE: Duration = Duration::from_secs(30);
+    // How many total attempts (original + retries). 2 covers one
+    // transient-hiccup retry without masking a truly broken network
+    // (at which point v0.3.0 contract says: surface the failure).
+    const MAX_ATTEMPTS: u32 = 2;
+
+    let (url, _filename) = urls.first()
+        .ok_or_else(|| anyhow::anyhow!("download {label}: no URL provided"))?;
 
     let client = reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()?;
 
     let mut last_err: Option<String> = None;
-    let start = start_percent as u64;
-    let span = (end_percent.saturating_sub(start_percent)) as u64;
-
-    for (url, _filename) in urls {
-        tracing::info!(target: "clawenv::proxy", "download {label}: trying {url}");
-        send(tx, &format!("Connecting to {label}..."), start_percent, stage.clone()).await;
-
-        let mut resp = match client.get(url).send().await {
-            Err(e) => { last_err = Some(format!("{url}: {e}")); continue; }
-            Ok(r) if !r.status().is_success() => {
-                last_err = Some(format!("{url}: HTTP {}", r.status())); continue;
-            }
-            Ok(r) => r,
-        };
-
-        let total = resp.content_length();
-        let mut hasher = Sha256::new();
-        let cap = total.map(|t| t as usize).unwrap_or(0);
-        let mut buf: Vec<u8> = Vec::with_capacity(cap);
-        let t0 = Instant::now();
-        let mut last_emit_bytes: u64 = 0;
-        let mut last_emit_at = t0;
-        let mut url_failed: Option<String> = None;
-
-        loop {
-            match timeout(CHUNK_STALL, resp.chunk()).await {
-                Err(_) => {
-                    url_failed = Some(format!(
-                        "{url}: stalled — no data for {}s",
-                        CHUNK_STALL.as_secs()
-                    ));
-                    break;
-                }
-                Ok(Err(e)) => {
-                    url_failed = Some(format!("{url}: body read: {e}"));
-                    break;
-                }
-                Ok(Ok(None)) => break, // EOF
-                Ok(Ok(Some(chunk))) => {
-                    hasher.update(&chunk);
-                    buf.extend_from_slice(&chunk);
-
-                    let downloaded = buf.len() as u64;
-
-                    // Throughput floor check (only fires once per URL, at the deadline).
-                    if t0.elapsed() >= MIN_THROUGHPUT_DEADLINE
-                        && downloaded < MIN_BYTES_BY_DEADLINE
-                    {
-                        url_failed = Some(format!(
-                            "{url}: throughput floor — only {} bytes in {}s",
-                            downloaded, MIN_THROUGHPUT_DEADLINE.as_secs()
-                        ));
-                        break;
-                    }
-
-                    let since_bytes = downloaded - last_emit_bytes;
-                    if since_bytes >= PROGRESS_BYTES || last_emit_at.elapsed() >= PROGRESS_INTERVAL {
-                        let pct = if let Some(t) = total {
-                            if t > 0 { (start + span * downloaded / t).min(end_percent as u64) }
-                            else { start }
-                        } else { start } as u8;
-                        send(tx, &format_download_msg(label, downloaded, total, t0.elapsed()),
-                             pct, stage.clone()).await;
-                        last_emit_bytes = downloaded;
-                        last_emit_at = Instant::now();
-                    }
+    for attempt in 1..=MAX_ATTEMPTS {
+        match try_download_single(
+            &client, url, expected_sha256, tx, stage.clone(),
+            start_percent, end_percent, label,
+        ).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(e) => {
+                let msg = e.to_string();
+                tracing::warn!(target: "clawenv::proxy",
+                    "download {label} attempt {attempt}/{MAX_ATTEMPTS}: {msg}");
+                last_err = Some(msg);
+                if attempt < MAX_ATTEMPTS {
+                    // Short backoff between retries — enough to let a
+                    // transient blip clear, not so long the user thinks
+                    // we hung.
+                    tokio::time::sleep(Duration::from_secs(attempt as u64 * 2)).await;
                 }
             }
         }
-
-        if let Some(err) = url_failed {
-            tracing::warn!(target: "clawenv::proxy", "{err}");
-            last_err = Some(err);
-            continue;
-        }
-
-        if let Some(expected) = expected_sha256 {
-            let hex = hex::encode(hasher.finalize());
-            if hex != expected {
-                last_err = Some(format!("{url}: checksum mismatch (got {hex})"));
-                continue;
-            }
-        }
-
-        let final_msg = format_download_msg(label, buf.len() as u64, total, t0.elapsed());
-        send(tx, &final_msg, end_percent, stage.clone()).await;
-        return Ok(buf);
     }
 
     anyhow::bail!(
-        "All {label} download URLs failed. Last error: {}",
-        last_err.as_deref().unwrap_or("(no URLs tried)")
+        "{label} download failed after {MAX_ATTEMPTS} attempts. Last error: {}",
+        last_err.as_deref().unwrap_or("(unknown)")
     )
+}
+
+/// Single-attempt streaming download + sha256 verify. Factored out of
+/// `download_with_progress` so the outer retry loop is trivial.
+#[allow(clippy::too_many_arguments)]
+async fn try_download_single(
+    client: &reqwest::Client,
+    url: &str,
+    expected_sha256: Option<&str>,
+    tx: &mpsc::Sender<InstallProgress>,
+    stage: InstallStage,
+    start_percent: u8,
+    end_percent: u8,
+    label: &str,
+) -> Result<Vec<u8>> {
+    use sha2::{Digest, Sha256};
+    use std::time::{Duration, Instant};
+    use tokio::time::timeout;
+
+    const CHUNK_STALL: Duration = Duration::from_secs(60);
+    const PROGRESS_BYTES: u64 = 1024 * 1024;
+    const PROGRESS_INTERVAL: Duration = Duration::from_millis(500);
+    // Throughput floor: if the first 256 KB hasn't arrived within 30s
+    // we abort. Pure CHUNK_STALL doesn't catch "trickle mode" where
+    // the connection delivers 1 byte every 29s — chunk timer resets
+    // per byte and the URL never fails.
+    const MIN_BYTES_BY_DEADLINE: u64 = 256 * 1024;
+    const MIN_THROUGHPUT_DEADLINE: Duration = Duration::from_secs(30);
+
+    let start = start_percent as u64;
+    let span = (end_percent.saturating_sub(start_percent)) as u64;
+
+    tracing::info!(target: "clawenv::proxy", "download {label}: {url}");
+    send(tx, &format!("Connecting to {label}..."), start_percent, stage.clone()).await;
+
+    let mut resp = match client.get(url).send().await {
+        Err(e) => anyhow::bail!("{url}: {e}"),
+        Ok(r) if !r.status().is_success() => anyhow::bail!("{url}: HTTP {}", r.status()),
+        Ok(r) => r,
+    };
+
+    let total = resp.content_length();
+    let mut hasher = Sha256::new();
+    let cap = total.map(|t| t as usize).unwrap_or(0);
+    let mut buf: Vec<u8> = Vec::with_capacity(cap);
+    let t0 = Instant::now();
+    let mut last_emit_bytes: u64 = 0;
+    let mut last_emit_at = t0;
+
+    loop {
+        match timeout(CHUNK_STALL, resp.chunk()).await {
+            Err(_) => anyhow::bail!(
+                "{url}: stalled — no data for {}s", CHUNK_STALL.as_secs()
+            ),
+            Ok(Err(e)) => anyhow::bail!("{url}: body read: {e}"),
+            Ok(Ok(None)) => break, // EOF
+            Ok(Ok(Some(chunk))) => {
+                hasher.update(&chunk);
+                buf.extend_from_slice(&chunk);
+
+                let downloaded = buf.len() as u64;
+
+                if t0.elapsed() >= MIN_THROUGHPUT_DEADLINE
+                    && downloaded < MIN_BYTES_BY_DEADLINE
+                {
+                    anyhow::bail!(
+                        "{url}: throughput floor — only {} bytes in {}s",
+                        downloaded, MIN_THROUGHPUT_DEADLINE.as_secs()
+                    );
+                }
+
+                let since_bytes = downloaded - last_emit_bytes;
+                if since_bytes >= PROGRESS_BYTES || last_emit_at.elapsed() >= PROGRESS_INTERVAL {
+                    let pct = if let Some(t) = total {
+                        if t > 0 { (start + span * downloaded / t).min(end_percent as u64) }
+                        else { start }
+                    } else { start } as u8;
+                    send(tx, &format_download_msg(label, downloaded, total, t0.elapsed()),
+                         pct, stage.clone()).await;
+                    last_emit_bytes = downloaded;
+                    last_emit_at = Instant::now();
+                }
+            }
+        }
+    }
+
+    if let Some(expected) = expected_sha256 {
+        let hex = hex::encode(hasher.finalize());
+        if hex != expected {
+            anyhow::bail!("{url}: checksum mismatch (got {hex}, want {expected})");
+        }
+    }
+
+    let final_msg = format_download_msg(label, buf.len() as u64, total, t0.elapsed());
+    send(tx, &final_msg, end_percent, stage.clone()).await;
+    Ok(buf)
 }
 
 fn format_download_msg(label: &str, downloaded: u64, total: Option<u64>, elapsed: std::time::Duration) -> String {

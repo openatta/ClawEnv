@@ -10,13 +10,17 @@ export type InstallState = {
   clawDisplayName: string;
   installMethod: "online" | "local" | "native" | "native-import";
   localFilePath: string;
-  apiKey: string;
   installBrowser: boolean;
   installMcpBridge: boolean;
   /** Serialized ProxyConfig JSON from StepNetwork, or null = no proxy chosen.
    *  Passed to the install IPC so HTTPS_PROXY etc. get injected into the
    *  clawcli child process for this install only (not persisted). */
   proxyJson: string | null;
+  /** True iff the latest connectivity test under the current proxy selection
+   *  succeeded for every endpoint. Gates the Step 3 "Next" button — we refuse
+   *  to let the user proceed on a broken network rather than waste a long
+   *  install trying to fight it. Reset to false on any mode/input change. */
+  connected: boolean;
 };
 
 export function makeInstallStages(name: string) {
@@ -28,7 +32,6 @@ export function makeInstallStages(name: string) {
     { key: "configure_proxy", label: "配置代理 / Configure Proxy" },
     { key: "install_deps", label: "安装依赖 / Install Dependencies" },
     { key: "install_open_claw", label: `安装 ${name} / Install ${name}` },
-    { key: "store_api_key", label: "存储 API Key / Store API Key" },
     { key: "install_browser", label: "安装浏览器 / Install Browser" },
     { key: "start_open_claw", label: `启动 ${name} / Start ${name}` },
     { key: "save_config", label: "保存配置 / Save Config" },

@@ -270,77 +270,56 @@ impl Default for ProxyConfig {
 
 /// Mirror configuration for package sources.
 ///
-/// The `preset` field is retained for backward compatibility with pre-v0.2.14
-/// config.toml files. Semantically the field is now "informational" — the
-/// effective URL lists come from `assets/mirrors.toml` (bundled) and the
-/// install-time proxy snapshot. Old values (`"default"` / `"china"` /
-/// `"custom"`) are accepted without error but no longer branch behaviour:
-/// users in China who previously selected `"china"` now get upstream-first
-/// with corporate-CN fallback automatically when proxy is OFF.
+/// v0.3.0 collapsed the multi-tier regional-mirror model to upstream-only,
+/// so the pre-v0.2.14 `preset` field (values: `"default"`, `"china"`,
+/// `"custom"`) has been removed from the struct. `serde(deny_unknown_fields)`
+/// is deliberately NOT set — a legacy config.toml with `preset = "..."`
+/// parses cleanly (serde silently ignores the unknown key), so upgrading
+/// ClawEnv doesn't force users to hand-edit their config.
 ///
 /// The per-asset override fields (`alpine_repo` / `npm_registry` /
 /// `nodejs_dist`) remain authoritative: if set, they COMPLETELY replace
-/// the mirrors.toml list for that asset (first entry becomes the only
-/// URL). Useful for locked-down environments with a mandated internal
-/// mirror.
+/// the mirrors.toml list for that asset. Useful for locked-down
+/// environments with a mandated internal mirror.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MirrorsConfig {
-    /// Legacy preset field. Accepted but ignored as of v0.2.14.
-    #[serde(default = "default_mirror_preset")]
-    pub preset: String,
-    /// Alpine APK repository base URL override (e.g., "https://mirrors.aliyun.com/alpine").
-    /// When non-empty, replaces the entire mirrors.toml list for apk.
+    /// Alpine APK repository base URL override.
+    /// When non-empty, replaces the mirrors.toml list for apk.
     #[serde(default)]
     pub alpine_repo: String,
-    /// npm registry URL override. When non-empty, replaces the entire
-    /// mirrors.toml list for npm (no preflight; use as-is).
+    /// npm registry URL override. When non-empty, replaces the
+    /// mirrors.toml list for npm.
     #[serde(default)]
     pub npm_registry: String,
-    /// Node.js binary download base URL override. When non-empty, prepends
-    /// to the mirrors.toml list for node (becomes first-tried).
+    /// Node.js binary download base URL override.
     #[serde(default)]
     pub nodejs_dist: String,
 }
 
-fn default_mirror_preset() -> String { "default".into() }
-
 impl MirrorsConfig {
-    /// Resolve the full effective list of Alpine apk repository *base* URLs.
-    /// When the user set `alpine_repo`, that wins (single-entry list).
-    /// Otherwise delegates to `AssetMirrors::apk_base_urls(proxy_on)`.
-    pub fn alpine_repo_urls(&self, proxy_on: bool) -> Vec<String> {
+    /// Resolve the effective list of Alpine apk repository *base* URLs.
+    /// User override (if set) wins; otherwise upstream from mirrors.toml.
+    pub fn alpine_repo_urls(&self) -> Vec<String> {
         if !self.alpine_repo.is_empty() {
             return vec![self.alpine_repo.clone()];
         }
-        crate::config::mirrors_asset::AssetMirrors::get().apk_base_urls(proxy_on)
+        crate::config::mirrors_asset::AssetMirrors::get().apk_base_urls()
     }
 
-    /// Candidate list of npm registry URLs. Caller picks the first
-    /// reachable one (npm takes a single value via `npm config set`).
-    /// User override wins and is returned as a single-entry list.
-    pub fn npm_registry_urls(&self, proxy_on: bool) -> Vec<String> {
+    /// Candidate list of npm registry URLs. `npm config set registry`
+    /// takes one value; in v0.3.0 the list is always single-entry unless
+    /// the user overrode it.
+    pub fn npm_registry_urls(&self) -> Vec<String> {
         if !self.npm_registry.is_empty() {
             return vec![self.npm_registry.clone()];
         }
-        crate::config::mirrors_asset::AssetMirrors::get().npm_registry_urls(proxy_on)
+        crate::config::mirrors_asset::AssetMirrors::get().npm_registry_urls()
     }
 
-    /// Effective Node.js binary dist *base* URLs (the directory that
-    /// contains `v22.16.0/node-v22.16.0-<platform>.<ext>`). User override
-    /// is prepended so locked-down internal mirrors win without losing
-    /// the upstream fallback if the internal one fails.
-    pub fn nodejs_dist_urls(&self, _proxy_on: bool) -> Vec<String> {
-        // The mirrors.toml's [node] section has full URL templates with
-        // {version} and {filename}; callers that need the legacy "dist
-        // base" form (for e.g. provision scripts) can derive the base
-        // from the first URL by stripping the trailing "/{version}/{filename}".
-        // For our current callers, the single-URL form is sufficient: they
-        // pass it into the download helper which builds the final list via
-        // AssetMirrors::build_urls directly. We return just the override
-        // (if any) or an empty vec to signal "use AssetMirrors directly".
-        //
-        // Keeping this method as a thin adapter rather than duplicating
-        // the node filename logic that AssetMirrors already owns.
+    /// Node.js dist *base* URL override (if set). Empty vec = "use
+    /// AssetMirrors::build_urls directly" — the downloader knows how to
+    /// expand the full versioned filename from the base.
+    pub fn nodejs_dist_urls(&self) -> Vec<String> {
         if !self.nodejs_dist.is_empty() {
             vec![self.nodejs_dist.clone()]
         } else {
@@ -348,27 +327,23 @@ impl MirrorsConfig {
         }
     }
 
-    /// Legacy single-URL accessors. Return the FIRST entry of the
-    /// effective list (proxy_on=true for a clean upstream-first view).
-    /// Prefer the plural forms above for new code — these exist so
-    /// `cli config show` and similar display paths don't have to know
-    /// about proxy state.
+    /// Single-URL accessors. Return the FIRST entry of the effective
+    /// list. Used by display paths (`cli config show`, etc).
     pub fn alpine_repo_url(&self) -> String {
-        self.alpine_repo_urls(true).into_iter().next()
+        self.alpine_repo_urls().into_iter().next()
             .unwrap_or_else(|| "https://dl-cdn.alpinelinux.org/alpine".into())
     }
     pub fn npm_registry_url(&self) -> String {
-        self.npm_registry_urls(true).into_iter().next()
+        self.npm_registry_urls().into_iter().next()
             .unwrap_or_else(|| "https://registry.npmjs.org".into())
     }
     pub fn nodejs_dist_url(&self) -> String {
-        self.nodejs_dist_urls(true).into_iter().next()
+        self.nodejs_dist_urls().into_iter().next()
             .unwrap_or_else(|| "https://nodejs.org/dist".into())
     }
 
     /// `true` when no user-level override is set — i.e. all URLs come
-    /// from mirrors.toml. Callers that gate behaviour on "user customised
-    /// mirrors" should use this rather than checking preset.
+    /// from mirrors.toml.
     pub fn is_default(&self) -> bool {
         self.alpine_repo.is_empty()
             && self.npm_registry.is_empty()
@@ -379,7 +354,6 @@ impl MirrorsConfig {
 impl Default for MirrorsConfig {
     fn default() -> Self {
         Self {
-            preset: "default".into(),
             alpine_repo: String::new(),
             npm_registry: String::new(),
             nodejs_dist: String::new(),

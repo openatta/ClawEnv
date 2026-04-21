@@ -2,7 +2,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 
 use crate::claw::ClawRegistry;
-use crate::config::{keychain, mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig, BrowserConfig};
+use crate::config::{mirrors, ConfigManager, InstanceConfig, GatewayConfig, ResourceConfig, BrowserConfig};
 use crate::platform::network;
 use crate::sandbox::{
     detect_backend_for, InstallMode, SandboxBackend, SandboxOpts, SandboxType,
@@ -88,7 +88,6 @@ pub struct InstallOptions {
     pub install_mode: InstallMode,
     pub install_browser: bool,
     pub install_mcp_bridge: bool,
-    pub api_key: Option<String>,
     pub use_native: bool,
     pub gateway_port: u16,
 }
@@ -102,7 +101,6 @@ impl Default for InstallOptions {
             install_mode: InstallMode::OnlineBuild,
             install_browser: false,
             install_mcp_bridge: true,
-            api_key: None,
             use_native: false,
             gateway_port: 3000,
         }
@@ -126,7 +124,6 @@ pub enum InstallStage {
     ConfigureProxy,
     InstallDeps,
     InstallOpenClaw,
-    StoreApiKey,
     InstallBrowser,
     StartOpenClaw,
     SaveConfig,
@@ -202,13 +199,16 @@ pub async fn install(
     // `is_some()` is the honest signal: `Scope::Installer.resolve()`
     // already runs the full priority chain (installer override →
     // instance proxy → OS proxy → env vars → global config), returning
-    // None only when nothing produced a proxy URL. Any Some means a
-    // proxy is in effect for this install.
+    // None only when nothing produced a proxy URL. In v0.3.0 this no
+    // longer toggles mirror tiers (URL list is always upstream-only),
+    // but it still gates the git-ssh-insteadOf rewrite below — that
+    // stays proxy-conditional because HTTPS to github is unreliable on
+    // unproxied restricted networks.
     let proxy_on = crate::config::proxy_resolver::Scope::Installer
         .resolve(config).await.is_some();
 
     send(&tx, &format!("Checking {} prerequisites...", backend.name()), 8, InstallStage::EnsurePrerequisites).await;
-    backend.ensure_prerequisites(proxy_on).await?;
+    backend.ensure_prerequisites().await?;
     send(&tx, &format!("{} ready", backend.name()), 10, InstallStage::EnsurePrerequisites).await;
 
     // ---- Step 2: Create VM (provision = system packages only) ----
@@ -259,9 +259,10 @@ pub async fn install(
 
         // Rewrite ssh://git@github.com/ → https:// for git clone deps —
         // but only when a proxy is active. Without a proxy, HTTPS to
-        // github is flaky in GFW networks (TLS hang 30-60s per package),
-        // so letting the original ssh:// URL fail fast on port 22 is the
-        // lesser evil. Strict proxy_on semantic: no proxy → don't rewrite.
+        // github is flaky on restricted networks (TLS handshake hangs
+        // 30-60s per package), so letting the original ssh:// URL fail
+        // fast on port 22 is the lesser evil. Strict proxy_on semantic:
+        // no proxy → don't rewrite.
         if proxy_on {
             provision_preamble.push_str(
                 "export GIT_CONFIG_COUNT=1\n\
@@ -270,10 +271,11 @@ pub async fn install(
             );
         }
 
-        // Mirror sources (Alpine APK + npm registry). Both consult the
-        // install-time proxy snapshot to decide which URL tier to use.
-        provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable", proxy_on));
-        provision_preamble.push_str(&mirrors::npm_registry_script(&mirrors_config, proxy_on));
+        // Mirror sources (Alpine APK + npm registry). v0.3.0 contract:
+        // upstream-only, no regional fallback tier — the user chose a
+        // proxy (or not) at install time and the URL list doesn't change.
+        provision_preamble.push_str(&mirrors::alpine_repo_script(&mirrors_config, "latest-stable"));
+        provision_preamble.push_str(&mirrors::npm_registry_script(&mirrors_config));
 
         let proxy_script = if provision_preamble.trim().is_empty() {
             "# No proxy / mirrors".to_string()
@@ -415,12 +417,68 @@ pub async fn install(
     }
 
     // Apply mirrors inside the running VM (more reliable than provision-time).
-    // Always apply now — even without a user override, we rewrite the apk
-    // repositories to the proxy-aware list so fallback behaviour is
-    // consistent (and the VM doesn't inherit Alpine's default dl-cdn-only
-    // /etc/apk/repositories which misses the corporate-CN fallback tier).
+    // Always apply now — writes /etc/apk/repositories (upstream-only
+    // per v0.3.0) and sets npm registry if the user configured an
+    // override. Without a user override this is effectively a no-op for
+    // npm (default = upstream) and rewrites apk to the canonical
+    // single-base line regardless of what the provision path left.
     send(&tx, "Configuring package mirrors...", 39, InstallStage::ConfigureProxy).await;
-    mirrors::apply_mirrors(backend.as_ref(), &mirrors_config, proxy_on).await?;
+    mirrors::apply_mirrors(backend.as_ref(), &mirrors_config).await?;
+
+    // ---- In-VM connectivity preflight (v0.3.0) ----
+    //
+    // The Tauri wizard's pre-install preflight runs on the HOST via
+    // reqwest. That's necessary but not sufficient: the VM reaches the
+    // internet through a different path (bridged NIC on Lima, NAT on
+    // WSL2, user-net on Podman) and with different proxy env (it sees
+    // `host.lima.internal` / `host.containers.internal` / WSL gateway,
+    // not 127.0.0.1). Host OK + VM NOT OK is a real failure mode we
+    // saw in E2E (mac-sandbox-noproxy: Mac→npm works, VM→dl-cdn blocks).
+    //
+    // Probe two endpoints via the VM's own curl, honouring whatever
+    // /etc/profile.d/proxy.sh was just written. If both fail, bail
+    // with a bilingual message and don't waste 5-10 minutes on a
+    // doomed npm install.
+    //
+    // Skipped for Native + Podman: Native runs on the host (same net
+    // as the wizard preflight), Podman's base image is already built
+    // via `podman build` earlier with its own network.
+    if sandbox_type == SandboxType::LimaAlpine || sandbox_type == SandboxType::Wsl2Alpine {
+        send(&tx, "Verifying VM network reach...", 40, InstallStage::ConfigureProxy).await;
+        // Probe the three canonical endpoints the subsequent install
+        // will hit: npm (for `npm install <claw>`), github (for any
+        // git-based dependency the claw pulls), dl-cdn (for `apk add`).
+        // Collect per-endpoint results so the bail message tells the
+        // user exactly which one broke — the three have independent
+        // failure modes.
+        let probe = r#". /etc/profile.d/proxy.sh 2>/dev/null
+for name_url in \
+    "npm https://registry.npmjs.org/" \
+    "github https://github.com/" \
+    "alpine https://dl-cdn.alpinelinux.org/alpine/latest-stable/"
+do
+    name="${name_url%% *}"
+    url="${name_url##* }"
+    if curl -sS -fL -o /dev/null -m 10 "$url"; then
+        printf 'OK %s\n' "$name"
+    else
+        printf 'FAIL %s %s\n' "$name" "$url"
+    fi
+done"#;
+        let out = backend.exec(probe).await.unwrap_or_else(|_| "FAIL probe-exec".into());
+        let failures: Vec<&str> = out.lines()
+            .filter(|l| l.starts_with("FAIL"))
+            .collect();
+        if !failures.is_empty() {
+            anyhow::bail!(
+                "VM 无法访问以下源，请检查代理或网络后重试。\n\
+                 Your current network (inside the sandbox VM) can't reach one or more \
+                 required sources. Configure a working proxy or fix connectivity, then retry.\n\n\
+                 失败端点 / Failed endpoints:\n{}",
+                failures.join("\n")
+            );
+        }
+    }
 
     // ---- Step 2a: Verify base packages are actually installed ----
     // Cloud-init's `apk update && apk add` in the Lima provision YAML
@@ -493,13 +551,9 @@ pub async fn install(
     let claw_version = backend.exec(&format!("{} 2>/dev/null || echo unknown", desc.version_check_cmd())).await.unwrap_or_default();
 
     // ---- Step 4: Post-install config (all short exec calls) ----
-    if let Some(ref api_key) = opts.api_key {
-        send(&tx, "Storing API key...", 72, InstallStage::StoreApiKey).await;
-        keychain::store_api_key(&opts.instance_name, api_key)?;
-        if let Some(cmd) = desc.set_apikey_cmd(&shell_escape(api_key)) {
-            backend.exec(&format!("{cmd} 2>/dev/null || true")).await?;
-        }
-    }
+    // v0.3.0: API key collection removed from the installer. Each claw
+    // owns its own credential UX via its ClawPage management view;
+    // the keychain writes live there now (see src/pages/ClawPage).
 
     // Host IP
     let host_ip = match sandbox_type {
@@ -675,6 +729,16 @@ if p.exists():
     backend.exec(&format!(
         "nohup ttyd -p {ttyd_port} -W -i 0.0.0.0 sh -c 'cd; exec /bin/sh -l' > /tmp/ttyd.log 2>&1 &"
     )).await?;
+
+    // Seed the claw's config (OC's gateway.mode etc.) before first
+    // gateway boot. OpenClaw refuses to start with a partial config
+    // file even under `--allow-unconfigured`, so running
+    // `openclaw config set gateway.mode local` (via init_cmd) is the
+    // load-bearing handshake here. No-op for claws without init_cmd.
+    if let Some(init_cmd) = desc.init_cmd() {
+        backend.exec(&format!("{init_cmd} 2>&1 || true")).await.ok();
+    }
+
     if let Some(gateway_cmd) = desc.gateway_start_cmd(opts.gateway_port) {
         backend.exec(&format!(
             "nohup {gateway_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
