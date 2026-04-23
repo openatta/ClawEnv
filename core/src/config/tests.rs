@@ -79,6 +79,7 @@ fn config_roundtrip_toml() {
             proxy: ProxyConfig::default(),
             mirrors: MirrorsConfig::default(),
             bridge: BridgeConfig::default(),
+            remote: Default::default(),
         },
         instances: vec![],
     };

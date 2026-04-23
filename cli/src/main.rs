@@ -125,6 +125,10 @@ enum Commands {
     /// Bridge server management
     #[command(subcommand)]
     Bridge(BridgeCmd),
+    /// Remote desktop control (WSS reverse channel + MCP input tools).
+    /// See docs/26-remote-desktop-control.md.
+    #[command(subcommand)]
+    Remote(RemoteCmd),
     /// Fast network-path probes — verify apk / npm / git / reqwest can
     /// reach their targets through the current proxy/mirrors config
     /// without running a full install. Meant for smoke-style E2E that
@@ -159,6 +163,40 @@ enum BridgeCmd {
         #[arg(long)]
         port: Option<u16>,
     },
+}
+
+#[derive(Subcommand)]
+enum RemoteCmd {
+    /// Connect to the remote channel server and print frames to stdout
+    /// until interrupted. Uses Phase A supervisor; does NOT start the
+    /// MCP server or input tools.
+    TestConnect {
+        /// Override config.toml `[clawenv.remote].desktop_id`
+        #[arg(long)]
+        desktop_id: Option<String>,
+        /// Override config.toml `[clawenv.remote].monitor_device_id`
+        #[arg(long)]
+        monitor_device_id: Option<String>,
+        /// Override config.toml `[clawenv.remote].server_url`
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Run the full remote-control daemon: MCP server on 127.0.0.1 +
+    /// WSS reverse channel + input tools. Runs until SIGINT (Ctrl+C).
+    Daemon {
+        #[arg(long)]
+        desktop_id: Option<String>,
+        #[arg(long)]
+        monitor_device_id: Option<String>,
+        #[arg(long)]
+        server_url: Option<String>,
+    },
+    /// Print the MCP server config (url + bearer token) suitable for
+    /// pasting into a claw agent's MCP configuration. Reads
+    /// `~/.clawenv/bridge.mcp.json` written by `remote daemon`.
+    PrintMcpConfig,
+    /// Print the live remote-channel status (reads config + descriptor).
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -1553,6 +1591,11 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             run_net_check(&out, &mode, name.as_deref(), &probe,
                           proxy_url.as_deref()).await?;
         }
+
+        // ====== Remote ======
+        Commands::Remote(sub) => {
+            handle_remote(&out, sub).await?;
+        }
     }
 
     Ok(())
@@ -2380,4 +2423,198 @@ fn classify_error(e: &anyhow::Error) -> String {
     } else {
         "internal".into()
     }
+}
+
+// ===== Remote desktop control =====
+
+async fn handle_remote(out: &Output, sub: RemoteCmd) -> Result<()> {
+    use clawenv_core::config::{ConfigManager, RemoteConfig};
+
+    let base_cfg: RemoteConfig = ConfigManager::load()
+        .map(|c| c.config().clawenv.remote.clone())
+        .unwrap_or_default();
+
+    match sub {
+        RemoteCmd::TestConnect { desktop_id, monitor_device_id, server_url } => {
+            use clawenv_core::remote::{supervisor, Status};
+
+            let cfg = supervisor::SupervisorConfig::defaults(
+                server_url.unwrap_or_else(|| base_cfg.server_url.clone()),
+                desktop_id.unwrap_or_else(|| base_cfg.desktop_id.clone()),
+                monitor_device_id.unwrap_or_else(|| base_cfg.monitor_device_id.clone()),
+            );
+            if cfg.desktop_id.is_empty() || cfg.monitor_device_id.is_empty() {
+                anyhow::bail!("desktop_id and monitor_device_id are required (pass --desktop-id/--monitor-device-id or set [clawenv.remote] in config.toml)");
+            }
+            out.emit(CliEvent::Info {
+                message: format!("connecting to {} (desktop_id={}, monitor_device_id={})",
+                    cfg.server_url, cfg.desktop_id, cfg.monitor_device_id),
+            });
+
+            let mut handle = supervisor::spawn(cfg);
+
+            let mut status = handle.status.clone();
+            let status_task = {
+                let out_c = out.clone();
+                tokio::spawn(async move {
+                    while status.changed().await.is_ok() {
+                        let s = *status.borrow();
+                        let label = match s {
+                            Status::Connecting => "connecting",
+                            Status::Connected => "connected",
+                            Status::Disconnected => "disconnected",
+                        };
+                        out_c.emit(CliEvent::Info { message: format!("[status] {label}") });
+                    }
+                })
+            };
+
+            // Drain inbound messages until Ctrl+C.
+            let ctrl_c = tokio::signal::ctrl_c();
+            tokio::pin!(ctrl_c);
+            loop {
+                tokio::select! {
+                    maybe = handle.inbound_mut().recv() => match maybe {
+                        Some(msg) => out.emit(CliEvent::Data {
+                            data: serde_json::to_value(&msg).unwrap_or(serde_json::Value::Null)
+                        }),
+                        None => break,
+                    },
+                    _ = &mut ctrl_c => {
+                        out.emit(CliEvent::Info { message: "shutdown requested".into() });
+                        break;
+                    }
+                }
+            }
+
+            handle.shutdown.notify_waiters();
+            let _ = handle.join.await;
+            status_task.abort();
+            out.emit(CliEvent::Complete { message: "closed".into() });
+        }
+
+        RemoteCmd::Daemon { desktop_id, monitor_device_id, server_url } => {
+            use clawenv_core::bridge::mcp;
+            use clawenv_core::remote::{
+                agent::{AgentInvoker, EchoInvoker, HttpGatewayInvoker},
+                audit::AuditLog,
+                start_runtime, RuntimeOptions,
+            };
+            use std::sync::Arc;
+
+            let mut remote = base_cfg.clone();
+            if let Some(d) = desktop_id { remote.desktop_id = d; }
+            if let Some(m) = monitor_device_id { remote.monitor_device_id = m; }
+            if let Some(s) = server_url { remote.server_url = s; }
+            if remote.desktop_id.is_empty() || remote.monitor_device_id.is_empty() {
+                anyhow::bail!("desktop_id and monitor_device_id are required");
+            }
+
+            // Build the agent invoker from the loaded AppConfig. This is
+            // the single source of truth for "which claw instance to
+            // drive" — runtime itself never touches config.toml.
+            let invoker: Arc<dyn AgentInvoker> = if remote.agent.echo_only {
+                Arc::new(EchoInvoker)
+            } else {
+                let cfg_mgr = ConfigManager::load()?;
+                match HttpGatewayInvoker::from_config(
+                    cfg_mgr.config(),
+                    &remote.agent.target_instance,
+                    remote.agent.model.clone(),
+                    std::time::Duration::from_secs(remote.agent.request_timeout_sec),
+                ) {
+                    Some(inv) => Arc::new(inv),
+                    None => {
+                        out.emit(CliEvent::Info {
+                            message: "no openclaw instance configured; using echo invoker".into(),
+                        });
+                        Arc::new(EchoInvoker)
+                    }
+                }
+            };
+
+            let opts = RuntimeOptions {
+                remote,
+                descriptor_path: mcp::default_descriptor_path(),
+                audit_path: AuditLog::default_path(),
+                invoker,
+                spawn_shortcut_listener: true,
+            };
+            out.emit(CliEvent::Info {
+                message: format!("starting remote runtime (descriptor at {})",
+                    opts.descriptor_path.display()),
+            });
+            let handle = start_runtime(opts).await?;
+
+            out.emit(CliEvent::Data {
+                data: serde_json::json!({
+                    "mcp_url": handle.mcp.url(),
+                    "mcp_token": handle.mcp.token,
+                    "descriptor_path": handle.descriptor_path.to_string_lossy(),
+                    "audit_path": handle.audit_path.to_string_lossy(),
+                }),
+            });
+            out.emit(CliEvent::Info { message: "Ctrl+C to stop".into() });
+
+            tokio::signal::ctrl_c().await.ok();
+            out.emit(CliEvent::Info { message: "stopping...".into() });
+            handle.stop().await;
+            out.emit(CliEvent::Complete { message: "stopped".into() });
+        }
+
+        RemoteCmd::PrintMcpConfig => {
+            use clawenv_core::bridge::mcp;
+            let path = mcp::default_descriptor_path();
+            if !path.exists() {
+                anyhow::bail!("{} not found — run `clawcli remote daemon` first", path.display());
+            }
+            let raw = std::fs::read_to_string(&path)?;
+            let desc: mcp::BridgeMcpDescriptor = serde_json::from_str(&raw)?;
+            // Emit both machine-readable (JSON) and a ready-to-paste MCP
+            // server entry. The entry shape matches Claude Code's HTTP
+            // MCP transport: {type:"http", url, headers}.
+            out.emit(CliEvent::Data {
+                data: serde_json::json!({
+                    "descriptor": desc,
+                    "mcp_server_entry": {
+                        "type": "http",
+                        "url": desc.url,
+                        "headers": { "Authorization": format!("Bearer {}", desc.token) }
+                    }
+                }),
+            });
+        }
+
+        RemoteCmd::Status => {
+            use clawenv_core::bridge::mcp;
+            let descriptor_path = mcp::default_descriptor_path();
+            let desc_state = if descriptor_path.exists() {
+                match std::fs::read_to_string(&descriptor_path) {
+                    Ok(raw) => serde_json::from_str::<mcp::BridgeMcpDescriptor>(&raw)
+                        .map(|d| serde_json::json!({
+                            "url": d.url, "pid": d.pid, "token_present": !d.token.is_empty()
+                        }))
+                        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() })),
+                    Err(e) => serde_json::json!({ "error": e.to_string() }),
+                }
+            } else {
+                serde_json::json!(null)
+            };
+            out.emit(CliEvent::Data {
+                data: serde_json::json!({
+                    "config": {
+                        "enabled": base_cfg.enabled,
+                        "desktop_id": base_cfg.desktop_id,
+                        "monitor_device_id": base_cfg.monitor_device_id,
+                        "server_url": base_cfg.server_url,
+                        "auto_connect": base_cfg.auto_connect,
+                        "preferred_port": base_cfg.mcp.preferred_port,
+                    },
+                    "descriptor": desc_state,
+                    "descriptor_path": descriptor_path.to_string_lossy(),
+                }),
+            });
+        }
+    }
+    Ok(())
 }

@@ -30,6 +30,8 @@ pub struct ClawEnvConfig {
     pub mirrors: MirrorsConfig,
     #[serde(default)]
     pub bridge: BridgeConfig,
+    #[serde(default)]
+    pub remote: RemoteConfig,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -372,6 +374,109 @@ pub struct BridgeConfig {
 }
 
 fn default_bridge_port() -> u16 { 3100 }
+
+/// Remote desktop control config — see `docs/26-remote-desktop-control.md`.
+/// Off by default; users opt in via Settings or `clawcli remote enable`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub desktop_id: String,
+    #[serde(default)]
+    pub monitor_device_id: String,
+    #[serde(default = "default_remote_server_url")]
+    pub server_url: String,
+    #[serde(default = "default_true")]
+    pub auto_connect: bool,
+    #[serde(default = "default_killswitch_cooldown")]
+    pub kill_switch_cooldown_sec: u64,
+    #[serde(default)]
+    pub input: RemoteInputConfig,
+    #[serde(default)]
+    pub mcp: RemoteMcpConfig,
+    #[serde(default)]
+    pub agent: RemoteAgentConfig,
+}
+
+fn default_remote_server_url() -> String {
+    "wss://api.smartdisplay.vzngpt.com/chain/general/desktop_assistant".into()
+}
+fn default_killswitch_cooldown() -> u64 { 900 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteInputConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_max_screenshot_dim")]
+    pub max_screenshot_dim_px: u32,
+}
+fn default_max_screenshot_dim() -> u32 { 4096 }
+impl Default for RemoteInputConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_screenshot_dim_px: default_max_screenshot_dim(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteMcpConfig {
+    #[serde(default = "default_mcp_port")]
+    pub preferred_port: u16,
+}
+fn default_mcp_port() -> u16 { 33721 }
+impl Default for RemoteMcpConfig {
+    fn default() -> Self { Self { preferred_port: default_mcp_port() } }
+}
+
+/// How the dispatcher drives the local claw agent.
+/// - `target_instance` empty = auto-pick first `claw_type == "openclaw"` instance.
+/// - `model` is passed through to the gateway's chat API; leave empty if the
+///   gateway accepts any model id.
+/// - `request_timeout_sec` bounds a single turn at the HTTP layer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteAgentConfig {
+    #[serde(default)]
+    pub target_instance: String,
+    #[serde(default = "default_agent_model")]
+    pub model: String,
+    #[serde(default = "default_agent_timeout")]
+    pub request_timeout_sec: u64,
+    /// If true, use `EchoInvoker` (no real claw). Useful for smoke-testing
+    /// the channel before the claw instance is installed.
+    #[serde(default)]
+    pub echo_only: bool,
+}
+fn default_agent_model() -> String { "default".into() }
+fn default_agent_timeout() -> u64 { 120 }
+impl Default for RemoteAgentConfig {
+    fn default() -> Self {
+        Self {
+            target_instance: String::new(),
+            model: default_agent_model(),
+            request_timeout_sec: default_agent_timeout(),
+            echo_only: false,
+        }
+    }
+}
+
+impl Default for RemoteConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            desktop_id: String::new(),
+            monitor_device_id: String::new(),
+            server_url: default_remote_server_url(),
+            auto_connect: true,
+            kill_switch_cooldown_sec: default_killswitch_cooldown(),
+            input: RemoteInputConfig::default(),
+            mcp: RemoteMcpConfig::default(),
+            agent: RemoteAgentConfig::default(),
+        }
+    }
+}
 
 impl Default for BridgeConfig {
     fn default() -> Self {

@@ -23,6 +23,29 @@ sha2          = "0.10"
 hex           = "0.4"
 axum          = { version = "0.8", features = ["ws"] }
 tower         = "0.5"
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["rustls-tls-webpki-roots", "connect", "handshake"] }
+futures-util  = "0.3"
+percent-encoding = "2"
+uuid          = { version = "1", features = ["v4"] }
+rand          = "0.8"
+image         = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64        = "0.22"
+rdev          = "0.5"
+
+# Native input / screen capture — mac + win only per CLAUDE.md.
+# Linux target compiles without these (input_* MCP tools return "unsupported").
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+enigo = "0.2"
+xcap  = "0.9"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+] }
 
 [dev-dependencies]
 mockall       = "0.13"

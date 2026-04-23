@@ -92,6 +92,7 @@ mod tests {
                 proxy: Default::default(),
                 mirrors: Default::default(),
                 bridge: Default::default(),
+                remote: Default::default(),
             },
             instances: vec![],
         };
@@ -129,6 +130,7 @@ mod tests {
                 },
                 mirrors: Default::default(),
                 bridge: Default::default(),
+                remote: Default::default(),
             },
             instances: vec![],
         };

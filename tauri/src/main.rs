@@ -75,6 +75,24 @@ fn main() {
     #[cfg(target_os = "linux")]
     clawenv_core::sandbox::init_podman_env();
 
+    // Holder for the remote-desktop runtime handle. We can't `mem::forget`
+    // it because we need to call `.stop()` on app exit — otherwise
+    // graceful shutdown of the WSS supervisor and MCP server gets
+    // skipped and no `runtime_stop` audit event is written. The mutex
+    // is tokio's so the exit handler's `block_on` doesn't contend with
+    // async code holding the lock.
+    type RemoteRuntimeSlot =
+        std::sync::Arc<tokio::sync::Mutex<Option<clawenv_core::remote::RuntimeHandle>>>;
+    let remote_runtime_slot: RemoteRuntimeSlot =
+        std::sync::Arc::new(tokio::sync::Mutex::new(None));
+
+    // Two explicit clones so both the `setup` closure (inner spawn) and
+    // the `run` closure (exit handler) own their own Arc — setup borrows
+    // uniquely for its `'static` bound, and run needs to move a fresh
+    // clone in.
+    let remote_slot_for_setup = remote_runtime_slot.clone();
+    let remote_slot_for_exit = remote_runtime_slot.clone();
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_notification::init())
@@ -83,7 +101,8 @@ fn main() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
-        .setup(|app| {
+        .manage(remote_runtime_slot)
+        .setup(move |app| {
             // Initialize system tray
             tray::setup_tray(app.handle())?;
 
@@ -176,6 +195,81 @@ fn main() {
                         ).await {
                             tracing::error!("Bridge server failed: {e}");
                         }
+                    }
+                }
+            });
+
+            // Start remote-desktop runtime if enabled (MCP server + WSS
+            // reverse channel + input tools). Per CLAUDE.md rule #10
+            // the bridge daemon lives in this process; the remote
+            // runtime rides alongside it as a subsystem. macOS
+            // Accessibility / Screen-Recording grants attach to this
+            // app bundle so the user grants permissions once.
+            let remote_slot = remote_slot_for_setup.clone();
+            tauri::async_runtime::spawn(async move {
+                use std::sync::Arc;
+                use std::time::Duration;
+                use clawenv_core::bridge::mcp;
+                use clawenv_core::remote::{
+                    agent::{AgentInvoker, EchoInvoker, HttpGatewayInvoker},
+                    audit::AuditLog,
+                    start_runtime, RuntimeOptions,
+                };
+                let Ok(config) = ConfigManager::load() else { return };
+                let remote_cfg = config.config().clawenv.remote.clone();
+                if !remote_cfg.enabled {
+                    tracing::debug!("remote desktop control disabled in config");
+                    return;
+                }
+                if remote_cfg.desktop_id.is_empty() || remote_cfg.monitor_device_id.is_empty() {
+                    tracing::warn!(
+                        "remote desktop enabled but desktop_id / monitor_device_id empty; skipping"
+                    );
+                    return;
+                }
+
+                // Build invoker here (not in runtime) so the runtime
+                // never peeks at ConfigManager — single source of truth
+                // is the AppConfig we already have loaded.
+                let invoker: Arc<dyn AgentInvoker> = if remote_cfg.agent.echo_only {
+                    Arc::new(EchoInvoker)
+                } else {
+                    match HttpGatewayInvoker::from_config(
+                        config.config(),
+                        &remote_cfg.agent.target_instance,
+                        remote_cfg.agent.model.clone(),
+                        Duration::from_secs(remote_cfg.agent.request_timeout_sec),
+                    ) {
+                        Some(inv) => Arc::new(inv),
+                        None => {
+                            tracing::warn!(
+                                "remote: no openclaw instance configured; using echo invoker"
+                            );
+                            Arc::new(EchoInvoker)
+                        }
+                    }
+                };
+
+                let opts = RuntimeOptions {
+                    remote: remote_cfg,
+                    descriptor_path: mcp::default_descriptor_path(),
+                    audit_path: AuditLog::default_path(),
+                    invoker,
+                    spawn_shortcut_listener: true,
+                };
+                match start_runtime(opts).await {
+                    Ok(handle) => {
+                        tracing::info!(
+                            "remote runtime up: mcp={} audit={:?}",
+                            handle.mcp.url(),
+                            handle.audit_path,
+                        );
+                        // Hand off to the managed slot so the Exit
+                        // handler below can call `.stop()` on it.
+                        *remote_slot.lock().await = Some(handle);
+                    }
+                    Err(e) => {
+                        tracing::error!("remote runtime failed to start: {e}");
                     }
                 }
             });
@@ -376,23 +470,39 @@ fn main() {
         })
         .build(tauri::generate_context!())
         .expect("error while building ClawEnv")
-        .run(|app, event| {
+        .run(move |app, event| {
             // macOS-only handling: the Reopen event only fires on Apple
             // platforms. On Windows/Linux the closure args are otherwise
             // unused — `let _ = (...)` consumes them so clippy's
             // `unused_variables` stays quiet without an ecosystem-level
             // `#[allow]` sprinkled on the closure signature.
             #[cfg(not(target_os = "macos"))]
-            let _ = (&app, &event);
+            let _ = &app;
 
             #[cfg(target_os = "macos")]
-            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = event {
+            if let tauri::RunEvent::Reopen { has_visible_windows, .. } = &event {
                 if !has_visible_windows {
                     if let Some(win) = app.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
                     }
                 }
+            }
+
+            // Exit fires after the last window is about to close. Take
+            // the remote-runtime handle out of its slot and stop it so
+            // the WSS socket closes cleanly, the MCP axum server does
+            // graceful shutdown, and the audit log flushes. Block
+            // synchronously — the exit path is allowed to take a
+            // couple of seconds here.
+            if matches!(event, tauri::RunEvent::Exit) {
+                let slot = remote_slot_for_exit.clone();
+                tauri::async_runtime::block_on(async move {
+                    if let Some(handle) = slot.lock().await.take() {
+                        tracing::info!("stopping remote runtime on app exit");
+                        handle.stop().await;
+                    }
+                });
             }
         });
 }

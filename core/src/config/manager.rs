@@ -75,6 +75,7 @@ impl ConfigManager {
                 proxy: Default::default(),
                 mirrors: Default::default(),
                 bridge: Default::default(),
+                remote: Default::default(),
             },
             instances: vec![],
         };
