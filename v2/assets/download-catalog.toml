@@ -1,0 +1,192 @@
+# ClawEnv v2 download catalog.
+#
+# Stage B: populated from v1's `assets/mirrors.toml` (the authoritative
+# source in v1). URL templates from v1 are expanded into flat per-platform
+# rows here — v2 treats each (name, version, os, arch) as a distinct
+# catalog entry.
+#
+# Fields:
+#   name       - identifier used by CLI: `clawops download fetch <name>`
+#   version    - exact version; no semver ranges
+#   os         - "macos" | "linux" | "windows"
+#   arch       - "arm64" | "x86_64"
+#   url        - full upstream URL (no mirrors; v1 contract: connectivity is
+#                the user's problem, not ours)
+#   sha256     - hex digest; omitted where upstream doesn't publish one
+#                (node, mingit) — TLS + HTTP 200 is the safety net
+#   kind       - "tarball" (.tar.gz/.tar.xz) | "zip" | "binary" | "rootfs"
+#   size_hint  - bytes, informational
+#
+# Extraction format is inferred from the URL extension:
+#   .tar.gz / .tgz  → gzip + tar
+#   .tar.xz         → xz + tar
+#   .zip            → zip
+
+# =====================================================================
+# dugite-native — portable Git for macOS + Linux
+# v1 source: assets/mirrors.toml [dugite]
+# =====================================================================
+
+[[artifact]]
+name = "git"
+version = "2.53.0"
+os = "macos"
+arch = "arm64"
+url = "https://github.com/desktop/dugite-native/releases/download/v2.53.0-3/dugite-native-v2.53.0-f49d009-macOS-arm64.tar.gz"
+sha256 = "e561cfc80c755e6f3e938653e81efcd025c9827a5b76dd42778b1159b3fab437"
+kind = "tarball"
+
+[[artifact]]
+name = "git"
+version = "2.53.0"
+os = "macos"
+arch = "x86_64"
+url = "https://github.com/desktop/dugite-native/releases/download/v2.53.0-3/dugite-native-v2.53.0-f49d009-macOS-x64.tar.gz"
+sha256 = "caf27c36b8834969550535bcd5e58186f970e080d1e175e76d9c1de3aac409ed"
+kind = "tarball"
+
+[[artifact]]
+name = "git"
+version = "2.53.0"
+os = "linux"
+arch = "arm64"
+url = "https://github.com/desktop/dugite-native/releases/download/v2.53.0-3/dugite-native-v2.53.0-f49d009-ubuntu-arm64.tar.gz"
+sha256 = "d562ad433ed0dc1907f44a92fc701597bc577c48d07fe69ee7adddfee836ef4c"
+kind = "tarball"
+
+[[artifact]]
+name = "git"
+version = "2.53.0"
+os = "linux"
+arch = "x86_64"
+url = "https://github.com/desktop/dugite-native/releases/download/v2.53.0-3/dugite-native-v2.53.0-f49d009-ubuntu-x64.tar.gz"
+sha256 = "b3a85433c8dfde76d21b90938ad2f971653deff4340b1b4d347258c63250eafc"
+kind = "tarball"
+
+# =====================================================================
+# MinGit — portable Git for Windows
+# v1 source: assets/mirrors.toml [mingit]
+# sha256 not pinned upstream — TLS + HTTP 200 as safety net
+# =====================================================================
+
+[[artifact]]
+name = "git"
+version = "2.49.0-windows.1"
+os = "windows"
+arch = "arm64"
+url = "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-arm64.zip"
+kind = "zip"
+
+[[artifact]]
+name = "git"
+version = "2.49.0-windows.1"
+os = "windows"
+arch = "x86_64"
+url = "https://github.com/git-for-windows/git/releases/download/v2.49.0.windows.1/MinGit-2.49.0-64-bit.zip"
+kind = "zip"
+
+# =====================================================================
+# Node.js — portable runtime
+# v1 source: assets/mirrors.toml [node]
+# sha256 not pinned (upstream doesn't publish in a convenient form)
+# =====================================================================
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "macos"
+arch = "arm64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-darwin-arm64.tar.gz"
+kind = "tarball"
+size_hint = 42000000
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "macos"
+arch = "x86_64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-darwin-x64.tar.gz"
+kind = "tarball"
+size_hint = 44000000
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "linux"
+arch = "arm64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-arm64.tar.xz"
+kind = "tarball"
+size_hint = 22000000
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "linux"
+arch = "x86_64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-linux-x64.tar.xz"
+kind = "tarball"
+size_hint = 25000000
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "windows"
+arch = "arm64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-arm64.zip"
+kind = "zip"
+size_hint = 30000000
+
+[[artifact]]
+name = "node"
+version = "22.16.0"
+os = "windows"
+arch = "x86_64"
+url = "https://nodejs.org/dist/v22.16.0/node-v22.16.0-win-x64.zip"
+kind = "zip"
+size_hint = 30000000
+
+# =====================================================================
+# Lima — macOS sandbox hypervisor
+# v1 source: assets/mirrors.toml [lima]
+# =====================================================================
+
+[[artifact]]
+name = "lima"
+version = "2.1.1"
+os = "macos"
+arch = "arm64"
+url = "https://github.com/lima-vm/lima/releases/download/v2.1.1/lima-2.1.1-Darwin-arm64.tar.gz"
+sha256 = "b6b0e6701189cd8c4e549cc39e6d054dc681487798b9b774ad2cbd30c08b2bd8"
+kind = "tarball"
+
+[[artifact]]
+name = "lima"
+version = "2.1.1"
+os = "macos"
+arch = "x86_64"
+url = "https://github.com/lima-vm/lima/releases/download/v2.1.1/lima-2.1.1-Darwin-x86_64.tar.gz"
+sha256 = "2dc5b10aa3a4f26d08c1f3fe83e37e01f85a7d9db0d1d5cb6985b18af96ab07d"
+kind = "tarball"
+
+# =====================================================================
+# Alpine minirootfs — WSL2 rootfs + Podman base
+# v1 uses dynamic version resolution (latest-stable). v2 Stage B encodes
+# a known-good pin; the `version` field says exactly which point release.
+# Re-pin by updating this file when Alpine ships a new stable.
+# =====================================================================
+
+[[artifact]]
+name = "alpine-rootfs"
+version = "3.22.1"
+os = "linux"
+arch = "arm64"
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/aarch64/alpine-minirootfs-3.22.1-aarch64.tar.gz"
+kind = "rootfs"
+
+[[artifact]]
+name = "alpine-rootfs"
+version = "3.22.1"
+os = "linux"
+arch = "x86_64"
+url = "https://dl-cdn.alpinelinux.org/alpine/v3.22/releases/x86_64/alpine-minirootfs-3.22.1-x86_64.tar.gz"
+kind = "rootfs"

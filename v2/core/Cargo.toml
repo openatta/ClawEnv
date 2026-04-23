@@ -1,0 +1,31 @@
+[package]
+name = "clawops-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ClawEnv v2 Ops abstractions (claw/sandbox/native/download)"
+
+[dependencies]
+tokio.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+reqwest.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+sha2.workspace = true
+hex.workspace = true
+futures-util.workspace = true
+tar.workspace = true
+flate2.workspace = true
+zip.workspace = true
+lzma-rs.workspace = true
+
+[dev-dependencies]
+mockall.workspace = true
+tempfile.workspace = true
+axum.workspace = true
+tower.workspace = true

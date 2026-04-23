@@ -3,6 +3,7 @@ pub mod platform;
 pub mod sandbox;
 pub mod config;
 pub mod claw;
+pub mod claw_ops;
 pub mod launcher;
 pub mod monitor;
 pub mod manager;
