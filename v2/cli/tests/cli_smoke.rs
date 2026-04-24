@@ -368,6 +368,60 @@ fn verb_status_uses_global_instance_flag() {
     assert_eq!(v["name"], "myvm");
 }
 
+// ——— clawcli install (R3-P3) ———
+
+#[test]
+fn install_help_lists_expected_flags() {
+    let out = Command::cargo_bin("clawcli").unwrap()
+        .args(["install", "--help"])
+        .assert()
+        .success();
+    let s = String::from_utf8_lossy(&out.get_output().stdout).to_string();
+    for flag in ["--name", "--backend", "--version", "--port", "--cpus", "--memory-mb"] {
+        assert!(s.contains(flag), "missing {flag} in install --help:\n{s}");
+    }
+}
+
+#[test]
+fn install_unknown_claw_fails_early() {
+    // Bails before touching any backend since claw id is unknown.
+    let tmp = tempfile::TempDir::new().unwrap();
+    Command::cargo_bin("clawcli").unwrap()
+        .env("CLAWENV_HOME", tmp.path())
+        .args(["install", "nonexistent-claw", "--name", "t1", "--backend", "lima"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("claw `nonexistent-claw`"));
+}
+
+#[test]
+fn install_duplicate_instance_rejected() {
+    // Pre-seed an instance with the target name; second install must refuse.
+    let tmp = tempfile::TempDir::new().unwrap();
+    // Pre-seed by writing a minimal instances.toml under <HOME>/v2/instances.toml.
+    let v2_dir = tmp.path().join("v2");
+    std::fs::create_dir_all(&v2_dir).unwrap();
+    let toml = r#"
+[[instance]]
+name = "dup"
+claw = "openclaw"
+backend = "lima"
+sandbox_instance = "dup"
+ports = []
+created_at = "2026-01-01T00:00:00+00:00"
+updated_at = ""
+note = ""
+"#;
+    std::fs::write(v2_dir.join("instances.toml"), toml).unwrap();
+
+    Command::cargo_bin("clawcli").unwrap()
+        .env("CLAWENV_HOME", tmp.path())
+        .args(["install", "openclaw", "--name", "dup", "--backend", "lima"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("already exists"));
+}
+
 #[test]
 fn verb_status_positional_beats_global_flag() {
     let tmp = tempfile::TempDir::new().unwrap();

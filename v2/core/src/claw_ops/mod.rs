@@ -7,9 +7,14 @@
 pub mod claw_cli;
 pub mod hermes;
 pub mod openclaw;
+pub mod provisioning;
 pub mod registry;
 
 pub use claw_cli::{ClawCli, DoctorOpts, LogsOpts, UpdateOpts};
 pub use hermes::HermesCli;
 pub use openclaw::OpenClawCli;
+pub use provisioning::{
+    all_provisionings, provisioning_for, ClawProvisioning, HermesProvisioning,
+    OpenClawProvisioning, PackageManager,
+};
 pub use registry::ClawRegistry;

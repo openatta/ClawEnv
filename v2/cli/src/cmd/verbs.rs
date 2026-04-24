@@ -13,14 +13,16 @@
 use std::sync::Arc;
 
 use clawops_core::download_ops::{CatalogBackedDownloadOps, DownloadOps};
-use clawops_core::instance::{InstanceConfig, InstanceRegistry, SandboxKind};
+use clawops_core::instance::{
+    InstallOpts, InstanceConfig, InstanceOrchestrator, InstanceRegistry, SandboxKind,
+};
 use clawops_core::native_ops::{DefaultNativeOps, NativeOps};
 use clawops_core::preflight;
 use clawops_core::sandbox_backend::{LimaBackend, PodmanBackend, SandboxBackend, WslBackend};
 use clawops_core::sandbox_ops::{
     LimaOps, PodmanOps, SandboxDoctorReport, SandboxOps, WslOps,
 };
-use clawops_core::{CancellationToken, ProgressSink};
+use clawops_core::{CancellationToken, ProgressEvent, ProgressSink};
 use serde::Serialize;
 
 use crate::shared::{new_table, severity_color, Ctx};
@@ -281,6 +283,127 @@ pub async fn run_shell(ctx: &Ctx, name: Option<String>) -> anyhow::Result<()> {
             "shell exited with code {}",
             status.code().unwrap_or(-1)
         );
+    }
+    Ok(())
+}
+
+// ——— install (end-to-end provisioning pipeline) ———
+
+/// Backend selector for `clawcli install`. Mirrors SandboxKind but
+/// only exposes the 3 sandboxed backends — Native is a separate code
+/// path (R3.1 — deferred).
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum InstallBackendSel {
+    Lima,
+    Wsl2,
+    Podman,
+}
+
+impl InstallBackendSel {
+    fn to_kind(self) -> SandboxKind {
+        match self {
+            Self::Lima => SandboxKind::Lima,
+            Self::Wsl2 => SandboxKind::Wsl2,
+            Self::Podman => SandboxKind::Podman,
+        }
+    }
+
+    fn default_for_host() -> Self {
+        if cfg!(target_os = "macos") { Self::Lima }
+        else if cfg!(target_os = "windows") { Self::Wsl2 }
+        else { Self::Podman }
+    }
+}
+
+#[derive(Debug, clap::Args)]
+pub struct InstallArgs {
+    /// Claw product id (`openclaw`, `hermes`, ...).
+    pub claw: String,
+    /// Instance name (must be unique; defaults to "default").
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Sandbox backend. Default = lima on macOS, wsl2 on Windows,
+    /// podman on Linux.
+    #[arg(long, value_enum)]
+    pub backend: Option<InstallBackendSel>,
+    /// Specific claw version, or "latest".
+    #[arg(long, default_value = "latest")]
+    pub version: String,
+    /// Host port the sandbox gateway will be exposed at.
+    #[arg(long, default_value_t = 3000)]
+    pub port: u16,
+    #[arg(long, default_value_t = 2)]
+    pub cpus: u32,
+    #[arg(long, default_value_t = 2048)]
+    pub memory_mb: u32,
+    /// Install Chromium + VNC bundle (for browser-automation claws).
+    #[arg(long)]
+    pub install_browser: bool,
+}
+
+pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
+    let name = args.name.unwrap_or_else(|| ctx.instance.clone());
+    let backend = args.backend.unwrap_or_else(InstallBackendSel::default_for_host);
+    let opts = InstallOpts {
+        name: name.clone(),
+        claw: args.claw.clone(),
+        backend: backend.to_kind(),
+        claw_version: args.version,
+        gateway_port: args.port,
+        cpu_cores: args.cpus,
+        memory_mb: args.memory_mb,
+        install_browser: args.install_browser,
+        workspace_dir: None,
+        proxy: None,
+        mirrors: Default::default(),
+    };
+
+    // Wire a channel so we can stream progress to stdout as the pipeline runs.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(32);
+    let sink = ProgressSink::new(tx);
+    let json = ctx.json;
+
+    // Spawn a drainer so the pipeline doesn't block on a full channel.
+    // In JSON mode we collect events; in pretty mode we print them live.
+    let printer = tokio::spawn(async move {
+        let mut events: Vec<ProgressEvent> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if !json {
+                let pct = ev.percent.map(|p| format!("{p:>3}%")).unwrap_or_else(|| " … ".into());
+                println!("[{pct}] {:<18} {}", ev.stage, ev.message);
+            }
+            events.push(ev);
+        }
+        events
+    });
+
+    let o = InstanceOrchestrator::new();
+    let report = o.install(opts, sink).await?;
+    let events = printer.await.unwrap_or_default();
+
+    if json {
+        // ProgressEvent is currently non-Serialize; hand-shape it here.
+        let event_rows: Vec<serde_json::Value> = events.iter().map(|e| serde_json::json!({
+            "percent": e.percent,
+            "stage": e.stage,
+            "message": e.message,
+        })).collect();
+        let blob = serde_json::json!({
+            "instance": report.instance,
+            "version_output": report.version_output,
+            "install_elapsed_secs": report.install_elapsed_secs,
+            "events": event_rows,
+        });
+        println!("{}", serde_json::to_string_pretty(&blob)?);
+    } else {
+        println!();
+        println!("✓ Installed {} @ {} ({}s)",
+            report.instance.claw,
+            report.version_output,
+            report.install_elapsed_secs,
+        );
+        println!("  instance: {}", report.instance.name);
+        println!("  backend : {}", report.instance.backend.as_str());
     }
     Ok(())
 }

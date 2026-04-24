@@ -36,6 +36,11 @@ pub struct Cli {
 #[derive(Subcommand)]
 pub enum Command {
     // ═══════════════════ Verb layer (task-oriented) ═══════════════════
+    /// End-to-end install of a claw product inside a fresh sandbox.
+    /// Composes VM creation + mirrors + proxy + claw package install +
+    /// registry save into one pipeline. Progress streams to stdout;
+    /// use --json for machine-consumable output.
+    Install(cmd::verbs::InstallArgs),
     /// List all registered instances.
     List,
     /// Show aggregate status for an instance (VM state + claw + ports).
@@ -123,6 +128,7 @@ async fn main() -> anyhow::Result<()> {
 
     match cli.command {
         // Verb layer
+        Command::Install(args)      => cmd::verbs::run_install(&ctx, args).await,
         Command::List               => cmd::verbs::run_list(&ctx).await,
         Command::Status { name }    => cmd::verbs::run_status(&ctx, name).await,
         Command::Start  { name }    => cmd::verbs::run_start(&ctx, name).await,

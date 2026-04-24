@@ -11,4 +11,7 @@ pub mod config;
 pub mod orchestrator;
 
 pub use config::{InstanceConfig, InstanceRegistry, PortBinding, SandboxKind};
-pub use orchestrator::{InstanceOrchestrator, CreateOpts, CreateReport, DestroyReport};
+pub use orchestrator::{
+    CreateOpts, CreateReport, DestroyReport, InstallOpts, InstallReport,
+    InstanceOrchestrator,
+};
