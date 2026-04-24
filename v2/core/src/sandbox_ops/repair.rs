@@ -71,6 +71,10 @@ mod tests {
         fn name(&self) -> &str { self.name }
         fn instance(&self) -> &str { "test" }
         async fn is_available(&self) -> anyhow::Result<bool> { Ok(false) }
+        async fn create(&self, _opts: &crate::provisioning::CreateOpts) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn destroy(&self) -> anyhow::Result<()> { Ok(()) }
         async fn start(&self) -> anyhow::Result<()> {
             self.start_calls.fetch_add(1, Ordering::SeqCst);
             if self.start_err {

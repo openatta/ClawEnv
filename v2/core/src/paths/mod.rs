@@ -83,6 +83,13 @@ pub fn v2_cache_root() -> PathBuf {
     clawenv_root().join("cache").join("artifacts")
 }
 
+/// Directory where rendered sandbox templates (Lima YAML, WSL
+/// provision scripts) are staged before invoking the backend tool.
+/// One file per instance.
+pub fn v2_templates_dir() -> PathBuf {
+    v2_config_dir().join("templates")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

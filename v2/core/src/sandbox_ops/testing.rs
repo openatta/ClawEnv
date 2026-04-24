@@ -12,6 +12,7 @@ use std::sync::Mutex;
 
 use async_trait::async_trait;
 
+use crate::provisioning::CreateOpts;
 use crate::sandbox_backend::{ResourceStats, SandboxBackend};
 
 /// Programmable fake backend.
@@ -26,6 +27,8 @@ pub(crate) struct MockBackend {
     pub instance_str: String,
     pub start_calls: AtomicU32,
     pub stop_calls: AtomicU32,
+    pub create_calls: AtomicU32,
+    pub destroy_calls: AtomicU32,
     pub exec_log: Mutex<Vec<String>>,
     pub canned_stdout: Mutex<String>,
     /// Per-call scripted responses. Each `exec()` pops the front. When
@@ -35,6 +38,7 @@ pub(crate) struct MockBackend {
     pub start_err: bool,
     pub stop_err: bool,
     pub is_available_ret: bool,
+    pub is_present_ret: bool,
 }
 
 impl MockBackend {
@@ -44,12 +48,15 @@ impl MockBackend {
             instance_str: "test".into(),
             start_calls: AtomicU32::new(0),
             stop_calls: AtomicU32::new(0),
+            create_calls: AtomicU32::new(0),
+            destroy_calls: AtomicU32::new(0),
             exec_log: Mutex::new(Vec::new()),
             canned_stdout: Mutex::new(String::new()),
             scripted_responses: Mutex::new(VecDeque::new()),
             start_err: false,
             stop_err: false,
             is_available_ret: true,
+            is_present_ret: false,
         }
     }
 
@@ -88,6 +95,20 @@ impl SandboxBackend for MockBackend {
 
     async fn is_available(&self) -> anyhow::Result<bool> {
         Ok(self.is_available_ret)
+    }
+
+    async fn is_present(&self) -> anyhow::Result<bool> {
+        Ok(self.is_present_ret || self.is_available_ret)
+    }
+
+    async fn create(&self, _opts: &CreateOpts) -> anyhow::Result<()> {
+        self.create_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn destroy(&self) -> anyhow::Result<()> {
+        self.destroy_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(())
     }
 
     async fn start(&self) -> anyhow::Result<()> {

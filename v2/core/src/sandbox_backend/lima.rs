@@ -1,14 +1,12 @@
-//! Lima backend — execute commands via `limactl shell <instance>`.
-//!
-//! Scope: runtime ops only. Creation/destruction is out of scope for v2
-//! (see sandbox_backend/mod.rs for rationale).
+//! Lima backend — full VM lifecycle via `limactl`.
 
 use std::time::Duration;
 
 use async_trait::async_trait;
 
 use crate::common::{try_exec, CancellationToken, CommandRunner, CommandSpec};
-use crate::paths::lima_home;
+use crate::paths::{lima_home, v2_templates_dir};
+use crate::provisioning::{render_lima_yaml, CreateOpts};
 use crate::runners::LocalProcessRunner;
 
 use super::{ResourceStats, SandboxBackend};
@@ -54,6 +52,95 @@ impl SandboxBackend for LimaBackend {
             Err(_) => return Ok(false),
         };
         Ok(v["status"].as_str() == Some("Running"))
+    }
+
+    async fn is_present(&self) -> anyhow::Result<bool> {
+        // Lima stores every VM as a subdir of LIMA_HOME — presence of
+        // <lima_home>/<instance>/lima.yaml means "defined" (stopped or running).
+        Ok(self.instance_dir().join("lima.yaml").exists())
+    }
+
+    async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
+        // Idempotency: a pre-existing instance directory means Lima has
+        // already provisioned this VM. Treat create() as a no-op so
+        // callers can use it as a "make sure it exists" guarantee.
+        if self.is_present().await.unwrap_or(false) {
+            return Ok(());
+        }
+
+        // Stage the rendered YAML. Lima wants a file path, not stdin.
+        let tpl_dir = v2_templates_dir();
+        tokio::fs::create_dir_all(&tpl_dir).await
+            .map_err(|e| anyhow::anyhow!("create template dir {}: {e}", tpl_dir.display()))?;
+        let tpl_path = tpl_dir.join(format!("{}.yaml", self.instance));
+        let yaml = render_lima_yaml(opts);
+        tokio::fs::write(&tpl_path, &yaml).await
+            .map_err(|e| anyhow::anyhow!("write template {}: {e}", tpl_path.display()))?;
+
+        // Ensure the host workspace dir exists — Lima's `mounts:` entry
+        // for it will fail the start otherwise.
+        if let Err(e) = tokio::fs::create_dir_all(&opts.workspace_dir).await {
+            anyhow::bail!(
+                "create workspace dir {}: {e}",
+                opts.workspace_dir.display()
+            );
+        }
+
+        // `limactl start --name <inst> --tty=false <path>` — blocks
+        // until cloud-init finishes (can take 5–10 min on first boot
+        // when packages are fetched). We give it a generous 20 min
+        // budget; callers that need finer-grained feedback should
+        // drive this via ProgressSink (deferred until we introduce a
+        // streaming variant).
+        let spec = CommandSpec::new(
+            "limactl",
+            [
+                "start",
+                "--name",
+                self.instance.as_str(),
+                "--tty=false",
+                tpl_path.to_str().ok_or_else(|| {
+                    anyhow::anyhow!("non-UTF8 template path: {}", tpl_path.display())
+                })?,
+            ],
+        )
+        .with_timeout(Duration::from_secs(20 * 60));
+
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!(
+                "limactl start --name {} --tty=false {}: exit {}\nstderr:\n{}",
+                self.instance,
+                tpl_path.display(),
+                res.exit_code,
+                tail_n(&res.stderr, 40),
+            );
+        }
+        Ok(())
+    }
+
+    async fn destroy(&self) -> anyhow::Result<()> {
+        // No-op when the instance isn't present at all — idempotent.
+        if !self.is_present().await.unwrap_or(false) {
+            return Ok(());
+        }
+        // `limactl delete --force <name>` tolerates running VMs by
+        // stopping first. Kills the VM dir under LIMA_HOME.
+        let spec = CommandSpec::new("limactl", ["delete", "--force", &self.instance])
+            .with_timeout(Duration::from_secs(2 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!(
+                "limactl delete --force {}: exit {}\nstderr:\n{}",
+                self.instance,
+                res.exit_code,
+                tail_n(&res.stderr, 20),
+            );
+        }
+        // Clean up our staged template — best-effort.
+        let tpl_path = v2_templates_dir().join(format!("{}.yaml", self.instance));
+        let _ = tokio::fs::remove_file(&tpl_path).await;
+        Ok(())
     }
 
     async fn start(&self) -> anyhow::Result<()> {
@@ -120,6 +207,17 @@ impl SandboxBackend for LimaBackend {
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
     fn supports_port_edit(&self) -> bool { true }
+}
+
+/// Last N lines of a string — used for error-message tails so we don't
+/// dump multi-MB stderr into user-facing messages.
+fn tail_n(s: &str, n: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= n {
+        s.to_string()
+    } else {
+        lines[lines.len() - n..].join("\n")
+    }
 }
 
 /// Rewrite the `portForwards:` block of a lima.yaml with the given set
@@ -202,6 +300,16 @@ mod tests {
         let rewritten = rewrite_port_forwards(input, &[(3000, 3000)]);
         assert!(rewritten.contains("portForwards:"));
         assert!(rewritten.contains("guestPort: 3000"));
+    }
+
+    #[test]
+    fn tail_n_shorter_than_requested_returns_all() {
+        assert_eq!(tail_n("a\nb", 10), "a\nb");
+    }
+
+    #[test]
+    fn tail_n_trims_to_last_lines() {
+        assert_eq!(tail_n("a\nb\nc\nd", 2), "c\nd");
     }
 
     #[test]

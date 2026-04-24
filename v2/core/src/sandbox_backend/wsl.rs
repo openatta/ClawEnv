@@ -10,7 +10,14 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 #[cfg(target_os = "windows")]
-use crate::common::{CancellationToken, CommandRunner, CommandSpec};
+use crate::common::{CancellationToken, CommandRunner, CommandSpec, ProgressSink};
+#[cfg(target_os = "windows")]
+use crate::download_ops::{CatalogBackedDownloadOps, DownloadOps};
+#[cfg(target_os = "windows")]
+use crate::paths::v2_config_dir;
+use crate::provisioning::CreateOpts;
+#[cfg(target_os = "windows")]
+use crate::provisioning::render_wsl_provision_script;
 #[cfg(target_os = "windows")]
 use crate::runners::LocalProcessRunner;
 
@@ -48,6 +55,119 @@ impl SandboxBackend for WslBackend {
             let res = self.runner.exec(spec, CancellationToken::new()).await?;
             if !res.success() { return Ok(false); }
             Ok(res.stdout.lines().any(|l| l.trim() == self.instance))
+        }
+    }
+
+    async fn is_present(&self) -> anyhow::Result<bool> {
+        #[cfg(not(target_os = "windows"))]
+        { Ok(false) }
+
+        #[cfg(target_os = "windows")]
+        {
+            // `wsl -l -q` lists every registered distro, running or not.
+            let spec = CommandSpec::new("wsl", ["-l", "-q"])
+                .with_timeout(Duration::from_secs(5));
+            let res = self.runner.exec(spec, CancellationToken::new()).await?;
+            if !res.success() { return Ok(false); }
+            Ok(res.stdout.lines().any(|l| l.trim() == self.instance))
+        }
+    }
+
+    async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        { let _ = opts; anyhow::bail!("WslBackend::create requires Windows"); }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Idempotency: already registered = done.
+            if self.is_present().await.unwrap_or(false) {
+                return Ok(());
+            }
+
+            // 1) Fetch Alpine minirootfs via DownloadOps. Cached after first run.
+            let downloader = CatalogBackedDownloadOps::with_defaults();
+            let rootfs = downloader
+                .fetch("alpine-rootfs", None, ProgressSink::noop(), CancellationToken::new())
+                .await
+                .map_err(|e| anyhow::anyhow!("fetch alpine-rootfs: {e}"))?;
+
+            // 2) Prepare distro-local dir under our v2 config root.
+            let distro_dir = v2_config_dir().join("wsl").join(&self.instance);
+            tokio::fs::create_dir_all(&distro_dir).await
+                .map_err(|e| anyhow::anyhow!(
+                    "create WSL distro dir {}: {e}", distro_dir.display()
+                ))?;
+
+            // 3) wsl --import <distro> <dir> <rootfs> --version 2
+            let import_spec = CommandSpec::new("wsl", [
+                "--import",
+                self.instance.as_str(),
+                distro_dir.to_str().ok_or_else(||
+                    anyhow::anyhow!("non-UTF8 WSL dir: {}", distro_dir.display())
+                )?,
+                rootfs.to_str().ok_or_else(||
+                    anyhow::anyhow!("non-UTF8 rootfs: {}", rootfs.display())
+                )?,
+                "--version", "2",
+            ]).with_timeout(Duration::from_secs(5 * 60));
+            let res = self.runner.exec(import_spec, CancellationToken::new()).await?;
+            if !res.success() {
+                anyhow::bail!(
+                    "wsl --import {}: exit {}\nstderr:\n{}",
+                    self.instance, res.exit_code, res.stderr
+                );
+            }
+
+            // 4) Provision via inline script. Unlike Lima/Podman there's no
+            //    separate "first-boot cloud-init" hook; we just exec the
+            //    script synchronously and let WSL keep us blocked.
+            //    The heredoc marker is non-occurring ASCII and the body is
+            //    our trusted render — no shell-injection risk.
+            let script = render_wsl_provision_script(opts);
+            let inline = format!(
+                "cat > /tmp/clawenv-provision.sh << 'CLAWOPS_WSL_EOF'\n\
+                 {script}\n\
+                 CLAWOPS_WSL_EOF\n\
+                 chmod +x /tmp/clawenv-provision.sh\n\
+                 /bin/sh /tmp/clawenv-provision.sh"
+            );
+            let prov_spec = CommandSpec::new("wsl", [
+                "-d", self.instance.as_str(), "--",
+                "sh", "-c", inline.as_str(),
+            ]).with_timeout(Duration::from_secs(20 * 60));
+            let res = self.runner.exec(prov_spec, CancellationToken::new()).await?;
+            if !res.success() {
+                anyhow::bail!(
+                    "wsl provision in {}: exit {}\nstderr:\n{}",
+                    self.instance, res.exit_code, res.stderr
+                );
+            }
+            Ok(())
+        }
+    }
+
+    async fn destroy(&self) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        { Ok(()) }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Idempotent — missing = done.
+            if !self.is_present().await.unwrap_or(false) {
+                return Ok(());
+            }
+            let spec = CommandSpec::new("wsl", ["--unregister", &self.instance])
+                .with_timeout(Duration::from_secs(2 * 60));
+            let res = self.runner.exec(spec, CancellationToken::new()).await?;
+            if !res.success() {
+                anyhow::bail!(
+                    "wsl --unregister {}: {}", self.instance, res.stderr
+                );
+            }
+            // Clean up our distro dir (best-effort).
+            let distro_dir = v2_config_dir().join("wsl").join(&self.instance);
+            let _ = tokio::fs::remove_dir_all(&distro_dir).await;
+            Ok(())
         }
     }
 
@@ -164,5 +284,23 @@ mod tests {
         let b = WslBackend::new("demo");
         assert_eq!(b.name(), "WSL2");
         assert_eq!(b.instance(), "demo");
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn create_fails_cleanly_on_non_windows() {
+        let b = WslBackend::new("demo");
+        let err = b.create(&crate::provisioning::CreateOpts::minimal("demo", "openclaw"))
+            .await
+            .unwrap_err();
+        assert!(format!("{err}").contains("requires Windows"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn destroy_is_noop_on_non_windows() {
+        // Non-Windows: is_present returns false, destroy short-circuits Ok.
+        let b = WslBackend::new("demo");
+        b.destroy().await.unwrap();
     }
 }

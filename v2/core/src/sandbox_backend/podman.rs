@@ -8,6 +8,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::common::{try_exec, CancellationToken, CommandRunner, CommandSpec};
+use crate::paths::v2_config_dir;
+use crate::provisioning::{render_podman_build_args, CreateOpts, PODMAN_CONTAINERFILE};
 use crate::runners::LocalProcessRunner;
 
 use super::{ResourceStats, SandboxBackend};
@@ -40,6 +42,119 @@ impl SandboxBackend for PodmanBackend {
             else { return Ok(false); };
         if !res.success() { return Ok(false); }
         Ok(res.stdout.trim() == "running")
+    }
+
+    async fn is_present(&self) -> anyhow::Result<bool> {
+        // `podman container exists` exits 0 when the container is defined,
+        // regardless of run state. Tolerates podman-missing.
+        let spec = CommandSpec::new("podman", ["container", "exists", &self.instance])
+            .with_timeout(Duration::from_secs(5));
+        let Some(res) = try_exec(&self.runner, spec, CancellationToken::new()).await?
+            else { return Ok(false); };
+        Ok(res.success())
+    }
+
+    async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
+        // Idempotent: if the container already exists, don't re-provision.
+        if self.is_present().await.unwrap_or(false) {
+            return Ok(());
+        }
+
+        // Stage the Containerfile in a per-instance build context dir.
+        // `podman build` wants a filesystem path, not stdin.
+        let ctx_dir = v2_config_dir().join("podman-build").join(&self.instance);
+        tokio::fs::create_dir_all(&ctx_dir).await
+            .map_err(|e| anyhow::anyhow!(
+                "create podman build dir {}: {e}", ctx_dir.display()
+            ))?;
+        let cf_path = ctx_dir.join("Containerfile");
+        tokio::fs::write(&cf_path, PODMAN_CONTAINERFILE).await
+            .map_err(|e| anyhow::anyhow!(
+                "write Containerfile {}: {e}", cf_path.display()
+            ))?;
+
+        // Ensure host workspace exists before we bind-mount it.
+        tokio::fs::create_dir_all(&opts.workspace_dir).await
+            .map_err(|e| anyhow::anyhow!(
+                "create workspace {}: {e}", opts.workspace_dir.display()
+            ))?;
+
+        // 1) `podman build` — composes image from template with --build-arg.
+        let mut build_args = render_podman_build_args(opts);
+        build_args.push("-f".into());
+        build_args.push(
+            cf_path.to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 Containerfile path"))?
+                .to_string(),
+        );
+        build_args.push(
+            ctx_dir.to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 build context"))?
+                .to_string(),
+        );
+        let build_refs: Vec<&str> = build_args.iter().map(|s| s.as_str()).collect();
+        let spec = CommandSpec::new("podman", build_refs)
+            .with_timeout(Duration::from_secs(15 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!(
+                "podman build for {}: exit {}\nstderr:\n{}",
+                self.instance, res.exit_code, res.stderr
+            );
+        }
+
+        // 2) `podman run -d` — starts the container with workspace mount
+        //    + port publish + keep-id userns (CLAUDE.md rule: Podman
+        //    rootless needs keep-id and :Z on bind mounts).
+        let image = format!("clawenv/{}:latest", self.instance);
+        let port_pub = format!("{}:{}", opts.gateway_port, opts.gateway_port);
+        let workspace_mount = format!(
+            "{}:/workspace:Z",
+            opts.workspace_dir.display()
+        );
+        let run_args: Vec<String> = vec![
+            "run".into(), "-d".into(),
+            "--name".into(), self.instance.clone(),
+            "--userns=keep-id".into(),
+            "-p".into(), port_pub,
+            "-v".into(), workspace_mount,
+            image,
+        ];
+        let run_refs: Vec<&str> = run_args.iter().map(|s| s.as_str()).collect();
+        let spec = CommandSpec::new("podman", run_refs)
+            .with_timeout(Duration::from_secs(60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!(
+                "podman run for {}: exit {}\nstderr:\n{}",
+                self.instance, res.exit_code, res.stderr
+            );
+        }
+        Ok(())
+    }
+
+    async fn destroy(&self) -> anyhow::Result<()> {
+        if !self.is_present().await.unwrap_or(false) {
+            return Ok(());
+        }
+        // `rm -f` stops+removes; tolerate nonexistence (-f is idempotent-ish).
+        let _ = self.runner.exec(
+            CommandSpec::new("podman", ["rm", "-f", &self.instance])
+                .with_timeout(Duration::from_secs(30)),
+            CancellationToken::new(),
+        ).await;
+        // Remove the image we built for this instance. Best-effort — a
+        // shared image across multiple instances isn't our model today.
+        let image = format!("clawenv/{}:latest", self.instance);
+        let _ = self.runner.exec(
+            CommandSpec::new("podman", ["rmi", "-f", image.as_str()])
+                .with_timeout(Duration::from_secs(30)),
+            CancellationToken::new(),
+        ).await;
+        // Clean up our build context dir.
+        let ctx_dir = v2_config_dir().join("podman-build").join(&self.instance);
+        let _ = tokio::fs::remove_dir_all(&ctx_dir).await;
+        Ok(())
     }
 
     async fn start(&self) -> anyhow::Result<()> {

@@ -9,8 +9,13 @@
 
 pub mod mirrors;
 pub mod background;
+pub mod templates;
 
 pub use mirrors::{apply_mirrors, MirrorsConfig, DEFAULT_ALPINE_REPO, DEFAULT_NPM_REGISTRY};
 pub use background::{
     run_background_script, BackgroundScriptOpts, BackgroundScriptReport,
+};
+pub use templates::{
+    render_lima_yaml, render_podman_build_args, render_wsl_provision_script,
+    CreateOpts, LIMA_TEMPLATE, PODMAN_CONTAINERFILE,
 };

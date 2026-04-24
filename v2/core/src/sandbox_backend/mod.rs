@@ -1,11 +1,9 @@
 //! v2-native SandboxBackend trait + implementations.
 //!
-//! Replaces our former dep on `clawenv_core::sandbox::*`. Scope is tighter
-//! than v1: we model only what `SandboxOps` uses (is_available / start /
-//! stop / exec / stats / edit_port_forwards). VM creation/destruction and
-//! rootfs import are out of scope — those are one-time bootstrap
-//! operations and v1's installer already handles them. v2 manages the
-//! *running* VM.
+//! Covers the full VM lifecycle: create → start → exec/stats/port → stop →
+//! destroy. `create()` consumes a [`CreateOpts`] assembled by
+//! `provisioning::templates` and is what makes v2 self-sufficient
+//! (no longer delegating VM bootstrap to v1).
 
 pub mod lima;
 pub mod wsl;
@@ -16,6 +14,8 @@ use async_trait::async_trait;
 pub use lima::LimaBackend;
 pub use podman::PodmanBackend;
 pub use wsl::WslBackend;
+
+use crate::provisioning::CreateOpts;
 
 /// Capabilities and runtime state of a sandbox backend. Mirrors v2's
 /// `SandboxOps` needs.
@@ -29,6 +29,29 @@ pub trait SandboxBackend: Send + Sync {
 
     /// Is the underlying tool + VM available / running right now?
     async fn is_available(&self) -> anyhow::Result<bool>;
+
+    /// Does the VM / container definition exist on this host, regardless
+    /// of run state? A true result means we should NOT call `create()`
+    /// (it would clash or double-provision); we should just `start()`.
+    ///
+    /// Default impl is `is_available()` — backends that distinguish
+    /// "defined but stopped" from "running" should override.
+    async fn is_present(&self) -> anyhow::Result<bool> {
+        self.is_available().await
+    }
+
+    /// Provision a fresh VM / container. Renders the backend's template
+    /// (Lima YAML, WSL rootfs import + provision script, Podman build),
+    /// invokes the backend tool, blocks until provision completes.
+    ///
+    /// Idempotency: backends SHOULD check `is_present()` first; if true,
+    /// return `Ok(())` without reprovisioning so callers can invoke
+    /// `create()` as a no-op readiness guarantee.
+    async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()>;
+
+    /// Tear down the VM / container and remove its backing files.
+    /// Must be idempotent — destroying a missing instance is a no-op.
+    async fn destroy(&self) -> anyhow::Result<()>;
 
     /// Start the VM (idempotent — noop if already running).
     async fn start(&self) -> anyhow::Result<()>;
