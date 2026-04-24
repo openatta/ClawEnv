@@ -123,7 +123,7 @@ pub async fn run(cmd: ProxyCmd, ctx: &Ctx) -> anyhow::Result<()> {
                 // Interactive: read one line without echo would need
                 // rpassword; for now we accept --stdin as the scripted
                 // path and tell interactive users to pipe it in.
-                anyhow::bail!("pass the password on stdin: `echo -n SECRET | clawops proxy set-password --stdin`");
+                anyhow::bail!("pass the password on stdin: `echo -n SECRET | clawcli proxy set-password --stdin`");
             }
             credentials::store_proxy_password(&pw)?;
             ctx.emit_text("proxy password stored");

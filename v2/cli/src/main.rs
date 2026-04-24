@@ -1,12 +1,13 @@
-//! clawops — ClawEnv v2 unified CLI.
+//! clawcli — ClawEnv v2 unified CLI.
 //!
-//! Five command groups reflecting the layered architecture in
-//! `v2/docs/DESIGN.md`:
-//!   - claw       (ClawOps)
-//!   - sandbox    (SandboxOps)
-//!   - native     (NativeOps)
-//!   - download   (DownloadOps)
-//!   - instance   (composed)
+//! Two-tier command surface:
+//!
+//! - **Verb layer** (task-oriented): `install`, `start`, `stop`, `status`,
+//!   `logs`, `exec`, `shell`, `doctor`, … — what users want to DO.
+//!   Each verb composes multiple Ops calls.
+//! - **Noun layer** (layer-oriented): `claw`, `sandbox`, `native`,
+//!   `download`, `proxy`, `instance`, … — direct access to one Ops
+//!   layer, for scripts and power users.
 
 mod cmd;
 mod shared;
@@ -14,7 +15,7 @@ mod shared;
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "clawops", version, about = "ClawEnv v2 unified CLI")]
+#[command(name = "clawcli", version, about = "ClawEnv v2 unified CLI")]
 pub struct Cli {
     /// Output results as JSON (machine-readable).
     #[arg(long, global = true)]
@@ -34,6 +35,34 @@ pub struct Cli {
 
 #[derive(Subcommand)]
 pub enum Command {
+    // ═══════════════════ Verb layer (task-oriented) ═══════════════════
+    /// List all registered instances.
+    List,
+    /// Show aggregate status for an instance (VM state + claw + ports).
+    Status {
+        /// Instance name (defaults to --instance global or "default").
+        name: Option<String>,
+    },
+    /// Start an instance's sandbox VM.
+    Start { name: Option<String> },
+    /// Stop an instance's sandbox VM.
+    Stop { name: Option<String> },
+    /// Restart an instance's sandbox VM.
+    Restart { name: Option<String> },
+    /// Run a command inside the sandbox non-interactively.
+    /// Usage: clawcli exec <name> -- <cmd> [args...]
+    Exec {
+        name: Option<String>,
+        /// Command and args, taken after `--`.
+        #[arg(last = true)]
+        cmd: Vec<String>,
+    },
+    /// Open an interactive shell inside the sandbox.
+    Shell { name: Option<String> },
+    /// Run aggregate diagnostics across native + sandbox + download.
+    Doctor { name: Option<String> },
+
+    // ═══════════════════ Noun layer (direct ops access) ═══════════════
     /// Manage Claw products (Hermes, OpenClaw) via their own CLI.
     Claw {
         #[command(subcommand)]
@@ -54,7 +83,7 @@ pub enum Command {
         #[command(subcommand)]
         sub: cmd::download::DownloadCmd,
     },
-    /// Composed cross-layer instance operations.
+    /// Composed cross-layer instance operations (info / create / destroy).
     Instance {
         #[command(subcommand)]
         sub: cmd::instance::InstanceCmd,
@@ -71,7 +100,7 @@ async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "warn,clawops=info".into())
+                .unwrap_or_else(|_| "warn,clawops_cli=info,clawops_core=info".into())
         )
         .init();
 
@@ -83,6 +112,16 @@ async fn main() -> anyhow::Result<()> {
     };
 
     match cli.command {
+        // Verb layer
+        Command::List               => cmd::verbs::run_list(&ctx).await,
+        Command::Status { name }    => cmd::verbs::run_status(&ctx, name).await,
+        Command::Start  { name }    => cmd::verbs::run_start(&ctx, name).await,
+        Command::Stop   { name }    => cmd::verbs::run_stop(&ctx, name).await,
+        Command::Restart{ name }    => cmd::verbs::run_restart(&ctx, name).await,
+        Command::Exec   { name, cmd } => cmd::verbs::run_exec(&ctx, name, cmd).await,
+        Command::Shell  { name }    => cmd::verbs::run_shell(&ctx, name).await,
+        Command::Doctor { name }    => cmd::verbs::run_doctor(&ctx, name).await,
+        // Noun layer
         Command::Claw { sub }       => cmd::claw::run(sub, &ctx).await,
         Command::Sandbox { sub }    => cmd::sandbox::run(sub, &ctx).await,
         Command::Native { sub }     => cmd::native::run(sub, &ctx).await,

@@ -6,7 +6,7 @@ license.workspace = true
 description = "ClawEnv v2 unified CLI"
 
 [[bin]]
-name = "clawops"
+name = "clawcli"
 path = "src/main.rs"
 
 [dependencies]
