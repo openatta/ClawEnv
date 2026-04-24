@@ -61,6 +61,16 @@ pub enum Command {
     Shell { name: Option<String> },
     /// Run aggregate diagnostics across native + sandbox + download.
     Doctor { name: Option<String> },
+    /// Probe connectivity to the 3 load-bearing hosts (Alpine CDN,
+    /// npm, github) from host or inside a sandbox.
+    NetCheck {
+        /// Probe from the host machine (`host`) or from inside a
+        /// sandbox VM (`sandbox`, requires the instance to be up).
+        #[arg(long, value_enum, default_value_t = cmd::verbs::NetCheckMode::Host)]
+        mode: cmd::verbs::NetCheckMode,
+        /// Instance name when --mode=sandbox. Falls back to --instance.
+        name: Option<String>,
+    },
 
     // ═══════════════════ Noun layer (direct ops access) ═══════════════
     /// Manage Claw products (Hermes, OpenClaw) via their own CLI.
@@ -121,6 +131,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Exec   { name, cmd } => cmd::verbs::run_exec(&ctx, name, cmd).await,
         Command::Shell  { name }    => cmd::verbs::run_shell(&ctx, name).await,
         Command::Doctor { name }    => cmd::verbs::run_doctor(&ctx, name).await,
+        Command::NetCheck { mode, name } => cmd::verbs::run_net_check(&ctx, mode, name).await,
         // Noun layer
         Command::Claw { sub }       => cmd::claw::run(sub, &ctx).await,
         Command::Sandbox { sub }    => cmd::sandbox::run(sub, &ctx).await,

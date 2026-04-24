@@ -15,6 +15,7 @@ use std::sync::Arc;
 use clawops_core::download_ops::{CatalogBackedDownloadOps, DownloadOps};
 use clawops_core::instance::{InstanceConfig, InstanceRegistry, SandboxKind};
 use clawops_core::native_ops::{DefaultNativeOps, NativeOps};
+use clawops_core::preflight;
 use clawops_core::sandbox_backend::{LimaBackend, PodmanBackend, SandboxBackend, WslBackend};
 use clawops_core::sandbox_ops::{
     LimaOps, PodmanOps, SandboxDoctorReport, SandboxOps, WslOps,
@@ -280,6 +281,55 @@ pub async fn run_shell(ctx: &Ctx, name: Option<String>) -> anyhow::Result<()> {
             "shell exited with code {}",
             status.code().unwrap_or(-1)
         );
+    }
+    Ok(())
+}
+
+// ——— net-check (host or sandbox preflight) ———
+
+/// Which side of the sandbox boundary to probe from.
+#[derive(clap::ValueEnum, Clone, Copy, Debug)]
+pub enum NetCheckMode {
+    /// Run probes from the host process (does this machine have egress?).
+    Host,
+    /// Run probes FROM INSIDE a sandbox via its in-VM curl. Requires the
+    /// instance to be up. Catches cases where host reachability is fine
+    /// but the VM's resolv.conf / proxy env / CA bundle is broken.
+    Sandbox,
+}
+
+pub async fn run_net_check(
+    ctx: &Ctx,
+    mode: NetCheckMode,
+    name: Option<String>,
+) -> anyhow::Result<()> {
+    let rep = match mode {
+        NetCheckMode::Host => preflight::run_preflight().await?,
+        NetCheckMode::Sandbox => {
+            let n = resolve_name(name, ctx);
+            let cfg = resolve_instance(&n).await?;
+            let backend = backend_arc(&cfg).ok_or_else(|| {
+                anyhow::anyhow!("instance `{n}` is native (no sandbox to probe from)")
+            })?;
+            preflight::run_sandbox_preflight(&backend).await?
+        }
+    };
+    ctx.emit_pretty(&rep, |r| {
+        let mut t = new_table(["host", "reachable", "status", "latency", "error"]);
+        for h in &r.hosts {
+            t.add_row([
+                h.host.clone(),
+                if h.reachable { "yes".into() } else { "no".into() },
+                h.http_status.map_or("—".into(), |s| s.to_string()),
+                h.latency_ms.map_or("—".into(), |ms| format!("{ms} ms")),
+                h.error.clone().unwrap_or_else(|| "—".into()),
+            ]);
+        }
+        println!("{t}");
+        if let Some(s) = &r.suggestion { println!("\n{s}"); }
+    })?;
+    if !rep.all_reachable {
+        std::process::exit(1);
     }
     Ok(())
 }

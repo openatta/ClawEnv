@@ -6,6 +6,7 @@
 
 #![cfg(test)]
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
@@ -27,6 +28,10 @@ pub(crate) struct MockBackend {
     pub stop_calls: AtomicU32,
     pub exec_log: Mutex<Vec<String>>,
     pub canned_stdout: Mutex<String>,
+    /// Per-call scripted responses. Each `exec()` pops the front. When
+    /// empty, falls back to `canned_stdout`. Lets tests drive a
+    /// deterministic conversation with the mock (e.g. polling loops).
+    pub scripted_responses: Mutex<VecDeque<String>>,
     pub start_err: bool,
     pub stop_err: bool,
     pub is_available_ret: bool,
@@ -41,10 +46,17 @@ impl MockBackend {
             stop_calls: AtomicU32::new(0),
             exec_log: Mutex::new(Vec::new()),
             canned_stdout: Mutex::new(String::new()),
+            scripted_responses: Mutex::new(VecDeque::new()),
             start_err: false,
             stop_err: false,
             is_available_ret: true,
         }
+    }
+
+    /// Enqueue a scripted response for the next `exec()` call.
+    #[allow(dead_code)] // used by upcoming background tests
+    pub fn queue_response(&self, s: impl Into<String>) {
+        self.scripted_responses.lock().unwrap().push_back(s.into());
     }
 
     pub fn with_stdout(mut self, s: impl Into<String>) -> Self {
@@ -92,6 +104,9 @@ impl SandboxBackend for MockBackend {
 
     async fn exec(&self, cmd: &str) -> anyhow::Result<String> {
         self.exec_log.lock().unwrap().push(cmd.to_string());
+        if let Some(r) = self.scripted_responses.lock().unwrap().pop_front() {
+            return Ok(r);
+        }
         Ok(self.canned_stdout.lock().unwrap().clone())
     }
 

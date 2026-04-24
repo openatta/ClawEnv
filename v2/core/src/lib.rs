@@ -26,6 +26,7 @@ pub mod instance;
 pub mod preflight;
 pub mod credentials;
 pub mod proxy;
+pub mod provisioning;
 
 // Re-exports for convenience.
 pub use common::{
