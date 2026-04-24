@@ -15,6 +15,7 @@ use std::sync::Arc;
 use clawops_core::download_ops::{CatalogBackedDownloadOps, DownloadOps};
 use clawops_core::instance::{
     InstallOpts, InstanceConfig, InstanceOrchestrator, InstanceRegistry, SandboxKind,
+    UpgradeOpts,
 };
 use clawops_core::native_ops::{DefaultNativeOps, NativeOps};
 use clawops_core::preflight;
@@ -60,6 +61,29 @@ fn default_backend_for_host() -> SandboxKind {
     if cfg!(target_os = "macos") { SandboxKind::Lima }
     else if cfg!(target_os = "windows") { SandboxKind::Wsl2 }
     else { SandboxKind::Podman }
+}
+
+/// Resolve the ProxyTriple for an install, combining v1 config.toml
+/// settings with the current process env and backend-specific
+/// loopback rewriting (Lima→host.lima.internal, Podman→
+/// host.containers.internal, etc.).
+///
+/// Returns `None` when neither config nor env has a proxy configured.
+async fn resolve_install_proxy(
+    cfg: &clawops_core::proxy::ProxyConfig,
+    backend: SandboxKind,
+) -> Option<clawops_core::proxy::ProxyTriple> {
+    use clawops_core::proxy::Scope;
+    use clawops_core::sandbox_ops::BackendKind;
+    let backend_kind = match backend {
+        SandboxKind::Lima => BackendKind::Lima,
+        SandboxKind::Wsl2 => BackendKind::Wsl2,
+        SandboxKind::Podman => BackendKind::Podman,
+        SandboxKind::Native => return None, // native doesn't need sandbox rewrites
+    };
+    Scope::RuntimeSandbox { backend: backend_kind, instance: None }
+        .resolve(cfg, None)
+        .await
 }
 
 fn sandbox_ops_for(cfg: &InstanceConfig) -> Option<Box<dyn SandboxOps>> {
@@ -339,11 +363,25 @@ pub struct InstallArgs {
     /// Install Chromium + VNC bundle (for browser-automation claws).
     #[arg(long)]
     pub install_browser: bool,
+    /// Render templates + describe what would happen, then stop
+    /// before actually invoking limactl/wsl/podman. No side effects.
+    /// Intended for CI smoke tests and Gate-0 verification.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
     let name = args.name.unwrap_or_else(|| ctx.instance.clone());
     let backend = args.backend.unwrap_or_else(InstallBackendSel::default_for_host);
+
+    // Auto-pull proxy + mirrors from v1's config.toml when present —
+    // users expect `clawcli install` to honor their existing proxy
+    // setup without having to re-specify it. Env vars still override
+    // via the Scope::Installer resolver at runtime.
+    let v1_config = clawops_core::config_loader::load_global()
+        .unwrap_or_default();
+    let proxy = resolve_install_proxy(&v1_config.proxy, backend.to_kind()).await;
+
     let opts = InstallOpts {
         name: name.clone(),
         claw: args.claw.clone(),
@@ -354,8 +392,9 @@ pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
         memory_mb: args.memory_mb,
         install_browser: args.install_browser,
         workspace_dir: None,
-        proxy: None,
-        mirrors: Default::default(),
+        proxy,
+        mirrors: v1_config.mirrors,
+        dry_run: args.dry_run,
     };
 
     // Wire a channel so we can stream progress to stdout as the pipeline runs.
@@ -404,6 +443,69 @@ pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
         );
         println!("  instance: {}", report.instance.name);
         println!("  backend : {}", report.instance.backend.as_str());
+    }
+    Ok(())
+}
+
+// ——— upgrade ———
+
+#[derive(Debug, clap::Args)]
+pub struct UpgradeArgs {
+    /// Instance name to upgrade (falls back to --instance / "default").
+    pub name: Option<String>,
+    /// Target version; "latest" resolves to the package manager's
+    /// upstream default.
+    #[arg(long, default_value = "latest")]
+    pub to: String,
+}
+
+pub async fn run_upgrade(ctx: &Ctx, args: UpgradeArgs) -> anyhow::Result<()> {
+    let name = args.name.unwrap_or_else(|| ctx.instance.clone());
+    let opts = UpgradeOpts { name: name.clone(), to_version: args.to };
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(32);
+    let sink = ProgressSink::new(tx);
+    let json = ctx.json;
+
+    let printer = tokio::spawn(async move {
+        let mut events: Vec<ProgressEvent> = Vec::new();
+        while let Some(ev) = rx.recv().await {
+            if !json {
+                let pct = ev.percent.map(|p| format!("{p:>3}%"))
+                    .unwrap_or_else(|| " … ".into());
+                println!("[{pct}] {:<18} {}", ev.stage, ev.message);
+            }
+            events.push(ev);
+        }
+        events
+    });
+
+    let o = InstanceOrchestrator::new();
+    let report = o.upgrade(opts, sink).await?;
+    let events = printer.await.unwrap_or_default();
+
+    if json {
+        let event_rows: Vec<serde_json::Value> = events.iter().map(|e| serde_json::json!({
+            "percent": e.percent, "stage": e.stage, "message": e.message,
+        })).collect();
+        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
+            "instance": report.instance,
+            "previous_version": report.previous_version,
+            "new_version": report.new_version,
+            "upgrade_elapsed_secs": report.upgrade_elapsed_secs,
+            "events": event_rows,
+        }))?);
+    } else {
+        println!();
+        println!("✓ Upgraded {} ({}s)",
+            report.instance.claw, report.upgrade_elapsed_secs);
+        if let Some(prev) = &report.previous_version {
+            println!("  {} → {}", prev.trim(), report.new_version.trim());
+        } else {
+            println!("  (previous version not probeable) → {}",
+                report.new_version.trim());
+        }
+        println!("  instance: {}", report.instance.name);
     }
     Ok(())
 }

@@ -17,9 +17,10 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use crate::claw_ops::{provisioning_for, ClawRegistry};
-use crate::common::{CancellationToken, OpsError, ProgressSink};
+use crate::common::{CancellationToken, CommandRunner, CommandSpec, OpsError, ProgressSink};
 use crate::native_ops::{DefaultNativeOps, NativeOps, VersionSpec};
 use crate::paths::clawenv_root;
+use crate::runners::LocalProcessRunner;
 use crate::provisioning::{
     apply_mirrors, run_background_script, BackgroundScriptOpts,
     CreateOpts as ProvCreateOpts, MirrorsConfig,
@@ -349,13 +350,13 @@ impl InstanceOrchestrator {
         // ——— Stage 2: DetectBackend ———
         progress.at(10, "detect-backend",
             format!("Selecting backend: {:?}", opts.backend)).await;
-        // Native path — R3 defers full native install orchestration.
+
+        // Native path — dispatches to a separate pipeline. Returns early
+        // with its own InstallReport.
         if opts.backend == SandboxKind::Native {
-            return Err(OpsError::unsupported(
-                "install",
-                "native mode install not yet implemented in v2 orchestrator",
-            ));
+            return self.install_native(opts, provisioning, progress).await;
         }
+
         let backend = Self::sandbox_backend_for(opts.backend, &opts.name)
             .expect("non-native backend must yield SandboxBackend");
 
@@ -377,6 +378,42 @@ impl InstanceOrchestrator {
             claw_version: opts.claw_version.clone(),
             install_browser: opts.install_browser,
         };
+
+        // Dry-run short-circuit: render + describe, but do not invoke
+        // limactl/wsl/podman. Returns a synthesised report with
+        // install_elapsed_secs=0 and version_output="(dry-run)".
+        if opts.dry_run {
+            progress.at(50, "dry-run",
+                "Rendered templates; stopping before backend invocation").await;
+            let preview = render_dry_run_preview(&prov_create, &*provisioning, opts.backend);
+            progress.at(100, "done",
+                format!("dry-run complete (backend={:?})", opts.backend)).await;
+            // Emit the preview in the progress stream too, so CLI users
+            // see exactly what would run. One line per section.
+            for line in preview.lines() {
+                progress.info("preview", line).await;
+            }
+            let inst = InstanceConfig {
+                name: opts.name.clone(),
+                claw: opts.claw.clone(),
+                backend: opts.backend,
+                sandbox_instance: opts.name.clone(),
+                ports: vec![PortBinding {
+                    host: opts.gateway_port,
+                    guest: opts.gateway_port,
+                    label: "gateway".into(),
+                }],
+                created_at: Utc::now().to_rfc3339(),
+                updated_at: String::new(),
+                note: "(dry-run; not persisted)".into(),
+            };
+            return Ok(InstallReport {
+                instance: inst,
+                version_output: format!("(dry-run preview)\n{preview}"),
+                install_elapsed_secs: 0,
+            });
+        }
+
         backend.create(&prov_create).await
             .map_err(|e| OpsError::Other(anyhow::anyhow!("create VM failed: {e}")))?;
 
@@ -468,6 +505,273 @@ impl InstanceOrchestrator {
             install_elapsed_secs: bg_report.elapsed.as_secs(),
         })
     }
+
+    // ---- install_native (R3.1-c) ----
+
+    /// Native-mode install: the claw runs directly on the host using
+    /// v2-managed node/git. Much smaller surface than the sandbox
+    /// pipeline (no VM, no mirrors, no proxy scripts) because the host
+    /// already has its own networking and user.
+    ///
+    /// Layout: `<clawenv_root>/native/<instance_name>/` becomes the
+    /// npm `--prefix`. Binary ends up at
+    /// `<clawenv_root>/native/<instance_name>/bin/<claw>`.
+    async fn install_native(
+        &self,
+        opts: InstallOpts,
+        provisioning: Box<dyn crate::claw_ops::ClawProvisioning>,
+        progress: ProgressSink,
+    ) -> Result<InstallReport, OpsError> {
+        // Currently only npm-packaged claws have a native path. Pip and
+        // git_pip would need uv on PATH, which v2 doesn't bundle yet.
+        if !matches!(provisioning.package_manager(), crate::claw_ops::PackageManager::Npm) {
+            return Err(OpsError::unsupported(
+                "install",
+                format!(
+                    "claw `{}` is not npm-packaged; native install only supports npm claws today",
+                    opts.claw
+                ),
+            ));
+        }
+
+        // Preflight: node must be present. Don't auto-install here —
+        // it's a surprise-y side-effect; user runs `clawcli native
+        // upgrade node` explicitly first.
+        progress.at(20, "preflight", "Probing host node/git").await;
+        let native_ops = DefaultNativeOps::new();
+        let status = native_ops.status().await?;
+        let node = status.node.as_ref().ok_or_else(|| OpsError::unsupported(
+            "install",
+            "native install requires node on host; run `clawcli native upgrade node` first",
+        ))?;
+
+        // Resolve npm next to node. Portable Node ships npm in the
+        // same `bin/` dir on unix, or as `npm.cmd` next to node.exe on Windows.
+        let node_bin = node.path.clone();
+        let npm_path = {
+            #[cfg(target_os = "windows")]
+            { node_bin.parent().unwrap().join("npm.cmd") }
+            #[cfg(not(target_os = "windows"))]
+            { node_bin.parent().unwrap().join("npm") }
+        };
+        if !npm_path.exists() {
+            return Err(OpsError::unsupported(
+                "install",
+                format!(
+                    "npm not found next to node at {}; reinstall node with `clawcli native reinstall node`",
+                    npm_path.display()
+                ),
+            ));
+        }
+
+        // Prepare per-instance install prefix. npm will populate
+        // <prefix>/lib/node_modules/<pkg> and <prefix>/bin/<claw>.
+        let prefix = clawenv_root().join("native").join(&opts.name);
+        tokio::fs::create_dir_all(&prefix).await
+            .map_err(|e| OpsError::Other(anyhow::anyhow!(
+                "create native install prefix {}: {e}", prefix.display()
+            )))?;
+
+        // Run `npm install -g --prefix <prefix> <pkg>@<version>` on the host.
+        progress.at(40, "install-claw",
+            format!("npm install -g --prefix {} {}@{}",
+                prefix.display(), provisioning.cli_binary(), opts.claw_version)).await;
+        let pkg_spec = format!("{}@{}", provisioning.cli_binary(), opts.claw_version);
+        let prefix_str = prefix.to_str()
+            .ok_or_else(|| OpsError::Other(anyhow::anyhow!(
+                "non-UTF8 prefix {}", prefix.display()
+            )))?;
+        let args = [
+            "install", "-g", "--prefix", prefix_str,
+            "--loglevel=error", pkg_spec.as_str(),
+        ];
+        let runner = LocalProcessRunner::new();
+        let start = std::time::Instant::now();
+        let res = runner.exec(
+            CommandSpec::new(
+                npm_path.to_str().ok_or_else(|| OpsError::Other(
+                    anyhow::anyhow!("non-UTF8 npm path")
+                ))?,
+                args,
+            ).with_timeout(std::time::Duration::from_secs(10 * 60)),
+            CancellationToken::new(),
+        ).await?;
+        if !res.success() {
+            return Err(OpsError::Other(anyhow::anyhow!(
+                "npm install failed (exit {}):\n{}",
+                res.exit_code,
+                res.stderr
+            )));
+        }
+        let install_elapsed = start.elapsed();
+
+        // Verify: run the binary's --version.
+        progress.at(90, "verify-claw",
+            format!("Verifying {} binary", provisioning.cli_binary())).await;
+        let bin_dir = prefix.join("bin");
+        let claw_bin = {
+            #[cfg(target_os = "windows")]
+            { bin_dir.join(format!("{}.cmd", provisioning.cli_binary())) }
+            #[cfg(not(target_os = "windows"))]
+            { bin_dir.join(provisioning.cli_binary()) }
+        };
+        if !claw_bin.exists() {
+            return Err(OpsError::Other(anyhow::anyhow!(
+                "post-install binary not found at {}", claw_bin.display()
+            )));
+        }
+        let ver_res = runner.exec(
+            CommandSpec::new(
+                claw_bin.to_str().unwrap(),
+                [provisioning.version_flag()],
+            ).with_timeout(std::time::Duration::from_secs(10)),
+            CancellationToken::new(),
+        ).await?;
+        let version_out = ver_res.stdout.trim().to_string();
+
+        // Record.
+        progress.at(97, "save-config", "Persisting instance registry").await;
+        let inst = InstanceConfig {
+            name: opts.name.clone(),
+            claw: opts.claw,
+            backend: SandboxKind::Native,
+            sandbox_instance: String::new(),
+            ports: vec![PortBinding {
+                host: opts.gateway_port,
+                guest: opts.gateway_port,
+                label: "gateway".into(),
+            }],
+            created_at: Utc::now().to_rfc3339(),
+            updated_at: String::new(),
+            note: String::new(),
+        };
+        self.registry.insert(inst.clone()).await?;
+
+        progress.at(100, "done",
+            format!("Native install of `{}` complete", inst.name)).await;
+        Ok(InstallReport {
+            instance: inst,
+            version_output: version_out,
+            install_elapsed_secs: install_elapsed.as_secs(),
+        })
+    }
+
+    // ---- upgrade (R4-a) ----
+
+    /// Upgrade an existing instance's claw to a new version. Reuses the
+    /// same background_script polling as install, but skips VM creation
+    /// and mirror/proxy re-application — those are already in place.
+    ///
+    /// Stages (percent anchors):
+    ///   5%   lookup — find registry entry
+    ///   15%  ensure-up — start VM if stopped
+    ///   25%  pre-verify — probe old version (reported back in report.previous_version)
+    ///   30–92% install-claw — run_background_script with claw's install cmd
+    ///   95%  post-verify — confirm new binary responds
+    ///   100% done — stamp updated_at in registry
+    ///
+    /// Note: for Npm this is `npm install -g <pkg>@<new>`, which resolves
+    /// to an upgrade when the package is already present. For GitPip the
+    /// recipe git-clones into the fixed `/opt/<id>` path, which will
+    /// collide if the dir exists. We pre-rm it here — v1's upgrade.rs
+    /// has the same move.
+    pub async fn upgrade(
+        &self,
+        opts: UpgradeOpts,
+        progress: ProgressSink,
+    ) -> Result<UpgradeReport, OpsError> {
+        progress.at(5, "lookup", format!("Finding instance `{}`", opts.name)).await;
+        let inst = self.registry.find(&opts.name).await?
+            .ok_or_else(|| OpsError::not_found(format!("instance `{}`", opts.name)))?;
+
+        let provisioning = provisioning_for(&inst.claw)
+            .ok_or_else(|| OpsError::not_found(
+                format!("claw `{}` (from registry)", inst.claw)
+            ))?;
+
+        // Native mode: not yet — same deferral as install().
+        if inst.backend == SandboxKind::Native {
+            return Err(OpsError::unsupported(
+                "upgrade",
+                "native-mode upgrade not yet implemented in v2 orchestrator",
+            ));
+        }
+        let backend = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance)
+            .expect("non-native backend must yield SandboxBackend");
+
+        // Ensure VM is running — v1 makes this implicit via exec probes
+        // but an idempotent start() is cheaper and more honest.
+        progress.at(15, "ensure-up", "Ensuring sandbox is up").await;
+        backend.start().await
+            .map_err(|e| OpsError::Other(anyhow::anyhow!("start VM: {e}")))?;
+
+        // Capture old version for the report — tolerate missing binary
+        // (user may be upgrading AFTER a broken half-install).
+        progress.at(25, "pre-verify", "Probing current claw version").await;
+        let previous_version = backend
+            .exec_argv(&["sh", "-c", &provisioning.version_check_cmd()])
+            .await
+            .ok()
+            .map(|s| s.trim().to_string());
+
+        // GitPip clones into /opt/<id>; if we don't pre-rm, the second
+        // install errors with "destination exists". v1 hit this in
+        // v0.2.x hotfix series.
+        if matches!(
+            provisioning.package_manager(),
+            crate::claw_ops::PackageManager::GitPip { .. }
+        ) {
+            progress.at(28, "prep", "Removing prior git-pip install dir").await;
+            let dir = format!("/opt/{}", provisioning.id());
+            let rm_cmd = format!("sudo rm -rf {dir}");
+            let _ = backend.exec_argv(&["sh", "-c", &rm_cmd]).await;
+        }
+
+        // Install new version — same background_script as install().
+        progress.at(30, "install-claw",
+            format!("Upgrading {} → {}", provisioning.display_name(), opts.to_version)).await;
+        let install_cmd = provisioning.install_cmd(&opts.to_version);
+        let bg_opts = BackgroundScriptOpts {
+            cmd: install_cmd.as_str(),
+            label: provisioning.display_name(),
+            sudo: matches!(
+                provisioning.package_manager(),
+                crate::claw_ops::PackageManager::GitPip { .. }
+                    | crate::claw_ops::PackageManager::Pip
+            ),
+            log_file: "/tmp/clawenv-upgrade.log",
+            done_file: "/tmp/clawenv-upgrade.done",
+            script_file: "/tmp/clawenv-upgrade.sh",
+            pct_range: (30, 92),
+            ..Default::default()
+        };
+        let bg_report = run_background_script(&backend, &bg_opts, &progress).await?;
+
+        // Post-install verify.
+        progress.at(95, "post-verify",
+            format!("Verifying {} binary", provisioning.cli_binary())).await;
+        let new_version = backend
+            .exec_argv(&["sh", "-c", &provisioning.version_check_cmd()])
+            .await
+            .map_err(|e| OpsError::Other(anyhow::anyhow!(
+                "post-upgrade version probe: {e}"
+            )))?;
+
+        // Bump updated_at in the registry.
+        progress.at(98, "save-config", "Updating registry timestamp").await;
+        let mut updated = inst.clone();
+        updated.updated_at = Utc::now().to_rfc3339();
+        self.registry.update(updated.clone()).await?;
+
+        progress.at(100, "done",
+            format!("Upgraded `{}` to {}", inst.name, new_version.trim())).await;
+        Ok(UpgradeReport {
+            instance: updated,
+            previous_version,
+            new_version: new_version.trim().to_string(),
+            upgrade_elapsed_secs: bg_report.elapsed.as_secs(),
+        })
+    }
 }
 
 // ——— Install opts + report ———
@@ -489,6 +793,11 @@ pub struct InstallOpts {
     pub proxy: Option<ProxyTriple>,
     #[serde(default)]
     pub mirrors: MirrorsConfig,
+    /// Don't actually touch any backend. Render the templates and
+    /// surface what WOULD be executed, then stop before CreateVm.
+    /// Intended for CI / Gate-0 verification.
+    #[serde(default)]
+    pub dry_run: bool,
 }
 
 impl InstallOpts {
@@ -506,6 +815,7 @@ impl InstallOpts {
             workspace_dir: None,
             proxy: None,
             mirrors: MirrorsConfig::default(),
+            dry_run: false,
         }
     }
 }
@@ -518,10 +828,118 @@ pub struct InstallReport {
     pub install_elapsed_secs: u64,
 }
 
+// ——— Dry-run preview rendering ———
+
+/// Compose a summary of what install() would execute. Called only in
+/// dry_run mode — includes the rendered template head, the claw's
+/// install command, and the post-install verification command.
+pub(crate) fn render_dry_run_preview(
+    prov: &ProvCreateOpts,
+    claw: &dyn crate::claw_ops::ClawProvisioning,
+    backend: SandboxKind,
+) -> String {
+    use crate::provisioning::{
+        render_lima_yaml, render_podman_build_args, render_wsl_provision_script,
+    };
+    let mut out = String::new();
+    out.push_str(&format!("backend         : {:?}\n", backend));
+    out.push_str(&format!("instance_name   : {}\n", prov.instance_name));
+    out.push_str(&format!("workspace_dir   : {}\n", prov.workspace_dir.display()));
+    out.push_str(&format!("gateway_port    : {}\n", prov.gateway_port));
+    out.push_str(&format!("cpu_cores       : {}\n", prov.cpu_cores));
+    out.push_str(&format!("memory_mb       : {}\n", prov.memory_mb));
+    out.push_str(&format!("claw_package    : {}\n", prov.claw_package));
+    out.push_str(&format!("claw_version    : {}\n", prov.claw_version));
+    out.push_str(&format!("install_browser : {}\n", prov.install_browser));
+    match &prov.proxy {
+        Some(t) => out.push_str(&format!("proxy.source    : {:?}\n", t.source)),
+        None => out.push_str("proxy           : (none)\n"),
+    }
+    if prov.mirrors.is_default() {
+        out.push_str("mirrors         : upstream default\n");
+    } else {
+        out.push_str(&format!(
+            "mirrors         : alpine={} npm={}\n",
+            prov.mirrors.alpine_repo_url(),
+            prov.mirrors.npm_registry_url()
+        ));
+    }
+
+    match backend {
+        SandboxKind::Lima => {
+            let yaml = render_lima_yaml(prov);
+            out.push_str("\n---- rendered Lima YAML (first 30 lines) ----\n");
+            for l in yaml.lines().take(30) {
+                out.push_str(l);
+                out.push('\n');
+            }
+            out.push_str(&format!("... ({} lines total)\n", yaml.lines().count()));
+        }
+        SandboxKind::Podman => {
+            let args = render_podman_build_args(prov);
+            out.push_str("\n---- podman build args ----\n");
+            out.push_str(&format!("podman {}\n", args.join(" ")));
+        }
+        SandboxKind::Wsl2 => {
+            let script = render_wsl_provision_script(prov);
+            out.push_str("\n---- WSL provision script (first 20 lines) ----\n");
+            for l in script.lines().take(20) {
+                out.push_str(l);
+                out.push('\n');
+            }
+        }
+        SandboxKind::Native => {}
+    }
+
+    out.push_str("\n---- post-boot install cmd ----\n");
+    out.push_str(&claw.install_cmd(&prov.claw_version));
+    out.push('\n');
+    out.push_str("\n---- post-install verify ----\n");
+    out.push_str(&claw.version_check_cmd());
+    out.push('\n');
+    out
+}
+
+// ——— Upgrade opts + report ———
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeOpts {
+    pub name: String,
+    /// Target version or "latest".
+    pub to_version: String,
+}
+
+impl UpgradeOpts {
+    pub fn to_latest(name: impl Into<String>) -> Self {
+        Self { name: name.into(), to_version: "latest".into() }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpgradeReport {
+    pub instance: InstanceConfig,
+    /// `<bin> --version` output from BEFORE the upgrade. `None` when
+    /// the old binary couldn't be probed (broken install, missing
+    /// binary, etc.) — doesn't block upgrade.
+    pub previous_version: Option<String>,
+    pub new_version: String,
+    pub upgrade_elapsed_secs: u64,
+}
+
 #[cfg(test)]
+// The ENV_LOCK guard is held across an await in one test — purely
+// for serialization of process-global env mutation. No async code
+// in the test would contend for that mutex, so the deadlock
+// clippy warns about is impossible here.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tempfile::TempDir;
+
+    // Tests that mutate CLAWENV_HOME must serialize — the env is
+    // process-global. Mirrors the pattern in paths/mod.rs tests.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn orchestrator_with_tmp_registry(tmp: &TempDir) -> InstanceOrchestrator {
         let reg = InstanceRegistry::with_path(tmp.path().join("insts.toml"));
@@ -661,19 +1079,99 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn install_native_openclaw_deferred_to_r3_1() {
-        // Orchestrator explicitly bails on native for now.
+    async fn install_native_requires_node_on_host() {
+        // Native install reaches preflight and bails because no node
+        // is set up (the test env has no ~/.clawenv/node). Since the
+        // test binary inherits the user's real HOME, guard against
+        // false negatives by pointing CLAWENV_HOME at a fresh tmp.
+        let home = TempDir::new().unwrap();
+        // Serialize env mutation with other env-touching tests.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("CLAWENV_HOME").ok();
+        unsafe { std::env::set_var("CLAWENV_HOME", home.path()); }
+
         let tmp = TempDir::new().unwrap();
         let o = orchestrator_with_tmp_registry(&tmp);
         let err = o.install(
             InstallOpts::minimal("test", "openclaw", SandboxKind::Native),
             ProgressSink::noop(),
         ).await.unwrap_err();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CLAWENV_HOME", v) },
+            None => unsafe { std::env::remove_var("CLAWENV_HOME") },
+        }
         match err {
-            OpsError::Unsupported { reason, .. } => {
+            OpsError::Unsupported { what, reason } => {
+                assert_eq!(what, "install");
+                assert!(reason.contains("node"), "{reason}");
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    // ——— upgrade() pre-backend validation ———
+
+    #[tokio::test]
+    async fn upgrade_missing_instance_errs_not_found() {
+        let tmp = TempDir::new().unwrap();
+        let o = orchestrator_with_tmp_registry(&tmp);
+        let err = o.upgrade(
+            UpgradeOpts::to_latest("ghost"),
+            ProgressSink::noop(),
+        ).await.unwrap_err();
+        assert!(matches!(err, OpsError::NotFound { .. }));
+    }
+
+    #[tokio::test]
+    async fn upgrade_native_instance_deferred() {
+        let tmp = TempDir::new().unwrap();
+        let o = orchestrator_with_tmp_registry(&tmp);
+        // Pre-seed a native openclaw instance.
+        o.registry.insert(InstanceConfig {
+            name: "nat".into(),
+            claw: "openclaw".into(),
+            backend: SandboxKind::Native,
+            sandbox_instance: String::new(),
+            ports: vec![],
+            created_at: "ts".into(),
+            updated_at: String::new(),
+            note: String::new(),
+        }).await.unwrap();
+        let err = o.upgrade(
+            UpgradeOpts::to_latest("nat"),
+            ProgressSink::noop(),
+        ).await.unwrap_err();
+        match err {
+            OpsError::Unsupported { what, reason } => {
+                assert_eq!(what, "upgrade");
                 assert!(reason.contains("native"), "{reason}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn upgrade_claw_removed_from_registry_errs_not_found() {
+        // Edge case: instance record has a claw id the provisioning
+        // registry no longer knows (e.g. user downgraded clawcli
+        // after adding a bespoke claw). Should surface cleanly.
+        let tmp = TempDir::new().unwrap();
+        let o = orchestrator_with_tmp_registry(&tmp);
+        o.registry.insert(InstanceConfig {
+            name: "orphan".into(),
+            claw: "unknown-claw-xyz".into(),
+            backend: SandboxKind::Lima,
+            sandbox_instance: "orphan".into(),
+            ports: vec![],
+            created_at: "ts".into(),
+            updated_at: String::new(),
+            note: String::new(),
+        }).await.unwrap();
+        let err = o.upgrade(
+            UpgradeOpts::to_latest("orphan"),
+            ProgressSink::noop(),
+        ).await.unwrap_err();
+        assert!(matches!(err, OpsError::NotFound { .. }));
     }
 }

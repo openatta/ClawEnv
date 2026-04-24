@@ -27,6 +27,7 @@ pub mod preflight;
 pub mod credentials;
 pub mod proxy;
 pub mod provisioning;
+pub mod config_loader;
 
 // Re-exports for convenience.
 pub use common::{

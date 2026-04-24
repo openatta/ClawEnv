@@ -41,6 +41,9 @@ pub enum Command {
     /// registry save into one pipeline. Progress streams to stdout;
     /// use --json for machine-consumable output.
     Install(cmd::verbs::InstallArgs),
+    /// Upgrade an existing instance's claw to a new version. Reuses
+    /// the existing VM — does NOT re-provision or touch proxy/mirrors.
+    Upgrade(cmd::verbs::UpgradeArgs),
     /// List all registered instances.
     List,
     /// Show aggregate status for an instance (VM state + claw + ports).
@@ -129,6 +132,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         // Verb layer
         Command::Install(args)      => cmd::verbs::run_install(&ctx, args).await,
+        Command::Upgrade(args)      => cmd::verbs::run_upgrade(&ctx, args).await,
         Command::List               => cmd::verbs::run_list(&ctx).await,
         Command::Status { name }    => cmd::verbs::run_status(&ctx, name).await,
         Command::Start  { name }    => cmd::verbs::run_start(&ctx, name).await,
