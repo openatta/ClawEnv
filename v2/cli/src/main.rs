@@ -59,6 +59,11 @@ pub enum Command {
         #[command(subcommand)]
         sub: cmd::instance::InstanceCmd,
     },
+    /// Proxy and credential management.
+    Proxy {
+        #[command(subcommand)]
+        sub: cmd::proxy::ProxyCmd,
+    },
 }
 
 #[tokio::main]
@@ -83,5 +88,6 @@ async fn main() -> anyhow::Result<()> {
         Command::Native { sub }     => cmd::native::run(sub, &ctx).await,
         Command::Download { sub }   => cmd::download::run(sub, &ctx).await,
         Command::Instance { sub }   => cmd::instance::run(sub, &ctx).await,
+        Command::Proxy { sub }      => cmd::proxy::run(sub, &ctx).await,
     }
 }

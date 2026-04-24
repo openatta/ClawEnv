@@ -142,15 +142,28 @@ impl SandboxOps for WslOps {
 
     async fn doctor(&self) -> Result<SandboxDoctorReport, OpsError> {
         let mut issues = Vec::new();
-        match self.backend.is_available().await {
-            Ok(false) | Err(_) => issues.push(DoctorIssue {
+        let vm_up = matches!(self.backend.is_available().await, Ok(true));
+        if !vm_up {
+            issues.push(DoctorIssue {
                 id: "vm-not-running".into(),
                 severity: Severity::Error,
                 message: "WSL2 instance is not running or wsl.exe unreachable".into(),
                 repair_hint: Some("clawops sandbox start".into()),
                 auto_repairable: true,
-            }),
-            Ok(true) => {}
+            });
+        } else {
+            if let Some(i) = super::probes::probe_dns(&self.backend).await { issues.push(i); }
+            if let Some(i) = super::probes::probe_disk(&self.backend).await { issues.push(i); }
+        }
+        let host_ports: Vec<u16> = self
+            .list_ports()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.host)
+            .collect();
+        if !host_ports.is_empty() {
+            issues.extend(super::probes::probe_port_conflicts(&host_ports).await);
         }
         Ok(SandboxDoctorReport {
             backend: BackendKind::Wsl2,
@@ -160,11 +173,10 @@ impl SandboxOps for WslOps {
         })
     }
 
-    async fn repair(&self, _issue_ids: &[String], _progress: ProgressSink)
+    async fn repair(&self, issue_ids: &[String], progress: ProgressSink)
         -> Result<(), OpsError>
     {
-        Err(OpsError::unsupported("repair",
-            "WSL repair actions — planned in Stage B"))
+        super::repair::dispatch_repair(&self.backend, issue_ids, &progress).await
     }
 
     async fn stats(&self) -> Result<ResourceStats, OpsError> {
@@ -176,11 +188,17 @@ impl SandboxOps for WslOps {
         })
     }
 
-    async fn dump_logs(&self, _tail: Option<u32>) -> Result<String, OpsError> {
-        Err(OpsError::unsupported("dump_logs",
-            "WSL log dump — planned in Stage B"))
+    async fn dump_logs(&self, tail: Option<u32>) -> Result<String, OpsError> {
+        let n = tail.unwrap_or(DEFAULT_LOG_TAIL).to_string();
+        let pipeline = format!("dmesg 2>/dev/null | tail -n {n}");
+        self.backend
+            .exec_argv(&["sh", "-c", &pipeline])
+            .await
+            .map_err(OpsError::Other)
     }
 }
+
+const DEFAULT_LOG_TAIL: u32 = 100;
 
 // Windows-only function used by list_ports; tests run on all OSes so we
 // keep it compiled but tolerate "unused" on non-Windows hosts.
@@ -219,10 +237,22 @@ pub(crate) fn parse_netsh_portproxy(out: &str) -> Vec<PortRule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox_ops::testing::MockBackend;
 
     #[test]
     fn backend_kind() {
         assert_eq!(WslOps::new("x").backend_kind(), BackendKind::Wsl2);
+    }
+
+    #[tokio::test]
+    async fn dump_logs_uses_dmesg_tail_pipeline() {
+        let mock = std::sync::Arc::new(MockBackend::new("wsl").with_stdout("ok"));
+        let ops = WslOps::with_backend(mock.clone(), "test");
+        let out = ops.dump_logs(Some(25)).await.unwrap();
+        assert_eq!(out, "ok");
+        let last = mock.last_exec().unwrap();
+        assert!(last.contains("dmesg"));
+        assert!(last.contains("tail -n 25"));
     }
 
     #[test]

@@ -23,6 +23,9 @@ pub mod sandbox_ops;
 pub mod native_ops;
 pub mod download_ops;
 pub mod instance;
+pub mod preflight;
+pub mod credentials;
+pub mod proxy;
 
 // Re-exports for convenience.
 pub use common::{

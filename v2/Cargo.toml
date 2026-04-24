@@ -25,6 +25,15 @@ hex = "0.4"
 clap = { version = "4", features = ["derive"] }
 futures-util = "0.3"
 
+# CLI pretty output
+comfy-table = "7"
+owo-colors = { version = "4", features = ["supports-colors"] }
+
+# Credentials — OS keychain (macOS Keychain / Windows Credential Manager /
+# Linux Secret Service). Must match v1's service name "clawenv" to share
+# stored passwords between v1 and v2 runtimes.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
 # Archive extraction (Stage B)
 tar = "0.4"
 flate2 = "1"

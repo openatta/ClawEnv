@@ -2,7 +2,7 @@ use clap::Subcommand;
 use clawops_core::sandbox_ops::{BackendKind, LimaOps, PodmanOps, SandboxOps, WslOps};
 use clawops_core::{CancellationToken, ProgressSink};
 
-use crate::shared::Ctx;
+use crate::shared::{new_table, severity_color, Ctx};
 
 #[derive(Subcommand)]
 pub enum SandboxCmd {
@@ -22,6 +22,12 @@ pub enum SandboxCmd {
     },
     /// Run diagnostics.
     Doctor { #[arg(long, value_enum)] backend: Option<BackendSel> },
+    /// Apply repair recipes for given issue IDs.
+    Repair {
+        /// Issue IDs to repair (e.g. `vm-not-running`).
+        issue_ids: Vec<String>,
+        #[arg(long, value_enum)] backend: Option<BackendSel>,
+    },
     /// Show resource usage.
     Stats { #[arg(long, value_enum)] backend: Option<BackendSel> },
 }
@@ -67,7 +73,15 @@ pub async fn run(cmd: SandboxCmd, ctx: &Ctx) -> anyhow::Result<()> {
         SandboxCmd::Status { backend } => {
             let ops = ops_for(resolve(backend), &ctx.instance);
             let s = ops.status().await?;
-            ctx.emit(&s)?;
+            ctx.emit_pretty(&s, |st| {
+                println!("Backend      : {}", format!("{:?}", st.backend).to_lowercase());
+                println!("Instance     : {}", st.instance_name);
+                println!("State        : {}", format!("{:?}", st.state).to_lowercase());
+                if let Some(c) = st.cpu_cores { println!("CPU cores    : {c}"); }
+                if let Some(m) = st.memory_mb { println!("Memory       : {m} MB"); }
+                if let Some(d) = st.disk_gb { println!("Disk         : {d} GB"); }
+                if let Some(ip) = &st.ip { println!("IP           : {ip}"); }
+            })?;
         }
         SandboxCmd::Start { backend } => {
             let ops = ops_for(resolve(backend), &ctx.instance);
@@ -89,7 +103,21 @@ pub async fn run(cmd: SandboxCmd, ctx: &Ctx) -> anyhow::Result<()> {
                 PortOp::List { backend } => {
                     let ops = ops_for(resolve(backend), &ctx.instance);
                     let ports = ops.list_ports().await?;
-                    ctx.emit(&ports)?;
+                    ctx.emit_pretty(&ports, |rows| {
+                        if rows.is_empty() {
+                            println!("No port forwards configured.");
+                        } else {
+                            let mut t = new_table(["host", "guest", "native_id"]);
+                            for p in rows {
+                                t.add_row([
+                                    p.host.to_string(),
+                                    p.guest.to_string(),
+                                    p.native_id.clone().unwrap_or_else(|| "—".into()),
+                                ]);
+                            }
+                            println!("{t}");
+                        }
+                    })?;
                 }
                 PortOp::Add { host, guest, backend } => {
                     let ops = ops_for(resolve(backend), &ctx.instance);
@@ -106,7 +134,31 @@ pub async fn run(cmd: SandboxCmd, ctx: &Ctx) -> anyhow::Result<()> {
         SandboxCmd::Doctor { backend } => {
             let ops = ops_for(resolve(backend), &ctx.instance);
             let r = ops.doctor().await?;
-            ctx.emit(&r)?;
+            ctx.emit_pretty(&r, |rep| {
+                println!(
+                    "backend={} instance={} issues={}",
+                    format!("{:?}", rep.backend).to_lowercase(),
+                    rep.instance_name,
+                    rep.issues.len(),
+                );
+                if rep.issues.is_empty() {
+                    println!("No issues found.");
+                } else {
+                    for i in &rep.issues {
+                        let sev = format!("{:?}", i.severity);
+                        println!("[{}] {} — {}", severity_color(&sev), i.id, i.message);
+                        if let Some(hint) = &i.repair_hint {
+                            println!("    hint: {hint}");
+                        }
+                    }
+                }
+                println!("\nchecked at {}", rep.checked_at);
+            })?;
+        }
+        SandboxCmd::Repair { issue_ids, backend } => {
+            let ops = ops_for(resolve(backend), &ctx.instance);
+            ops.repair(&issue_ids, ProgressSink::noop()).await?;
+            ctx.emit_text(format!("repaired {} issue(s)", issue_ids.len()));
         }
         SandboxCmd::Stats { backend } => {
             let ops = ops_for(resolve(backend), &ctx.instance);

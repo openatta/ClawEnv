@@ -133,15 +133,31 @@ impl SandboxOps for LimaOps {
 
     async fn doctor(&self) -> Result<SandboxDoctorReport, OpsError> {
         let mut issues = Vec::new();
-        match self.backend.is_available().await {
-            Ok(false) | Err(_) => issues.push(DoctorIssue {
+        let vm_up = matches!(self.backend.is_available().await, Ok(true));
+        if !vm_up {
+            issues.push(DoctorIssue {
                 id: "vm-not-running".into(),
                 severity: Severity::Error,
                 message: "Lima VM is not running or limactl unreachable".into(),
                 repair_hint: Some("clawops sandbox start".into()),
                 auto_repairable: true,
-            }),
-            Ok(true) => {}
+            });
+        } else {
+            // Probes inside the VM only make sense when the VM is up.
+            if let Some(i) = super::probes::probe_dns(&self.backend).await { issues.push(i); }
+            if let Some(i) = super::probes::probe_disk(&self.backend).await { issues.push(i); }
+        }
+        // Host-side port conflict probe runs regardless of VM state — it's
+        // often the reason the VM can't come up.
+        let host_ports: Vec<u16> = self
+            .list_ports()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.host)
+            .collect();
+        if !host_ports.is_empty() {
+            issues.extend(super::probes::probe_port_conflicts(&host_ports).await);
         }
         Ok(SandboxDoctorReport {
             backend: BackendKind::Lima,
@@ -151,11 +167,10 @@ impl SandboxOps for LimaOps {
         })
     }
 
-    async fn repair(&self, _issue_ids: &[String], _progress: ProgressSink)
+    async fn repair(&self, issue_ids: &[String], progress: ProgressSink)
         -> Result<(), OpsError>
     {
-        Err(OpsError::unsupported("repair",
-            "Lima repair actions — planned in Stage B"))
+        super::repair::dispatch_repair(&self.backend, issue_ids, &progress).await
     }
 
     async fn stats(&self) -> Result<ResourceStats, OpsError> {
@@ -167,11 +182,22 @@ impl SandboxOps for LimaOps {
         })
     }
 
-    async fn dump_logs(&self, _tail: Option<u32>) -> Result<String, OpsError> {
-        Err(OpsError::unsupported("dump_logs",
-            "Lima log dump — planned in Stage B"))
+    async fn dump_logs(&self, tail: Option<u32>) -> Result<String, OpsError> {
+        // Strategy: pull kernel ring buffer (dmesg) — always present on
+        // Alpine, gives boot + recent kernel events. We defer to the
+        // backend's quoting so the tail count is type-safe.
+        let n = tail.unwrap_or(DEFAULT_LOG_TAIL).to_string();
+        let combined = format!("dmesg | tail -n {n}");
+        let out = self
+            .backend
+            .exec_argv(&["sh", "-c", &combined])
+            .await
+            .map_err(OpsError::Other)?;
+        Ok(out)
     }
 }
+
+const DEFAULT_LOG_TAIL: u32 = 100;
 
 /// Parse a lima.yaml's `portForwards:` block. Lima's format for the entries
 /// we care about is:
@@ -265,12 +291,35 @@ fn apply_kv(line: &str, guest: &mut Option<u16>, host: &mut Option<u16>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox_ops::testing::MockBackend;
 
     #[test]
     fn backend_kind() {
         let ops = LimaOps::new("test-inst");
         assert_eq!(ops.backend_kind(), BackendKind::Lima);
         assert_eq!(ops.instance_name(), "test-inst");
+    }
+
+    #[tokio::test]
+    async fn dump_logs_uses_dmesg_tail_pipeline() {
+        let mock = std::sync::Arc::new(MockBackend::new("lima").with_stdout("line1\nline2\n"));
+        let ops = LimaOps::with_backend(mock.clone(), "test");
+        let out = ops.dump_logs(Some(50)).await.unwrap();
+        assert_eq!(out, "line1\nline2\n");
+        let last = mock.last_exec().unwrap();
+        // exec_argv default-impl quotes each fragment; we care that the
+        // pipeline AND the tail count reach the shell.
+        assert!(last.contains("dmesg"), "expected dmesg in cmd: {last}");
+        assert!(last.contains("tail -n 50"), "expected tail count in cmd: {last}");
+    }
+
+    #[tokio::test]
+    async fn dump_logs_default_tail_is_100() {
+        let mock = std::sync::Arc::new(MockBackend::new("lima"));
+        let ops = LimaOps::with_backend(mock.clone(), "test");
+        let _ = ops.dump_logs(None).await.unwrap();
+        let last = mock.last_exec().unwrap();
+        assert!(last.contains("tail -n 100"), "default tail: {last}");
     }
 
     #[test]

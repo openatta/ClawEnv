@@ -6,7 +6,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use chrono::Utc;
 
-use crate::common::{try_exec, CancellationToken, CommandSpec, OpsError, ProgressSink};
+use crate::common::{try_exec, CancellationToken, CommandRunner, CommandSpec, OpsError, ProgressSink};
 use crate::runners::LocalProcessRunner;
 use crate::sandbox_backend::{PodmanBackend, SandboxBackend};
 
@@ -114,15 +114,28 @@ impl SandboxOps for PodmanOps {
 
     async fn doctor(&self) -> Result<SandboxDoctorReport, OpsError> {
         let mut issues = Vec::new();
-        match self.backend.is_available().await {
-            Ok(false) | Err(_) => issues.push(DoctorIssue {
+        let vm_up = matches!(self.backend.is_available().await, Ok(true));
+        if !vm_up {
+            issues.push(DoctorIssue {
                 id: "vm-not-running".into(),
                 severity: Severity::Error,
                 message: "Podman container is not running".into(),
                 repair_hint: Some("clawops sandbox start".into()),
                 auto_repairable: true,
-            }),
-            Ok(true) => {}
+            });
+        } else {
+            if let Some(i) = super::probes::probe_dns(&self.backend).await { issues.push(i); }
+            if let Some(i) = super::probes::probe_disk(&self.backend).await { issues.push(i); }
+        }
+        let host_ports: Vec<u16> = self
+            .list_ports()
+            .await
+            .unwrap_or_default()
+            .iter()
+            .map(|p| p.host)
+            .collect();
+        if !host_ports.is_empty() {
+            issues.extend(super::probes::probe_port_conflicts(&host_ports).await);
         }
         Ok(SandboxDoctorReport {
             backend: BackendKind::Podman,
@@ -132,11 +145,10 @@ impl SandboxOps for PodmanOps {
         })
     }
 
-    async fn repair(&self, _issue_ids: &[String], _progress: ProgressSink)
+    async fn repair(&self, issue_ids: &[String], progress: ProgressSink)
         -> Result<(), OpsError>
     {
-        Err(OpsError::unsupported("repair",
-            "Podman repair actions — planned in Stage B"))
+        super::repair::dispatch_repair(&self.backend, issue_ids, &progress).await
     }
 
     async fn stats(&self) -> Result<ResourceStats, OpsError> {
@@ -148,11 +160,32 @@ impl SandboxOps for PodmanOps {
         })
     }
 
-    async fn dump_logs(&self, _tail: Option<u32>) -> Result<String, OpsError> {
-        Err(OpsError::unsupported("dump_logs",
-            "Podman log dump — planned in Stage B"))
+    async fn dump_logs(&self, tail: Option<u32>) -> Result<String, OpsError> {
+        // Podman captures stdout/stderr host-side, so we use `podman logs`
+        // rather than an in-container exec. This also picks up crashes
+        // that would leave `exec` unreachable.
+        let n = tail.unwrap_or(DEFAULT_LOG_TAIL);
+        let n_str = n.to_string();
+        let runner = LocalProcessRunner::new();
+        let spec = CommandSpec::new(
+            "podman",
+            ["logs", "--tail", n_str.as_str(), self.instance_name.as_str()],
+        )
+        .with_timeout(Duration::from_secs(10));
+        let res = runner.exec(spec, CancellationToken::new()).await?;
+        // Per docker/podman convention, container logs often go to stderr.
+        // Concatenate so callers see everything.
+        if res.stderr.is_empty() {
+            Ok(res.stdout)
+        } else if res.stdout.is_empty() {
+            Ok(res.stderr)
+        } else {
+            Ok(format!("{}{}", res.stdout, res.stderr))
+        }
     }
 }
+
+const DEFAULT_LOG_TAIL: u32 = 100;
 
 /// Parse `podman port <container>` output into PortRules.
 ///

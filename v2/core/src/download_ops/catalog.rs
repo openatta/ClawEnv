@@ -125,6 +125,45 @@ mod tests {
         assert!(!c.artifacts().is_empty());
     }
 
+    /// Contract test: the embedded catalog must cover every (artifact,
+    /// platform) pair that v1's mirrors.toml used to cover. If this fails,
+    /// v2 can't replace v1 for that combo without a network-level regression.
+    /// Update the expectations list when catalog scope legitimately changes.
+    #[test]
+    fn builtin_covers_all_v1_platforms() {
+        let c = DownloadCatalog::builtin();
+        // (name, os, arch) tuples that were downloadable in v1.
+        let required: &[(&str, &str, &str)] = &[
+            // node — portable runtime (6 platforms)
+            ("node", "macos", "arm64"),
+            ("node", "macos", "x86_64"),
+            ("node", "linux", "arm64"),
+            ("node", "linux", "x86_64"),
+            ("node", "windows", "arm64"),
+            ("node", "windows", "x86_64"),
+            // git — dugite-native (unix) + MinGit (windows)
+            ("git", "macos", "arm64"),
+            ("git", "macos", "x86_64"),
+            ("git", "linux", "arm64"),
+            ("git", "linux", "x86_64"),
+            ("git", "windows", "arm64"),
+            ("git", "windows", "x86_64"),
+            // lima — macOS-only
+            ("lima", "macos", "arm64"),
+            ("lima", "macos", "x86_64"),
+            // alpine-rootfs — WSL2 + Podman base (linux arches)
+            ("alpine-rootfs", "linux", "arm64"),
+            ("alpine-rootfs", "linux", "x86_64"),
+        ];
+        for (name, os, arch) in required {
+            let key = PlatformKey { os: (*os).into(), arch: (*arch).into() };
+            assert!(
+                c.find(name, None, &key).is_some(),
+                "builtin catalog missing ({name}, {os}, {arch})",
+            );
+        }
+    }
+
     #[test]
     fn sha256_is_optional() {
         let c = DownloadCatalog::from_toml_str(SAMPLE).unwrap();

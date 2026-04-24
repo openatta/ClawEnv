@@ -2,7 +2,7 @@ use clap::Subcommand;
 use clawops_core::native_ops::{DefaultNativeOps, NativeOps, VersionSpec};
 use clawops_core::ProgressSink;
 
-use crate::shared::Ctx;
+use crate::shared::{new_table, severity_color, Ctx};
 
 #[derive(Subcommand)]
 pub enum NativeCmd {
@@ -34,15 +34,62 @@ pub async fn run(cmd: NativeCmd, ctx: &Ctx) -> anyhow::Result<()> {
     match cmd {
         NativeCmd::Status => {
             let s = ops.status().await?;
-            ctx.emit(&s)?;
+            ctx.emit_pretty(&s, |st| {
+                println!("ClawEnv home : {}", st.clawenv_home.display());
+                println!("Home exists  : {}", if st.home_exists { "yes" } else { "no" });
+                println!("Disk usage   : {}", format_bytes(st.total_disk_bytes));
+                match &st.node {
+                    Some(n) => println!(
+                        "Node         : {} ({})  {}",
+                        n.version,
+                        n.path.display(),
+                        if n.healthy { "✓" } else { "✗" }
+                    ),
+                    None => println!("Node         : not installed"),
+                }
+                match &st.git {
+                    Some(g) => println!(
+                        "Git          : {} ({})  {}",
+                        g.version,
+                        g.path.display(),
+                        if g.healthy { "✓" } else { "✗" }
+                    ),
+                    None => println!("Git          : not installed"),
+                }
+            })?;
         }
         NativeCmd::Components => {
             let cs = ops.list_components().await?;
-            ctx.emit(&cs)?;
+            ctx.emit_pretty(&cs, |rows| {
+                let mut t = new_table(["name", "version", "path", "healthy", "size"]);
+                for c in rows {
+                    t.add_row([
+                        c.name.clone(),
+                        c.version.clone().unwrap_or_else(|| "—".into()),
+                        c.path.as_ref().map_or("—".into(), |p| p.display().to_string()),
+                        if c.healthy { "yes".into() } else { "no".into() },
+                        format_bytes(c.size_bytes),
+                    ]);
+                }
+                println!("{t}");
+            })?;
         }
         NativeCmd::Doctor => {
             let r = ops.doctor().await?;
-            ctx.emit(&r)?;
+            ctx.emit_pretty(&r, |rep| {
+                if rep.issues.is_empty() {
+                    println!("No issues found.");
+                } else {
+                    for i in &rep.issues {
+                        let sev = format!("{:?}", i.severity);
+                        println!("[{}] {} — {}", severity_color(&sev), i.id, i.message);
+                        if let Some(hint) = &i.repair_hint {
+                            println!("    hint: {hint}");
+                        }
+                    }
+                }
+                println!("\nchecked at {}", rep.checked_at);
+            })?;
         }
         NativeCmd::Repair { issue_ids } => {
             ops.repair(&issue_ids, ProgressSink::noop()).await?;
@@ -67,4 +114,14 @@ pub async fn run(cmd: NativeCmd, ctx: &Ctx) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+fn format_bytes(n: u64) -> String {
+    const KB: u64 = 1024;
+    const MB: u64 = KB * 1024;
+    const GB: u64 = MB * 1024;
+    if n >= GB { format!("{:.1} GB", n as f64 / GB as f64) }
+    else if n >= MB { format!("{:.1} MB", n as f64 / MB as f64) }
+    else if n >= KB { format!("{:.1} KB", n as f64 / KB as f64) }
+    else { format!("{n} B") }
 }

@@ -7,7 +7,7 @@ use clawops_core::sandbox_backend::{LimaBackend, PodmanBackend, SandboxBackend, 
 use clawops_core::{CancellationToken, CommandRunner, CommandSpec};
 use serde::Serialize;
 
-use crate::shared::Ctx;
+use crate::shared::{new_table, Ctx};
 
 #[derive(Subcommand)]
 pub enum ClawCmd {
@@ -197,7 +197,17 @@ pub async fn run(cmd: ClawCmd, ctx: &Ctx) -> anyhow::Result<()> {
                 binary: c.binary().into(),
                 supports_native: c.supports_native(),
             }).collect();
-            ctx.emit(&entries)?;
+            ctx.emit_pretty(&entries, |rows| {
+                let mut t = new_table(["id", "binary", "native"]);
+                for r in rows {
+                    t.add_row([
+                        r.id.clone(),
+                        r.binary.clone(),
+                        if r.supports_native { "yes" } else { "no" }.to_string(),
+                    ]);
+                }
+                println!("{t}");
+            })?;
         }
         ClawCmd::Update { claw, yes, json, dry_run, channel, tag, no_restart, execute, backend } => {
             let cli = ClawRegistry::cli_for(&claw)

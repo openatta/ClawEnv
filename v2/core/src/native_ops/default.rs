@@ -121,6 +121,11 @@ impl DefaultNativeOps {
         // Best-effort cleanup of any previous failed staging.
         let _ = tokio::fs::remove_dir_all(&staging).await;
 
+        // RAII guard: if we leave this function via `?` anywhere below, the
+        // staging dir gets removed on drop. On the success path we
+        // `defuse()` before return so the rename'd dir stays in place.
+        let mut staging_guard = PathGuard::arm(staging.clone());
+
         // Extraction is sync; move off the async reactor.
         let archive_clone = archive_path.clone();
         let staging_clone = staging.clone();
@@ -134,21 +139,56 @@ impl DefaultNativeOps {
             .map_err(|e| OpsError::Other(anyhow::anyhow!("extract failed: {e}")))?;
 
         // Atomic-ish swap: move target_dir → .old, move staging → target_dir.
+        // Guard the backup dir the same way so a failed swap can't orphan it.
         progress.at(92, "swap", "Swapping new version into place").await;
+        let backup = target_dir.with_extension("old");
+        let mut backup_guard: Option<PathGuard> = None;
         if target_dir.exists() {
-            let backup = target_dir.with_extension("old");
+            // Previous .old (from an earlier failed upgrade) is stale; kill
+            // it first so the rename target is free.
             let _ = tokio::fs::remove_dir_all(&backup).await;
             tokio::fs::rename(target_dir, &backup).await?;
+            backup_guard = Some(PathGuard::arm(backup.clone()));
         }
         tokio::fs::rename(&staging, target_dir).await?;
-        // Best-effort cleanup of backup (don't fail the upgrade on this).
-        let backup = target_dir.with_extension("old");
-        if backup.exists() {
-            let _ = tokio::fs::remove_dir_all(&backup).await;
+        // Rename succeeded — staging no longer exists, so the guard has
+        // nothing to clean; defuse to silence it.
+        staging_guard.defuse();
+        // Backup is now safe to remove eagerly on success; defuse and clean
+        // explicitly so we fail loudly if cleanup had a real problem.
+        if let Some(mut g) = backup_guard.take() {
+            g.defuse();
+            if backup.exists() {
+                let _ = tokio::fs::remove_dir_all(&backup).await;
+            }
         }
 
         progress.at(100, "done", format!("Installed {name}")).await;
         Ok(())
+    }
+}
+
+/// Drop-time cleanup for a filesystem path. Armed by default; call
+/// `defuse()` on the success path to keep the directory.
+///
+/// Uses sync std::fs::remove_dir_all because Drop can't await. That's fine
+/// for error paths where we're tearing down anyway; the cost is a blocking
+/// call on the current thread for the size of the staging tree (typically
+/// tens of MB).
+struct PathGuard {
+    path: Option<PathBuf>,
+}
+
+impl PathGuard {
+    fn arm(path: PathBuf) -> Self { Self { path: Some(path) } }
+    fn defuse(&mut self) { self.path = None; }
+}
+
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.path.take() {
+            let _ = std::fs::remove_dir_all(&p);
+        }
     }
 }
 
@@ -407,5 +447,41 @@ mod tests {
         let ops = DefaultNativeOps::new();
         let err = ops.reinstall_component("unknown", ProgressSink::noop()).await.unwrap_err();
         assert!(matches!(err, OpsError::NotFound { .. }));
+    }
+
+    #[test]
+    fn path_guard_cleans_on_drop() {
+        let tmp = tempfile::tempdir().unwrap();
+        let victim = tmp.path().join("victim");
+        std::fs::create_dir_all(&victim).unwrap();
+        std::fs::write(victim.join("file"), b"x").unwrap();
+        {
+            let _g = PathGuard::arm(victim.clone());
+            // drops here
+        }
+        assert!(!victim.exists(), "PathGuard::drop must rm the dir");
+    }
+
+    #[test]
+    fn path_guard_defused_keeps_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let keeper = tmp.path().join("keeper");
+        std::fs::create_dir_all(&keeper).unwrap();
+        {
+            let mut g = PathGuard::arm(keeper.clone());
+            g.defuse();
+        }
+        assert!(keeper.exists(), "defused PathGuard must leave the dir alone");
+    }
+
+    #[test]
+    fn path_guard_handles_missing_path() {
+        // Drop is infallible even if the path was already gone.
+        let tmp = tempfile::tempdir().unwrap();
+        let gone = tmp.path().join("never-existed");
+        {
+            let _g = PathGuard::arm(gone.clone());
+        }
+        assert!(!gone.exists());
     }
 }

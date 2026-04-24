@@ -86,12 +86,18 @@ pub fn v2_cache_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Tests in this module mutate `CLAWENV_HOME`. Rust test binaries run
+    // tests concurrently within one process, so any two env-touching tests
+    // race. Serialize them through a module-level mutex.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn env_override_works() {
-        // Serialize via unique test to avoid env races in parallel tests.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let original = std::env::var("CLAWENV_HOME").ok();
-        // SAFETY: test-local usage
+        // SAFETY: test-local usage, guarded by ENV_LOCK.
         unsafe { std::env::set_var("CLAWENV_HOME", "/tmp/clawenv-test-path"); }
         assert_eq!(clawenv_root(), PathBuf::from("/tmp/clawenv-test-path"));
         match original {
@@ -102,6 +108,7 @@ mod tests {
 
     #[test]
     fn node_and_git_dirs_rooted_under_clawenv() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let root = clawenv_root();
         assert!(clawenv_node_dir().starts_with(&root));
         assert!(clawenv_git_dir().starts_with(&root));

@@ -5,6 +5,10 @@ pub mod ops;
 pub mod lima;
 pub mod wsl;
 pub mod podman;
+pub(crate) mod repair;
+pub(crate) mod probes;
+#[cfg(test)]
+pub(crate) mod testing;
 
 pub use ops::SandboxOps;
 pub use types::{
