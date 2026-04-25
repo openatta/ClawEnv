@@ -68,6 +68,64 @@ pub trait ClawProvisioning: Send + Sync {
     fn version_check_cmd(&self) -> String {
         format!("{} {}", self.cli_binary(), self.version_flag())
     }
+
+    // ——— Post-install runtime (P1-f/g/j extensions) ———
+
+    /// Default port the gateway listens on inside the sandbox. Mirrors v1
+    /// `ClawDescriptor::default_port`. Overridden per-claw — OpenClaw 3000,
+    /// Hermes 3000 too but its dashboard splits to 3005.
+    fn default_port(&self) -> u16 { 3000 }
+
+    /// Gateway start command, with `{port}` placeholder substituted by
+    /// the install pipeline. Returns None if this claw has no gateway
+    /// mode (e.g. interactive-only via ttyd).
+    fn gateway_cmd_template(&self) -> Option<&'static str> { None }
+
+    /// Build the full `<bin> gateway <args>` string for the given port.
+    /// None when `gateway_cmd_template` is None.
+    fn gateway_start_cmd(&self, port: u16) -> Option<String> {
+        let tpl = self.gateway_cmd_template()?;
+        Some(format!("{} {}", self.cli_binary(), tpl.replace("{port}", &port.to_string())))
+    }
+
+    /// Dashboard start command with `{port}` placeholder. None for claws
+    /// whose UI lives at the gateway port (OpenClaw); Some for claws
+    /// that split (Hermes).
+    fn dashboard_cmd_template(&self) -> Option<&'static str> { None }
+
+    fn dashboard_start_cmd(&self, port: u16) -> Option<String> {
+        let tpl = self.dashboard_cmd_template()?;
+        Some(format!("{} {}", self.cli_binary(), tpl.replace("{port}", &port.to_string())))
+    }
+
+    /// True if this claw ships a separate dashboard process. Convenience
+    /// alias around `dashboard_cmd_template`.
+    fn has_dashboard(&self) -> bool { self.dashboard_cmd_template().is_some() }
+
+    /// Port offset for the dashboard inside the instance's port block.
+    /// e.g. 5 → dashboard runs at `gateway_port + 5`.
+    fn dashboard_port_offset(&self) -> u16 { 5 }
+
+    /// Optional one-shot init command run AFTER install, BEFORE first
+    /// gateway start. v1 OpenClaw needed `config set gateway.mode local`;
+    /// without it, gateway bailed even with --allow-unconfigured. Empty
+    /// = no init needed.
+    fn config_init_cmd(&self) -> Option<&'static str> { None }
+
+    /// MCP server registration command template, with `{name}` and
+    /// `{json}` placeholders. None when MCP is unsupported.
+    fn mcp_set_cmd_template(&self) -> Option<&'static str> { None }
+
+    fn supports_mcp(&self) -> bool { self.mcp_set_cmd_template().is_some() }
+
+    /// MCP bridge runtime: "node" or "python". Selects which bridge
+    /// script (mcp-bridge.mjs vs mcp-bridge.py) to deploy. Only
+    /// consulted when supports_mcp().
+    fn mcp_runtime(&self) -> &'static str { "node" }
+
+    /// Whether this claw integrates with the in-VM Chromium HIL flow
+    /// (browser automation with noVNC takeover for human review).
+    fn supports_browser(&self) -> bool { false }
 }
 
 /// Default dispatch: builds the shell string for each PackageManager
@@ -132,16 +190,35 @@ impl ClawProvisioning for HermesProvisioning {
     fn supports_native(&self) -> bool { false }
     fn cli_binary(&self) -> &'static str { "hermes" }
     fn sandbox_provision_packages(&self) -> &'static [&'static str] {
-        // From v1 descriptor for Hermes: python3-dev for native wheels,
-        // uv because the install recipe relies on it.
-        &["python3-dev", "uv"]
+        // From v1 claw-registry.toml [hermes]: extras for git_pip + nodejs/npm
+        // for the dashboard's React build.
+        &["py3-pip", "py3-uv", "nodejs", "npm"]
     }
     fn package_manager(&self) -> PackageManager {
+        // Per v1 claw-registry.toml [hermes]: extras="termux,messaging,web"
+        // (voice→ctranslate2 needs glibc which Alpine lacks).
         PackageManager::GitPip {
             repo: "https://github.com/NousResearch/hermes-agent.git".into(),
-            extras: "all".into(),
+            extras: "termux,messaging,web".into(),
         }
     }
+
+    fn default_port(&self) -> u16 { 3000 }
+    // Hermes does NOT auto-start a gateway: messaging bridge needs user-
+    // configured bot tokens, would loop-fail in nohup. User starts it
+    // manually post-setup. v1 claw-registry.toml [hermes] gateway_cmd = "".
+    fn gateway_cmd_template(&self) -> Option<&'static str> { None }
+    // Dashboard runs on 127.0.0.1 (refused 0.0.0.0 without --insecure;
+    // backend port forwards loopback-to-loopback so it still works).
+    fn dashboard_cmd_template(&self) -> Option<&'static str> {
+        Some("dashboard --port {port} --host 127.0.0.1 --no-open")
+    }
+    fn dashboard_port_offset(&self) -> u16 { 5 }
+    fn mcp_set_cmd_template(&self) -> Option<&'static str> {
+        Some("mcp set {name} '{json}'")
+    }
+    fn mcp_runtime(&self) -> &'static str { "python" }
+    fn supports_browser(&self) -> bool { false }
 }
 
 // ——— OpenClaw impl ———
@@ -154,6 +231,24 @@ impl ClawProvisioning for OpenClawProvisioning {
     fn supports_native(&self) -> bool { true }
     fn cli_binary(&self) -> &'static str { "openclaw" }
     fn package_manager(&self) -> PackageManager { PackageManager::Npm }
+
+    fn default_port(&self) -> u16 { 3000 }
+    fn gateway_cmd_template(&self) -> Option<&'static str> {
+        Some("gateway --port {port} --allow-unconfigured")
+    }
+    // OpenClaw bundles UI at the gateway port, no separate dashboard.
+    fn dashboard_cmd_template(&self) -> Option<&'static str> { None }
+    // Without this, `openclaw gateway` bails with "existing config is
+    // missing gateway.mode" even with --allow-unconfigured. Set once,
+    // OpenClaw persists in openclaw.json.
+    fn config_init_cmd(&self) -> Option<&'static str> {
+        Some("config set gateway.mode local")
+    }
+    fn mcp_set_cmd_template(&self) -> Option<&'static str> {
+        Some("mcp set {name} '{json}'")
+    }
+    fn mcp_runtime(&self) -> &'static str { "node" }
+    fn supports_browser(&self) -> bool { true }
 }
 
 // ——— Registry ———
@@ -202,15 +297,17 @@ mod tests {
         let p = HermesProvisioning;
         assert_eq!(p.id(), "hermes");
         assert!(!p.supports_native());
-        // Extra apk packages: python3-dev + uv.
+        // v1 claw-registry.toml [hermes].sandbox_provision.
         let pkgs = p.sandbox_provision_packages();
-        assert!(pkgs.contains(&"python3-dev"));
-        assert!(pkgs.contains(&"uv"));
-        // GitPip variant.
+        assert!(pkgs.contains(&"py3-pip"));
+        assert!(pkgs.contains(&"py3-uv"));
+        assert!(pkgs.contains(&"nodejs"));
+        assert!(pkgs.contains(&"npm"));
+        // GitPip variant with Alpine-safe extras.
         match p.package_manager() {
             PackageManager::GitPip { repo, extras } => {
                 assert!(repo.contains("github.com"));
-                assert_eq!(extras, "all");
+                assert_eq!(extras, "termux,messaging,web");
             }
             _ => panic!("expected GitPip"),
         }
@@ -260,8 +357,9 @@ mod tests {
     fn git_pip_install_cmd_embeds_extras() {
         let p = HermesProvisioning;
         let cmd = p.install_cmd("latest");
-        // Extras default for Hermes is "all" → `.[all]`.
-        assert!(cmd.contains(".[all]"), "missing extras in cmd: {cmd}");
+        // v1 claw-registry.toml [hermes]: extras="termux,messaging,web"
+        // (skipping voice/all which need glibc-only ctranslate2).
+        assert!(cmd.contains(".[termux,messaging,web]"), "missing extras: {cmd}");
     }
 
     // ——— version_check_cmd ———
@@ -279,5 +377,63 @@ mod tests {
         let p: Box<dyn ClawProvisioning> = Box::new(OpenClawProvisioning);
         let cmd = p.install_cmd("latest");
         assert!(cmd.contains("openclaw@latest"));
+    }
+
+    // ——— post-install runtime metadata ———
+
+    #[test]
+    fn openclaw_gateway_cmd_substitutes_port() {
+        let p = OpenClawProvisioning;
+        let cmd = p.gateway_start_cmd(3010).unwrap();
+        assert!(cmd.starts_with("openclaw gateway "));
+        assert!(cmd.contains("--port 3010"));
+        assert!(cmd.contains("--allow-unconfigured"));
+    }
+
+    #[test]
+    fn openclaw_has_no_separate_dashboard() {
+        let p = OpenClawProvisioning;
+        assert!(!p.has_dashboard());
+        assert!(p.dashboard_start_cmd(3015).is_none());
+    }
+
+    #[test]
+    fn openclaw_config_init_required() {
+        let p = OpenClawProvisioning;
+        assert_eq!(p.config_init_cmd(), Some("config set gateway.mode local"));
+    }
+
+    #[test]
+    fn openclaw_supports_mcp_and_browser() {
+        let p = OpenClawProvisioning;
+        assert!(p.supports_mcp());
+        assert!(p.supports_browser());
+        assert_eq!(p.mcp_runtime(), "node");
+    }
+
+    #[test]
+    fn hermes_has_dashboard_at_offset_5() {
+        let p = HermesProvisioning;
+        assert!(p.has_dashboard());
+        assert_eq!(p.dashboard_port_offset(), 5);
+        let cmd = p.dashboard_start_cmd(3005).unwrap();
+        assert!(cmd.contains("dashboard --port 3005"));
+        assert!(cmd.contains("--host 127.0.0.1"));
+    }
+
+    #[test]
+    fn hermes_does_not_auto_start_gateway() {
+        // Messaging bridge needs user-configured bot tokens; auto-start
+        // would loop-fail. v1 claw-registry.toml leaves gateway_cmd empty.
+        let p = HermesProvisioning;
+        assert!(p.gateway_start_cmd(3000).is_none());
+    }
+
+    #[test]
+    fn hermes_python_mcp_runtime() {
+        let p = HermesProvisioning;
+        assert!(p.supports_mcp());
+        assert_eq!(p.mcp_runtime(), "python");
+        assert!(!p.supports_browser());
     }
 }

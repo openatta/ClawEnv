@@ -690,12 +690,9 @@ impl InstanceOrchestrator {
                 format!("claw `{}` (from registry)", inst.claw)
             ))?;
 
-        // Native mode: not yet — same deferral as install().
+        // Native path — separate pipeline (no VM).
         if inst.backend == SandboxKind::Native {
-            return Err(OpsError::unsupported(
-                "upgrade",
-                "native-mode upgrade not yet implemented in v2 orchestrator",
-            ));
+            return self.upgrade_native(inst, opts, provisioning, progress).await;
         }
         let backend = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance)
             .expect("non-native backend must yield SandboxBackend");
@@ -771,6 +768,122 @@ impl InstanceOrchestrator {
             previous_version,
             new_version: new_version.trim().to_string(),
             upgrade_elapsed_secs: bg_report.elapsed.as_secs(),
+        })
+    }
+
+    // ---- upgrade_native (P1-l) ----
+
+    /// Native-mode upgrade: re-runs `npm install -g --prefix <inst_dir>
+    /// <pkg>@<version>`. npm "install -g" naturally upgrades when the
+    /// package is already there. Same path that install_native uses,
+    /// but with the registry record already present.
+    async fn upgrade_native(
+        &self,
+        inst: InstanceConfig,
+        opts: UpgradeOpts,
+        provisioning: Box<dyn crate::claw_ops::ClawProvisioning>,
+        progress: ProgressSink,
+    ) -> Result<UpgradeReport, OpsError> {
+        if !matches!(provisioning.package_manager(), crate::claw_ops::PackageManager::Npm) {
+            return Err(OpsError::unsupported(
+                "upgrade",
+                format!(
+                    "claw `{}` is not npm-packaged; native upgrade only supports npm claws today",
+                    inst.claw
+                ),
+            ));
+        }
+
+        progress.at(20, "preflight", "Probing host node/git").await;
+        let native_ops = DefaultNativeOps::new();
+        let status = native_ops.status().await?;
+        let node = status.node.as_ref().ok_or_else(|| OpsError::unsupported(
+            "upgrade",
+            "native upgrade requires node on host; run `clawcli native upgrade node` first",
+        ))?;
+        let node_bin = node.path.clone();
+        let npm_path = {
+            #[cfg(target_os = "windows")]
+            { node_bin.parent().unwrap().join("npm.cmd") }
+            #[cfg(not(target_os = "windows"))]
+            { node_bin.parent().unwrap().join("npm") }
+        };
+
+        // Probe existing version (best-effort).
+        let prefix = clawenv_root().join("native").join(&inst.name);
+        let bin_dir = prefix.join("bin");
+        let claw_bin = {
+            #[cfg(target_os = "windows")]
+            { bin_dir.join(format!("{}.cmd", provisioning.cli_binary())) }
+            #[cfg(not(target_os = "windows"))]
+            { bin_dir.join(provisioning.cli_binary()) }
+        };
+        let runner = LocalProcessRunner::new();
+        progress.at(30, "pre-verify", "Probing current version").await;
+        let previous_version = if claw_bin.exists() {
+            runner.exec(
+                CommandSpec::new(claw_bin.to_str().unwrap(), [provisioning.version_flag()])
+                    .with_timeout(std::time::Duration::from_secs(10)),
+                CancellationToken::new(),
+            ).await
+            .ok()
+            .filter(|r| r.success())
+            .map(|r| r.stdout.trim().to_string())
+        } else {
+            None
+        };
+
+        progress.at(50, "install-claw",
+            format!("npm install -g --prefix {} {}@{}",
+                prefix.display(), provisioning.cli_binary(), opts.to_version)).await;
+        let pkg_spec = format!("{}@{}", provisioning.cli_binary(), opts.to_version);
+        let prefix_str = prefix.to_str()
+            .ok_or_else(|| OpsError::Other(anyhow::anyhow!(
+                "non-UTF8 prefix {}", prefix.display()
+            )))?;
+        let args = [
+            "install", "-g", "--prefix", prefix_str,
+            "--loglevel=error", pkg_spec.as_str(),
+        ];
+        let start = std::time::Instant::now();
+        let res = runner.exec(
+            CommandSpec::new(
+                npm_path.to_str().ok_or_else(|| OpsError::Other(
+                    anyhow::anyhow!("non-UTF8 npm path")
+                ))?,
+                args,
+            ).with_timeout(std::time::Duration::from_secs(10 * 60)),
+            CancellationToken::new(),
+        ).await?;
+        if !res.success() {
+            return Err(OpsError::Other(anyhow::anyhow!(
+                "npm upgrade failed (exit {}):\n{}",
+                res.exit_code, res.stderr
+            )));
+        }
+        let upgrade_elapsed = start.elapsed();
+
+        progress.at(90, "post-verify",
+            format!("Verifying {} binary", provisioning.cli_binary())).await;
+        let ver_res = runner.exec(
+            CommandSpec::new(claw_bin.to_str().unwrap(), [provisioning.version_flag()])
+                .with_timeout(std::time::Duration::from_secs(10)),
+            CancellationToken::new(),
+        ).await?;
+        let new_version = ver_res.stdout.trim().to_string();
+
+        progress.at(98, "save-config", "Updating registry timestamp").await;
+        let mut updated = inst.clone();
+        updated.updated_at = Utc::now().to_rfc3339();
+        self.registry.update(updated.clone()).await?;
+
+        progress.at(100, "done",
+            format!("Upgraded native `{}` to {}", inst.name, new_version)).await;
+        Ok(UpgradeReport {
+            instance: updated,
+            previous_version,
+            new_version,
+            upgrade_elapsed_secs: upgrade_elapsed.as_secs(),
         })
     }
 }
@@ -1125,10 +1238,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn upgrade_native_instance_deferred() {
+    async fn upgrade_native_requires_node_on_host() {
+        // Native upgrade reaches preflight and bails because no node
+        // is set up under the test CLAWENV_HOME. Mirrors install_native_*.
+        let home = TempDir::new().unwrap();
+        let _g = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let prev = std::env::var("CLAWENV_HOME").ok();
+        unsafe { std::env::set_var("CLAWENV_HOME", home.path()); }
+
         let tmp = TempDir::new().unwrap();
         let o = orchestrator_with_tmp_registry(&tmp);
-        // Pre-seed a native openclaw instance.
         o.registry.insert(InstanceConfig {
             name: "nat".into(),
             claw: "openclaw".into(),
@@ -1143,10 +1262,15 @@ mod tests {
             UpgradeOpts::to_latest("nat"),
             ProgressSink::noop(),
         ).await.unwrap_err();
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("CLAWENV_HOME", v) },
+            None => unsafe { std::env::remove_var("CLAWENV_HOME") },
+        }
         match err {
             OpsError::Unsupported { what, reason } => {
                 assert_eq!(what, "upgrade");
-                assert!(reason.contains("native"), "{reason}");
+                assert!(reason.contains("node"), "{reason}");
             }
             other => panic!("expected Unsupported, got {other:?}"),
         }

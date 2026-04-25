@@ -465,10 +465,21 @@ pub struct UpgradeArgs {
     /// upstream default.
     #[arg(long, default_value = "latest")]
     pub to: String,
+    /// Don't actually upgrade — only probe the registry for what
+    /// the latest available version is. Returns a structured report
+    /// with current+latest+has_upgrade. v1's `update-check` behaviour.
+    #[arg(long)]
+    pub check: bool,
 }
 
 pub async fn run_upgrade(ctx: &Ctx, args: UpgradeArgs) -> anyhow::Result<()> {
     let name = args.name.unwrap_or_else(|| ctx.instance.clone());
+
+    // Check-only path: probe registry for latest, report, exit. No VM touch.
+    if args.check {
+        return run_upgrade_check(ctx, &name).await;
+    }
+
     let opts = UpgradeOpts { name: name.clone(), to_version: args.to };
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(32);
@@ -508,6 +519,57 @@ pub async fn run_upgrade(ctx: &Ctx, args: UpgradeArgs) -> anyhow::Result<()> {
         }
         println!("  instance: {}", report.instance.name);
     }
+    Ok(())
+}
+
+/// `clawcli upgrade <name> --check` — registry-probe-only flow.
+async fn run_upgrade_check(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
+    use clawops_core::claw_ops::{provisioning_for, PackageManager};
+    use clawops_core::update;
+
+    // Look up instance to get claw id + currently installed version (if VM up).
+    let cfg = resolve_instance(name).await?;
+    let provisioning = provisioning_for(&cfg.claw)
+        .ok_or_else(|| anyhow::anyhow!("unknown claw `{}` (registry mismatch?)", cfg.claw))?;
+
+    // Try to read current version: if backend is sandboxed and VM is up,
+    // exec `<bin> --version` inside; if not (or fails), report "(unknown)".
+    let current = if let Some(b) = backend_arc(&cfg) {
+        b.exec_argv(&["sh", "-c", &provisioning.version_check_cmd()])
+            .await
+            .ok()
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "(unknown)".into())
+    } else {
+        "(unknown)".into()
+    };
+
+    // Probe latest from the right registry per package manager.
+    let info = match provisioning.package_manager() {
+        PackageManager::Npm => {
+            update::check_latest_npm(&current, "", provisioning.cli_binary()).await?
+        }
+        PackageManager::Pip => {
+            update::check_latest_pypi(&current, provisioning.cli_binary()).await?
+        }
+        PackageManager::GitPip { repo, .. } => {
+            update::check_latest_github(&current, &repo).await?
+        }
+    };
+
+    ctx.emit_pretty(&info, |i| {
+        println!("Instance     : {}", name);
+        println!("Claw         : {}", cfg.claw);
+        println!("Current      : {}", i.current);
+        println!("Latest       : {}", i.latest);
+        println!("Has upgrade  : {}", if i.has_upgrade { "yes" } else { "no" });
+        if i.is_security_release {
+            println!("⚠ Security release");
+        }
+        if !i.changelog.is_empty() {
+            println!("\nChangelog (preview):\n{}", i.changelog.lines().take(5).collect::<Vec<_>>().join("\n"));
+        }
+    })?;
     Ok(())
 }
 

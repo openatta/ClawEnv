@@ -30,6 +30,7 @@ pub mod provisioning;
 pub mod config_loader;
 pub mod launcher;
 pub mod update;
+pub mod bridge;
 
 // Re-exports for convenience.
 pub use common::{

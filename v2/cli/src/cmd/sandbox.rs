@@ -30,6 +30,23 @@ pub enum SandboxCmd {
     },
     /// Show resource usage.
     Stats { #[arg(long, value_enum)] backend: Option<BackendSel> },
+    /// List ALL VMs/containers known to the host backend (whether
+    /// registered with v2 or not). Useful for discovering orphan VMs.
+    List { #[arg(long, value_enum)] backend: Option<BackendSel> },
+    /// Rename a sandbox VM. Backend-specific: Lima supports it via
+    /// limactl; WSL/Podman need recreate (deferred — bails clean).
+    Rename {
+        #[arg(long)] from: String,
+        #[arg(long)] to: String,
+        #[arg(long, value_enum)] backend: Option<BackendSel>,
+    },
+    /// Edit sandbox resource allocation (CPUs, memory). Lima only;
+    /// WSL/Podman bail.
+    Edit {
+        #[arg(long)] cpus: Option<u32>,
+        #[arg(long = "memory-mb")] memory_mb: Option<u32>,
+        #[arg(long, value_enum)] backend: Option<BackendSel>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,8 +182,89 @@ pub async fn run(cmd: SandboxCmd, ctx: &Ctx) -> anyhow::Result<()> {
             let s = ops.stats().await?;
             ctx.emit(&s)?;
         }
+        SandboxCmd::List { backend } => {
+            // Backend-host inventory: for Lima we shell out to `limactl list`;
+            // for Podman `podman ps -a`; for WSL `wsl -l -v`. Each emits a
+            // compact JSON-friendly Vec of {name,status} pairs.
+            use clawops_core::common::{CommandRunner, CommandSpec, CancellationToken};
+            use clawops_core::runners::LocalProcessRunner;
+            use std::time::Duration;
+            let sel = resolve(backend);
+            let runner = LocalProcessRunner::new();
+            let (cmd, args): (&str, Vec<&str>) = match sel {
+                BackendSel::Lima => ("limactl", vec!["list", "--format", "json"]),
+                BackendSel::Podman => ("podman", vec!["ps", "-a", "--format", "{{.Names}}\t{{.Status}}"]),
+                BackendSel::Wsl2 => ("wsl", vec!["-l", "-v"]),
+            };
+            let res = runner.exec(
+                CommandSpec::new(cmd, args).with_timeout(Duration::from_secs(5)),
+                CancellationToken::new(),
+            ).await?;
+            let stdout = res.stdout;
+            ctx.emit_pretty(&stdout, |raw| {
+                println!("{raw}");
+            })?;
+        }
+        SandboxCmd::Rename { from, to, backend } => {
+            let _ = (from, to, backend);
+            anyhow::bail!(
+                "sandbox rename: backend trait does not yet expose rename; \
+                 deferred to follow-up. For Lima, use `limactl rename` directly."
+            );
+        }
+        SandboxCmd::Edit { cpus, memory_mb, backend } => {
+            // Lima edit: rewrite `cpus:` / `memory:` keys in the lima.yaml.
+            // Other backends bail clean. Today we only support Lima.
+            let sel = resolve(backend);
+            if !matches!(sel, BackendSel::Lima) {
+                anyhow::bail!(
+                    "sandbox edit currently supports only Lima; for WSL/Podman \
+                     destroy + recreate with new resource flags."
+                );
+            }
+            let yaml_path = clawops_core::paths::lima_home()
+                .join(&ctx.instance).join("lima.yaml");
+            if !yaml_path.exists() {
+                anyhow::bail!("lima.yaml not found: {}", yaml_path.display());
+            }
+            let body = tokio::fs::read_to_string(&yaml_path).await?;
+            let body = if let Some(c) = cpus {
+                rewrite_yaml_scalar(&body, "cpus", &c.to_string())
+            } else { body };
+            let body = if let Some(m) = memory_mb {
+                rewrite_yaml_scalar(&body, "memory", &format!("\"{m}MiB\""))
+            } else { body };
+            tokio::fs::write(&yaml_path, body).await?;
+            ctx.emit_text(format!(
+                "Updated {}; restart the VM with `clawcli restart {}` to apply.",
+                yaml_path.display(), ctx.instance
+            ));
+        }
     }
     Ok(())
+}
+
+/// Rewrite a top-level `key: value` line in a YAML-ish file. If the
+/// key is missing, append it. v1 lima.yaml mutation pattern (its keys
+/// are flat top-level scalars for cpus/memory, so this works).
+fn rewrite_yaml_scalar(body: &str, key: &str, value: &str) -> String {
+    let mut out = String::with_capacity(body.len() + 32);
+    let mut replaced = false;
+    for line in body.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&format!("{key}:")) && !replaced {
+            out.push_str(&format!("{key}: {value}"));
+            out.push('\n');
+            replaced = true;
+        } else {
+            out.push_str(line);
+            out.push('\n');
+        }
+    }
+    if !replaced {
+        out.push_str(&format!("{key}: {value}\n"));
+    }
+    out
 }
 
 // Suppress unused import warning for BackendKind — kept in re-exports so
