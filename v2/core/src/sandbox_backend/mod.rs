@@ -86,6 +86,44 @@ pub trait SandboxBackend: Send + Sync {
         self.exec(&quoted).await
     }
 
+    /// Run a command with retry on transient SSH/networking errors that
+    /// commonly happen right after VM boot (Lima's SSH ControlMaster
+    /// hasn't warmed up yet, kex_exchange_identification reset, etc.).
+    ///
+    /// Backoff schedule: 0ms → 1s → 3s → 9s (4 attempts total). Mirrors
+    /// v1 `proxy_resolver::exec_with_retry`.
+    ///
+    /// Default impl wraps [`exec_argv`](Self::exec_argv); backends that
+    /// know their own transient error patterns can override.
+    async fn exec_argv_with_retry(&self, argv: &[&str]) -> anyhow::Result<String> {
+        let delays_ms: [u64; 4] = [0, 1_000, 3_000, 9_000];
+        let mut last_err: Option<anyhow::Error> = None;
+        for (i, &d) in delays_ms.iter().enumerate() {
+            if d > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(d)).await;
+                tracing::debug!(
+                    target: "clawenv::backend",
+                    "exec_argv_with_retry attempt {} after {}ms backoff", i + 1, d
+                );
+            }
+            match self.exec_argv(argv).await {
+                Ok(out) => return Ok(out),
+                Err(e) => {
+                    let msg = format!("{e}");
+                    if !is_transient_ssh_error(&msg) {
+                        return Err(e);
+                    }
+                    tracing::warn!(
+                        target: "clawenv::backend",
+                        "exec_argv_with_retry attempt {} transient: {msg}", i + 1
+                    );
+                    last_err = Some(e);
+                }
+            }
+        }
+        Err(last_err.unwrap_or_else(|| anyhow::anyhow!("exec_argv_with_retry: retries exhausted")))
+    }
+
     /// Current resource usage.
     async fn stats(&self) -> anyhow::Result<ResourceStats>;
 
@@ -97,6 +135,19 @@ pub trait SandboxBackend: Send + Sync {
     fn supports_rename(&self) -> bool { false }
     fn supports_resource_edit(&self) -> bool { false }
     fn supports_port_edit(&self) -> bool { false }
+}
+
+/// Returns true when an exec error string matches a known transient
+/// SSH/networking failure that's worth retrying. Mirrors v1
+/// `proxy_resolver::exec_with_retry`'s pattern set, learned from
+/// real Lima boot races (CHANGELOG v0.2.10).
+pub(crate) fn is_transient_ssh_error(msg: &str) -> bool {
+    msg.contains("exit 255")
+        || msg.contains("Connection reset")
+        || msg.contains("kex_exchange_identification")
+        || msg.contains("Connection refused")
+        || msg.contains("Broken pipe")
+        || msg.contains("ssh: connect")
 }
 
 /// POSIX shell single-quoting. Mirrors v1's `platform::shell_quote`. Safe
@@ -152,5 +203,36 @@ mod tests {
     #[test]
     fn shell_quote_empty_becomes_empty_string_literal() {
         assert_eq!(shell_quote(""), "''");
+    }
+
+    // ——— is_transient_ssh_error ———
+
+    #[test]
+    fn transient_matches_kex_reset() {
+        assert!(super::is_transient_ssh_error(
+            "exec failed (exit 255): kex_exchange_identification: read: Connection reset by peer"
+        ));
+    }
+
+    #[test]
+    fn transient_matches_broken_pipe() {
+        assert!(super::is_transient_ssh_error(
+            "mux_client_request_session: read from master failed: Broken pipe"
+        ));
+    }
+
+    #[test]
+    fn transient_matches_connection_refused() {
+        assert!(super::is_transient_ssh_error("ssh: connect: Connection refused"));
+    }
+
+    #[test]
+    fn transient_does_not_match_real_command_failures() {
+        // A genuine command exit-2 (e.g. file not found) should NOT
+        // be retried — that's a permanent, useful error.
+        assert!(!super::is_transient_ssh_error(
+            "command failed (exit 2): ls: /no/such/path: No such file"
+        ));
+        assert!(!super::is_transient_ssh_error("Permission denied"));
     }
 }

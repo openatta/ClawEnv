@@ -113,13 +113,25 @@ impl CreateOpts {
 /// Render the Lima template with placeholders filled in. Pure function
 /// — no I/O. Golden-tested.
 pub fn render_lima_yaml(opts: &CreateOpts) -> String {
+    // The {PROXY_SCRIPT} / {ALPINE_MIRROR_FALLBACK_LINES} placeholders
+    // sit inside a YAML `script: |` block scalar that's already
+    // 4-space indented. We add the SAME 4 spaces to every line of the
+    // substitution EXCEPT the first — the template line "    {…}"
+    // already provides the first line's indent.
+    // PROXY_SCRIPT placeholder is on a `    {PROXY_SCRIPT}` line —
+    // template gives the first-line indent, we add it to continuations.
     let proxy_script = render_proxy_script(opts);
-    let proxy_script_indented = indent_yaml_block(&proxy_script, "    ");
+    let proxy_script_indented = indent_continuation(&proxy_script, "    ");
 
+    // ALPINE_MIRROR_FALLBACK_LINES placeholder is at column 0 in the
+    // template — every line of our substitution (including the first)
+    // needs the 4-space prefix so the YAML block scalar boundary holds.
     let alpine_fallback = render_alpine_mirror_fallback(opts);
     let alpine_fallback_indented = indent_yaml_block(&alpine_fallback, "    ");
 
     LIMA_TEMPLATE
+        .replace("{CPU_CORES}", &opts.cpu_cores.to_string())
+        .replace("{MEMORY_MB}", &opts.memory_mb.to_string())
         .replace("{WORKSPACE_DIR}", &opts.workspace_dir.display().to_string())
         .replace("{GATEWAY_PORT}", &opts.gateway_port.to_string())
         .replace("{TTYD_PORT}", &opts.ttyd_port().to_string())
@@ -163,7 +175,8 @@ fn render_proxy_script(opts: &CreateOpts) -> String {
 
 /// Prepend `indent` to every non-empty line. Required for YAML block
 /// scalars — Lima's `provision.script:` is a `|`-scalar so every line
-/// needs the same indent as the anchor.
+/// needs the same indent as the anchor. Use this when the template's
+/// placeholder sits at column 0 (no template-provided first-line indent).
 fn indent_yaml_block(s: &str, indent: &str) -> String {
     s.lines()
         .map(|l| {
@@ -175,6 +188,29 @@ fn indent_yaml_block(s: &str, indent: &str) -> String {
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+/// Indent every line EXCEPT the first. Use when the substitution
+/// placeholder in the template already has its first-line indent
+/// (e.g. `    {PLACEHOLDER}` puts 4 spaces before the first char of
+/// our replacement). Continuation lines need the same indent so the
+/// YAML block scalar boundary holds.
+fn indent_continuation(s: &str, indent: &str) -> String {
+    let mut out = String::new();
+    let mut first = true;
+    for l in s.lines() {
+        if first {
+            out.push_str(l);
+            first = false;
+        } else {
+            out.push('\n');
+            if !l.is_empty() {
+                out.push_str(indent);
+            }
+            out.push_str(l);
+        }
+    }
+    out
 }
 
 /// The `try_install` fallback line for the upstream Alpine mirror.
@@ -371,12 +407,24 @@ mod tests {
     fn lima_yaml_has_no_remaining_placeholders() {
         let y = render_lima_yaml(&opts_with_proxy());
         for tag in [
+            "{CPU_CORES}", "{MEMORY_MB}",
             "{WORKSPACE_DIR}", "{GATEWAY_PORT}", "{TTYD_PORT}", "{BRIDGE_PORT}",
             "{CDP_PORT}", "{VNC_WS_PORT}", "{DASHBOARD_PORT}",
             "{PROXY_SCRIPT}", "{USER_ALPINE_MIRROR}", "{ALPINE_MIRROR_FALLBACK_LINES}",
         ] {
             assert!(!y.contains(tag), "unreplaced {tag} in:\n{y}");
         }
+    }
+
+    #[test]
+    fn lima_yaml_carries_resource_opts() {
+        let mut o = opts_plain();
+        o.cpu_cores = 4;
+        o.memory_mb = 8192;
+        let y = render_lima_yaml(&o);
+        // Lima 2.x accepts cpus as bare integer, memory as quoted string.
+        assert!(y.contains("cpus: 4"), "missing cpus: 4\n{y}");
+        assert!(y.contains(r#"memory: "8192MiB""#), "missing memory: \"8192MiB\"\n{y}");
     }
 
     #[test]
@@ -397,13 +445,48 @@ mod tests {
     #[test]
     fn lima_yaml_proxy_block_indented_four_spaces() {
         let y = render_lima_yaml(&opts_with_proxy());
-        // Every proxy export line should be indented by 4 spaces so it
-        // lives inside the `script: |` block scalar.
+        // Every proxy export line should be indented by EXACTLY 4 spaces
+        // so it lives inside the `script: |` block scalar without
+        // accumulating extra leading whitespace.
+        // Regression guard: the previous implementation double-indented
+        // the first line (template provided 4 + we added 4 = 8) — Lima
+        // tolerated it but cosmetic was off. Now indent_continuation
+        // skips the first line.
         for line in y.lines() {
             if line.contains("export http_proxy=") {
-                assert!(line.starts_with("    "), "unindented: {line:?}");
+                assert!(
+                    line.starts_with("    export http_proxy="),
+                    "expected exactly 4-space indent, got: {line:?}"
+                );
             }
         }
+    }
+
+    // ——— indent_continuation ———
+
+    #[test]
+    fn indent_continuation_skips_first_line() {
+        // First line keeps its original indent (template provides it);
+        // subsequent lines get the prefix added.
+        let s = "first\nsecond\nthird";
+        assert_eq!(indent_continuation(s, "    "), "first\n    second\n    third");
+    }
+
+    #[test]
+    fn indent_continuation_handles_empty_lines_in_body() {
+        let s = "first\n\nsecond";
+        assert_eq!(indent_continuation(s, "    "), "first\n\n    second");
+    }
+
+    #[test]
+    fn indent_continuation_single_line_passthrough() {
+        let s = "only";
+        assert_eq!(indent_continuation(s, "    "), "only");
+    }
+
+    #[test]
+    fn indent_continuation_empty_input_yields_empty() {
+        assert_eq!(indent_continuation("", "    "), "");
     }
 
     #[test]

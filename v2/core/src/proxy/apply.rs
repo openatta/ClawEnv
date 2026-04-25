@@ -128,7 +128,7 @@ async fn write_sandbox_file(
         "cat <<'{marker}' | sudo tee {path} >/dev/null && sudo chmod {mode} {path}\n{body}\n{marker}\n"
     );
     backend
-        .exec_argv(&["sh", "-c", &script])
+        .exec_argv_with_retry(&["sh", "-c", &script])
         .await
         .map_err(OpsError::Other)?;
     Ok(())

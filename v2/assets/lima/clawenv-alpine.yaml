@@ -4,6 +4,9 @@
 
 minimumLimaVersion: "2.0.0"
 
+cpus: {CPU_CORES}
+memory: "{MEMORY_MB}MiB"
+
 user:
   name: "clawenv"
 

@@ -79,13 +79,15 @@ pub async fn apply_mirrors(
     let repos_body = format_apk_repositories(mirrors.alpine_repo_url(), &alpine_version);
 
     // Write /etc/apk/repositories with `sudo tee`. Heredoc marker is
-    // inert — URL content can't smuggle shell metacharacters.
+    // inert — URL content can't smuggle shell metacharacters. Uses
+    // exec_argv_with_retry: this path runs right after VM boot when
+    // Lima's SSH ControlMaster is racy (v1 v0.2.10 lesson).
     let marker = "CLAWOPS_APK_EOF";
     let script = format!(
         "sudo tee /etc/apk/repositories >/dev/null << '{marker}'\n{repos_body}{marker}\n"
     );
     backend
-        .exec_argv(&["sh", "-c", &script])
+        .exec_argv_with_retry(&["sh", "-c", &script])
         .await
         .map_err(OpsError::Other)?;
 
@@ -93,7 +95,7 @@ pub async fn apply_mirrors(
     if npm != DEFAULT_NPM_REGISTRY {
         // Non-sudo — writes to the user's own ~/.npmrc.
         backend
-            .exec_argv(&["npm", "config", "set", "registry", npm])
+            .exec_argv_with_retry(&["npm", "config", "set", "registry", npm])
             .await
             .map_err(OpsError::Other)?;
     }

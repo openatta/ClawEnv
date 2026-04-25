@@ -420,8 +420,9 @@ impl InstanceOrchestrator {
         // ——— Stage 4: BootVerify ———
         progress.at(60, "boot-verify",
             "Checking VM is reachable via exec").await;
-        // Simple exec probe — `echo ok` must succeed.
-        let probe = backend.exec_argv(&["echo", "clawops-ok"]).await
+        // Right-after-boot exec probe — Lima SSH ControlMaster may be
+        // mid-warmup. Use the retry variant (v0.2.10 lesson).
+        let probe = backend.exec_argv_with_retry(&["echo", "clawops-ok"]).await
             .map_err(|e| OpsError::Other(anyhow::anyhow!("VM exec probe: {e}")))?;
         if !probe.contains("clawops-ok") {
             return Err(OpsError::Other(anyhow::anyhow!(
