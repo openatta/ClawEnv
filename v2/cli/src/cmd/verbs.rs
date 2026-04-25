@@ -397,43 +397,36 @@ pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
         dry_run: args.dry_run,
     };
 
-    // Wire a channel so we can stream progress to stdout as the pipeline runs.
+    // Wire a channel so progress streams to stdout as the pipeline runs.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(32);
     let sink = ProgressSink::new(tx);
-    let json = ctx.json;
 
-    // Spawn a drainer so the pipeline doesn't block on a full channel.
-    // In JSON mode we collect events; in pretty mode we print them live.
-    let printer = tokio::spawn(async move {
-        let mut events: Vec<ProgressEvent> = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            if !json {
-                let pct = ev.percent.map(|p| format!("{p:>3}%")).unwrap_or_else(|| " … ".into());
-                println!("[{pct}] {:<18} {}", ev.stage, ev.message);
+    // Drain progress LIVE — emit each event as it lands rather than
+    // buffering for a final blob. In JSON mode this becomes a
+    // line-delimited CliEvent::Progress stream the GUI reads in
+    // real time; in human mode it's the same `[pct%] stage msg` lines.
+    let printer = {
+        let output = ctx.output.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                emit_progress(&output, &ev);
             }
-            events.push(ev);
-        }
-        events
-    });
+        })
+    };
 
     let o = InstanceOrchestrator::new();
     let report = o.install(opts, sink).await?;
-    let events = printer.await.unwrap_or_default();
+    // Wait for the printer to drain — sink is dropped now, channel closes.
+    let _ = printer.await;
 
-    if json {
-        // ProgressEvent is currently non-Serialize; hand-shape it here.
-        let event_rows: Vec<serde_json::Value> = events.iter().map(|e| serde_json::json!({
-            "percent": e.percent,
-            "stage": e.stage,
-            "message": e.message,
-        })).collect();
-        let blob = serde_json::json!({
-            "instance": report.instance,
-            "version_output": report.version_output,
-            "install_elapsed_secs": report.install_elapsed_secs,
-            "events": event_rows,
-        });
-        println!("{}", serde_json::to_string_pretty(&blob)?);
+    // Final result as a Data event in JSON mode; pretty summary otherwise.
+    let summary = serde_json::json!({
+        "instance": report.instance,
+        "version_output": report.version_output,
+        "install_elapsed_secs": report.install_elapsed_secs,
+    });
+    if ctx.json {
+        ctx.output.emit(crate::output::CliEvent::Data { data: summary });
     } else {
         println!();
         println!("✓ Installed {} @ {} ({}s)",
@@ -445,6 +438,21 @@ pub async fn run_install(ctx: &Ctx, args: InstallArgs) -> anyhow::Result<()> {
         println!("  backend : {}", report.instance.backend.as_str());
     }
     Ok(())
+}
+
+/// Emit a single progress tick — JSON `Progress` event in machine mode,
+/// `[pct%] stage msg` line in human mode. Shared by install and upgrade.
+fn emit_progress(output: &crate::output::Output, ev: &ProgressEvent) {
+    if output.json() {
+        output.emit(crate::output::CliEvent::Progress {
+            stage: ev.stage.clone(),
+            percent: ev.percent.unwrap_or(0),
+            message: ev.message.clone(),
+        });
+    } else {
+        let pct = ev.percent.map(|p| format!("{p:>3}%")).unwrap_or_else(|| " … ".into());
+        println!("[{pct}] {:<18} {}", ev.stage, ev.message);
+    }
 }
 
 // ——— upgrade ———
@@ -465,36 +473,29 @@ pub async fn run_upgrade(ctx: &Ctx, args: UpgradeArgs) -> anyhow::Result<()> {
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<ProgressEvent>(32);
     let sink = ProgressSink::new(tx);
-    let json = ctx.json;
 
-    let printer = tokio::spawn(async move {
-        let mut events: Vec<ProgressEvent> = Vec::new();
-        while let Some(ev) = rx.recv().await {
-            if !json {
-                let pct = ev.percent.map(|p| format!("{p:>3}%"))
-                    .unwrap_or_else(|| " … ".into());
-                println!("[{pct}] {:<18} {}", ev.stage, ev.message);
+    // Stream progress live via the same emit_progress helper as install.
+    let printer = {
+        let output = ctx.output.clone();
+        tokio::spawn(async move {
+            while let Some(ev) = rx.recv().await {
+                emit_progress(&output, &ev);
             }
-            events.push(ev);
-        }
-        events
-    });
+        })
+    };
 
     let o = InstanceOrchestrator::new();
     let report = o.upgrade(opts, sink).await?;
-    let events = printer.await.unwrap_or_default();
+    let _ = printer.await;
 
-    if json {
-        let event_rows: Vec<serde_json::Value> = events.iter().map(|e| serde_json::json!({
-            "percent": e.percent, "stage": e.stage, "message": e.message,
-        })).collect();
-        println!("{}", serde_json::to_string_pretty(&serde_json::json!({
-            "instance": report.instance,
-            "previous_version": report.previous_version,
-            "new_version": report.new_version,
-            "upgrade_elapsed_secs": report.upgrade_elapsed_secs,
-            "events": event_rows,
-        }))?);
+    let summary = serde_json::json!({
+        "instance": report.instance,
+        "previous_version": report.previous_version,
+        "new_version": report.new_version,
+        "upgrade_elapsed_secs": report.upgrade_elapsed_secs,
+    });
+    if ctx.json {
+        ctx.output.emit(crate::output::CliEvent::Data { data: summary });
     } else {
         println!();
         println!("✓ Upgraded {} ({}s)",
@@ -649,7 +650,10 @@ mod tests {
 
     #[test]
     fn resolve_name_prefers_positional() {
-        let ctx = Ctx { json: false, quiet: false, instance: "fallback".into() };
+        let ctx = Ctx {
+            json: false, quiet: false, instance: "fallback".into(),
+            output: crate::output::Output::new(false),
+        };
         assert_eq!(resolve_name(Some("mine".into()), &ctx), "mine");
         assert_eq!(resolve_name(None, &ctx), "fallback");
     }

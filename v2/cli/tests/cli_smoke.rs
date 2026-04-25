@@ -3,9 +3,36 @@
 //! Verifies --help across all subcommands and core read-only commands
 //! (claw list, download list, native status, native doctor, download doctor).
 //! Does NOT exercise start/stop/fetch which require real network/VMs.
+//!
+//! `--json` mode emits **line-delimited CliEvents** (the GUI wire protocol):
+//! one Data event with the result, plus a terminal Complete event.
+//! The `parse_cli_events` / `data_payload` helpers below extract the
+//! Data payload so each test asserts on it directly.
 
 use assert_cmd::Command;
 use predicates::prelude::*;
+
+/// Parse stdout into one JSON value per line. Lines that don't decode
+/// as JSON are dropped (tracing logs go to stderr in v2, so this
+/// shouldn't drop anything; defensive).
+fn parse_cli_events(s: &str) -> Vec<serde_json::Value> {
+    s.lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .collect()
+}
+
+/// Pull the payload out of the LAST Data event (verbs that emit
+/// multiple Datas should be rare; the last one represents final state).
+/// Returns an owned Value so callers can call without juggling
+/// the intermediate Vec's lifetime.
+fn data_payload(s: &str) -> serde_json::Value {
+    parse_cli_events(s)
+        .into_iter()
+        .rev()
+        .find(|e| e.get("type").and_then(|t| t.as_str()) == Some("data"))
+        .and_then(|mut e| e.get_mut("data").map(std::mem::take))
+        .expect("expected at least one CliEvent::Data in stdout")
+}
 
 #[test]
 fn help_prints_namespace_and_verb_commands() {
@@ -51,7 +78,7 @@ fn claw_list_json_is_valid_json() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).expect("json output");
+    let v = data_payload(&s);
     assert!(v.is_array());
 }
 
@@ -62,7 +89,7 @@ fn claw_update_preview_includes_json_flag_when_requested() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     let args = v["args"].as_array().unwrap();
     let has_json = args.iter().any(|x| x == "--json");
     let has_yes = args.iter().any(|x| x == "--yes");
@@ -84,7 +111,7 @@ fn download_list_shows_catalog_entries() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert!(v.is_array());
     let arr = v.as_array().unwrap();
     assert!(!arr.is_empty(), "catalog should have at least the built-in entries");
@@ -97,7 +124,7 @@ fn download_list_filtered_by_os() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     for item in v.as_array().unwrap() {
         assert_eq!(item["os"], "macos");
     }
@@ -137,7 +164,7 @@ fn native_components_returns_array() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert!(v.is_array());
     let arr = v.as_array().unwrap();
     let names: Vec<&str> = arr.iter().map(|x| x["name"].as_str().unwrap()).collect();
@@ -171,7 +198,7 @@ fn instance_list_empty_on_fresh_home() {
             .assert()
             .success();
         let s = String::from_utf8_lossy(&out.get_output().stdout);
-        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        let v = data_payload(&s);
         assert!(v.is_array());
         assert!(v.as_array().unwrap().is_empty());
     });
@@ -241,7 +268,7 @@ fn claw_status_preview_still_works_without_execute() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     // Non-execute mode emits CommandPreview shape (has `args`, no `exit_code`).
     assert!(v["args"].is_array());
     assert!(v.get("exit_code").is_none());
@@ -257,9 +284,8 @@ fn claw_version_execute_emits_execution_report_shape() {
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&out.stdout);
-    // Should emit an ExecutionReport-shaped object (claw + runner + exit_code).
-    let v: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|e| panic!("expected JSON, got:\n{stdout}\nerr: {e}"));
+    // Wire protocol: ExecutionReport comes through as the Data event payload.
+    let v = data_payload(&stdout);
     assert_eq!(v["claw"], "hermes");
     assert!(v["runner"].is_string());
     assert!(v["exit_code"].is_number());
@@ -273,7 +299,7 @@ fn download_list_includes_stage_b_artifacts() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     let names: std::collections::HashSet<&str> = v.as_array().unwrap()
         .iter()
         .map(|x| x["name"].as_str().unwrap())
@@ -310,7 +336,7 @@ fn verb_list_json_is_empty_array_on_fresh_home() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert!(v.is_array());
     assert!(v.as_array().unwrap().is_empty());
 }
@@ -324,7 +350,7 @@ fn verb_status_unregistered_instance_synthesises_view() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert_eq!(v["name"], "ghost");
     assert_eq!(v["registered"], false);
     assert!(v["backend"].is_string());
@@ -339,7 +365,7 @@ fn verb_doctor_runs_cross_layer_aggregate() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     // All three sub-reports must be present.
     assert!(v["native"].is_object(), "missing native in doctor json: {s}");
     assert!(v["download"].is_object(), "missing download in doctor json: {s}");
@@ -364,7 +390,7 @@ fn verb_status_uses_global_instance_flag() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert_eq!(v["name"], "myvm");
 }
 
@@ -431,6 +457,6 @@ fn verb_status_positional_beats_global_flag() {
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
-    let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+    let v = data_payload(&s);
     assert_eq!(v["name"], "from-positional");
 }

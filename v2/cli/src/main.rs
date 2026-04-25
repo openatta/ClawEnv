@@ -117,6 +117,7 @@ pub enum Command {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "warn,clawops_cli=info,clawops_core=info".into())
@@ -124,31 +125,54 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse();
+    let output = output::Output::new(cli.json);
     let ctx = shared::Ctx {
         json: cli.json,
         quiet: cli.quiet,
         instance: cli.instance.clone().unwrap_or_else(|| "default".into()),
+        output: output.clone(),
     };
 
-    match cli.command {
+    let result = run_command(cli.command, &ctx).await;
+
+    // Wire-protocol envelope: in --json mode, every run terminates with
+    // either a `complete` or an `error` event so the GUI's cli_bridge
+    // knows the conversation is over (and what its outcome was).
+    if cli.json {
+        match &result {
+            Ok(()) => output.emit(output::CliEvent::Complete {
+                message: "ok".into(),
+            }),
+            Err(e) => output.emit(output::CliEvent::Error {
+                message: format!("{e:#}"),
+                code: None,
+            }),
+        }
+    }
+    // Whatever the JSON envelope did, std exit code still reflects success.
+    result
+}
+
+async fn run_command(command: Command, ctx: &shared::Ctx) -> anyhow::Result<()> {
+    match command {
         // Verb layer
-        Command::Install(args)      => cmd::verbs::run_install(&ctx, args).await,
-        Command::Upgrade(args)      => cmd::verbs::run_upgrade(&ctx, args).await,
-        Command::List               => cmd::verbs::run_list(&ctx).await,
-        Command::Status { name }    => cmd::verbs::run_status(&ctx, name).await,
-        Command::Start  { name }    => cmd::verbs::run_start(&ctx, name).await,
-        Command::Stop   { name }    => cmd::verbs::run_stop(&ctx, name).await,
-        Command::Restart{ name }    => cmd::verbs::run_restart(&ctx, name).await,
-        Command::Exec   { name, cmd } => cmd::verbs::run_exec(&ctx, name, cmd).await,
-        Command::Shell  { name }    => cmd::verbs::run_shell(&ctx, name).await,
-        Command::Doctor { name }    => cmd::verbs::run_doctor(&ctx, name).await,
-        Command::NetCheck { mode, name } => cmd::verbs::run_net_check(&ctx, mode, name).await,
+        Command::Install(args)      => cmd::verbs::run_install(ctx, args).await,
+        Command::Upgrade(args)      => cmd::verbs::run_upgrade(ctx, args).await,
+        Command::List               => cmd::verbs::run_list(ctx).await,
+        Command::Status { name }    => cmd::verbs::run_status(ctx, name).await,
+        Command::Start  { name }    => cmd::verbs::run_start(ctx, name).await,
+        Command::Stop   { name }    => cmd::verbs::run_stop(ctx, name).await,
+        Command::Restart{ name }    => cmd::verbs::run_restart(ctx, name).await,
+        Command::Exec   { name, cmd } => cmd::verbs::run_exec(ctx, name, cmd).await,
+        Command::Shell  { name }    => cmd::verbs::run_shell(ctx, name).await,
+        Command::Doctor { name }    => cmd::verbs::run_doctor(ctx, name).await,
+        Command::NetCheck { mode, name } => cmd::verbs::run_net_check(ctx, mode, name).await,
         // Noun layer
-        Command::Claw { sub }       => cmd::claw::run(sub, &ctx).await,
-        Command::Sandbox { sub }    => cmd::sandbox::run(sub, &ctx).await,
-        Command::Native { sub }     => cmd::native::run(sub, &ctx).await,
-        Command::Download { sub }   => cmd::download::run(sub, &ctx).await,
-        Command::Instance { sub }   => cmd::instance::run(sub, &ctx).await,
-        Command::Proxy { sub }      => cmd::proxy::run(sub, &ctx).await,
+        Command::Claw { sub }       => cmd::claw::run(sub, ctx).await,
+        Command::Sandbox { sub }    => cmd::sandbox::run(sub, ctx).await,
+        Command::Native { sub }     => cmd::native::run(sub, ctx).await,
+        Command::Download { sub }   => cmd::download::run(sub, ctx).await,
+        Command::Instance { sub }   => cmd::instance::run(sub, ctx).await,
+        Command::Proxy { sub }      => cmd::proxy::run(sub, ctx).await,
     }
 }

@@ -21,11 +21,8 @@
 //! G-migration plan (v2/docs/G-migration.md): every verb that the GUI
 //! cares about should adopt this protocol so cli_bridge stays unchanged.
 //!
-//! G0 lands the protocol primitive (this file). G1 wires the verbs to
-//! emit through it. Until then the items here are unused — that's
-//! expected and `#[allow(dead_code)]` documents the intent.
-
-#![allow(dead_code)]
+//! G0 lands the protocol primitive. G1-a (this commit) wires Ctx + main
+//! to emit through it.
 
 use serde::Serialize;
 
