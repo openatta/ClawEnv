@@ -74,6 +74,15 @@ fn cli_binary_path() -> String {
     #[cfg(not(target_os = "windows"))]
     let cli_name = "clawcli";
 
+    // 0. Explicit override — used during the v2 GUI migration so
+    // developers can point the GUI at v2's debug binary without
+    // touching install layout. See v2/docs/G-migration.md (G1-a).
+    if let Ok(p) = std::env::var("CLAWCLI_BIN") {
+        if !p.is_empty() {
+            return p;
+        }
+    }
+
     if let Ok(exe) = std::env::current_exe() {
         let dir = exe.parent().unwrap_or(std::path::Path::new("."));
 

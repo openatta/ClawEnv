@@ -10,6 +10,7 @@
 //!   layer, for scripts and power users.
 
 mod cmd;
+mod output;
 mod shared;
 
 use clap::{Parser, Subcommand};
