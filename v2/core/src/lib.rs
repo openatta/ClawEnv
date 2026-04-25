@@ -28,6 +28,8 @@ pub mod credentials;
 pub mod proxy;
 pub mod provisioning;
 pub mod config_loader;
+pub mod launcher;
+pub mod update;
 
 // Re-exports for convenience.
 pub use common::{

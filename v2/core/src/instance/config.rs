@@ -42,7 +42,7 @@ impl SandboxKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PortBinding {
     pub host: u16,
     pub guest: u16,
@@ -50,7 +50,7 @@ pub struct PortBinding {
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceConfig {
     /// Unique name (typed by user, e.g. "default").
     pub name: String,
