@@ -480,6 +480,25 @@ impl InstanceOrchestrator {
                 "post-install version probe failed: {e}"
             )))?;
 
+        // ——— Stage 7.5: ConfigInit (one-shot post-install seed) ———
+        if let Some(init_cmd) = provisioning.config_init_cmd() {
+            progress.at(94, "config-init",
+                format!("Seeding {} config", provisioning.cli_binary())).await;
+            let full = format!("{} {}", provisioning.cli_binary(), init_cmd);
+            // Best-effort: tolerate "already configured" exit codes.
+            let _ = backend.exec_argv(&["sh", "-c", &full]).await;
+        }
+
+        // ——— Stage 7.6: DashboardPreBuild (Hermes-only no-op for others) ———
+        crate::provisioning::dashboard::pre_build_dashboard(
+            &backend, &*provisioning, &progress
+        ).await?;
+
+        // ——— Stage 7.7: MCP plugin deploy (no-op for non-MCP claws) ———
+        crate::provisioning::mcp::deploy_plugins(
+            &backend, &*provisioning, &progress
+        ).await?;
+
         // ——— Stage 8: SaveConfig ———
         progress.at(97, "save-config", "Persisting instance registry").await;
         let inst = InstanceConfig {
@@ -771,6 +790,105 @@ impl InstanceOrchestrator {
         })
     }
 
+    // ---- launch (P1-j) ----
+
+    /// Start an instance's gateway (and dashboard if it has one)
+    /// process. Sandboxed instances spawn via `nohup ... &` inside
+    /// the VM; native instances spawn detached on the host with
+    /// stdout/stderr redirected to log files under `<root>/native/`.
+    /// Idempotent-ish: a second launch starts another nohup process.
+    /// Callers should `clawcli stop` first if they need a clean restart.
+    ///
+    /// Probes the gateway port (or dashboard port if dashboard exists)
+    /// for readiness, up to 30s. Returns when port responds or after
+    /// timeout (with a warning, not a hard failure — slow boots happen).
+    pub async fn launch(&self, name: &str) -> Result<LaunchReport, OpsError> {
+        let inst = self.registry.find(name).await?
+            .ok_or_else(|| OpsError::not_found(format!("instance `{name}`")))?;
+        let provisioning = provisioning_for(&inst.claw)
+            .ok_or_else(|| OpsError::not_found(
+                format!("claw `{}` (from registry)", inst.claw)
+            ))?;
+
+        let gateway_port = inst.ports.iter()
+            .find(|p| p.label == "gateway")
+            .map(|p| p.host)
+            .unwrap_or_else(|| provisioning.default_port());
+
+        // Determine where to spawn. Sandboxed → exec nohup inside VM.
+        // Native → host-side detached spawn.
+        let mut started: Vec<&'static str> = Vec::new();
+
+        if let Some(gw_cmd) = provisioning.gateway_start_cmd(gateway_port) {
+            match inst.backend {
+                SandboxKind::Native => {
+                    spawn_native_daemon(&inst, provisioning.cli_binary(), &gw_cmd, "gateway")
+                        .await?;
+                }
+                _ => {
+                    let backend = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance)
+                        .expect("non-native backend yields SandboxBackend");
+                    backend.start().await
+                        .map_err(|e| OpsError::Other(anyhow::anyhow!("VM start: {e}")))?;
+                    let nohup = format!(
+                        "nohup {gw_cmd} > /tmp/clawenv-gateway.log 2>&1 &"
+                    );
+                    backend.exec_argv(&["sh", "-c", &nohup]).await
+                        .map_err(OpsError::Other)?;
+                }
+            }
+            started.push("gateway");
+        }
+
+        // Dashboard process — Hermes only today.
+        let dashboard_port = gateway_port + provisioning.dashboard_port_offset();
+        if let Some(dash_cmd) = provisioning.dashboard_start_cmd(dashboard_port) {
+            match inst.backend {
+                SandboxKind::Native => {
+                    spawn_native_daemon(&inst, provisioning.cli_binary(), &dash_cmd, "dashboard")
+                        .await?;
+                }
+                _ => {
+                    let backend = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance)
+                        .expect("non-native backend yields SandboxBackend");
+                    let nohup = format!(
+                        "nohup {dash_cmd} > /tmp/clawenv-dashboard.log 2>&1 &"
+                    );
+                    backend.exec_argv(&["sh", "-c", &nohup]).await
+                        .map_err(OpsError::Other)?;
+                }
+            }
+            started.push("dashboard");
+        }
+
+        if started.is_empty() {
+            // Claws like Hermes-without-dashboard expect interactive use;
+            // not an error, just nothing to spawn.
+            return Ok(LaunchReport {
+                instance_name: inst.name,
+                started_processes: started.iter().map(|s| s.to_string()).collect(),
+                gateway_ready: false,
+                ready_port: None,
+            });
+        }
+
+        // Probe the user-facing port (dashboard if present, else gateway).
+        // 30s budget, 1s tick.
+        let probe_port = if provisioning.has_dashboard() {
+            dashboard_port
+        } else {
+            gateway_port
+        };
+        let gateway_ready = probe_tcp_ready(probe_port, std::time::Duration::from_secs(30)).await;
+
+        Ok(LaunchReport {
+            instance_name: inst.name,
+            started_processes: started.iter().map(|s| s.to_string()).collect(),
+            gateway_ready,
+            ready_port: if gateway_ready { Some(probe_port) } else { None },
+        })
+    }
+
     // ---- upgrade_native (P1-l) ----
 
     /// Native-mode upgrade: re-runs `npm install -g --prefix <inst_dir>
@@ -942,6 +1060,73 @@ pub struct InstallReport {
     pub install_elapsed_secs: u64,
 }
 
+// ——— Launch helpers (P1-j) ———
+
+/// Spawn a native-mode daemon detached. stdout/stderr go to a log
+/// file under `<clawenv_root>/native/<instance>/<role>.log`. Drops
+/// the Child handle so the daemon outlives our process.
+async fn spawn_native_daemon(
+    inst: &InstanceConfig,
+    bin_name: &str,
+    full_cmd: &str,
+    role: &'static str,
+) -> Result<(), OpsError> {
+    use std::process::Stdio;
+    // Find the binary under <root>/native/<inst>/bin/.
+    let prefix = clawenv_root().join("native").join(&inst.name);
+    let bin_dir = prefix.join("bin");
+    let bin_path = {
+        #[cfg(target_os = "windows")]
+        { bin_dir.join(format!("{bin_name}.cmd")) }
+        #[cfg(not(target_os = "windows"))]
+        { bin_dir.join(bin_name) }
+    };
+    let log_dir = clawenv_root().join("native").join(&inst.name).join("logs");
+    tokio::fs::create_dir_all(&log_dir).await
+        .map_err(|e| anyhow::anyhow!("create native log dir: {e}"))?;
+    let log_path = log_dir.join(format!("{role}.log"));
+    let log = std::fs::File::create(&log_path)
+        .map_err(|e| anyhow::anyhow!("create log {}: {e}", log_path.display()))?;
+    let log_clone = log.try_clone()
+        .map_err(|e| anyhow::anyhow!("dup log fd: {e}"))?;
+
+    // Parse `<bin> arg1 arg2 ...`. The `bin` token in full_cmd is the
+    // claw binary name (e.g. "openclaw"); we replace with our private
+    // path so PATH lookup isn't required.
+    let parts: Vec<&str> = full_cmd.split_whitespace().collect();
+    let args: Vec<&str> = if parts.len() > 1 { parts[1..].to_vec() } else { vec![] };
+
+    let mut cmd = std::process::Command::new(&bin_path);
+    cmd.args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_clone));
+
+    // Detach: drop the Child after spawn so the OS becomes its parent.
+    let child = cmd.spawn()
+        .map_err(|e| anyhow::anyhow!("spawn {} {}: {e}", bin_path.display(), role))?;
+    drop(child);
+    Ok(())
+}
+
+/// Poll `127.0.0.1:<port>` until it accepts a TCP connection or the
+/// budget runs out. 1s tick. Returns true on success.
+async fn probe_tcp_ready(port: u16, budget: std::time::Duration) -> bool {
+    use tokio::net::TcpStream;
+    let deadline = std::time::Instant::now() + budget;
+    while std::time::Instant::now() < deadline {
+        let connect = tokio::time::timeout(
+            std::time::Duration::from_millis(800),
+            TcpStream::connect(("127.0.0.1", port)),
+        ).await;
+        if let Ok(Ok(_)) = connect {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+    false
+}
+
 // ——— Dry-run preview rendering ———
 
 /// Compose a summary of what install() would execute. Called only in
@@ -1038,6 +1223,21 @@ pub struct UpgradeReport {
     pub previous_version: Option<String>,
     pub new_version: String,
     pub upgrade_elapsed_secs: u64,
+}
+
+// ——— Launch report (P1-j) ———
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LaunchReport {
+    pub instance_name: String,
+    /// Names of processes spawned: typically `["gateway"]` or
+    /// `["gateway", "dashboard"]` (or empty for interactive-only claws).
+    pub started_processes: Vec<String>,
+    /// True if the user-facing port (dashboard for claws that have
+    /// one, else gateway) accepted a TCP connection within 30s.
+    pub gateway_ready: bool,
+    /// The port we probed. None when nothing was started.
+    pub ready_port: Option<u16>,
 }
 
 #[cfg(test)]

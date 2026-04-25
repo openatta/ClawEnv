@@ -45,6 +45,9 @@ pub enum Command {
     /// Upgrade an existing instance's claw to a new version. Reuses
     /// the existing VM — does NOT re-provision or touch proxy/mirrors.
     Upgrade(cmd::verbs::UpgradeArgs),
+    /// Start an instance's gateway (and dashboard if it has one)
+    /// daemon process. Probes port readiness for up to 30s.
+    Launch { name: Option<String> },
     /// List all registered instances.
     List,
     /// Show aggregate status for an instance (VM state + claw + ports).
@@ -158,6 +161,7 @@ async fn run_command(command: Command, ctx: &shared::Ctx) -> anyhow::Result<()> 
         // Verb layer
         Command::Install(args)      => cmd::verbs::run_install(ctx, args).await,
         Command::Upgrade(args)      => cmd::verbs::run_upgrade(ctx, args).await,
+        Command::Launch { name }    => cmd::verbs::run_launch(ctx, name).await,
         Command::List               => cmd::verbs::run_list(ctx).await,
         Command::Status { name }    => cmd::verbs::run_status(ctx, name).await,
         Command::Start  { name }    => cmd::verbs::run_start(ctx, name).await,

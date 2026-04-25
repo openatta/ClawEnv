@@ -573,6 +573,26 @@ async fn run_upgrade_check(ctx: &Ctx, name: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+// ——— launch (start gateway daemon + dashboard) ———
+
+pub async fn run_launch(ctx: &Ctx, name: Option<String>) -> anyhow::Result<()> {
+    let n = resolve_name(name, ctx);
+    let o = InstanceOrchestrator::new();
+    let report = o.launch(&n).await?;
+    ctx.emit_pretty(&report, |r| {
+        if r.started_processes.is_empty() {
+            println!("✓ Instance `{}` ready (no auto-start daemons for this claw — interactive only).", r.instance_name);
+            return;
+        }
+        println!("✓ Started {} on instance `{}`", r.started_processes.join(" + "), r.instance_name);
+        match r.ready_port {
+            Some(p) => println!("  Listening on http://127.0.0.1:{p}"),
+            None => println!("  ⚠ Port did not respond within 30s — check logs"),
+        }
+    })?;
+    Ok(())
+}
+
 // ——— net-check (host or sandbox preflight) ———
 
 /// Which side of the sandbox boundary to probe from.
