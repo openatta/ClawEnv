@@ -185,6 +185,66 @@ impl SandboxBackend for LimaBackend {
         Ok(())
     }
 
+    async fn export_image(&self, dest: &std::path::Path) -> anyhow::Result<()> {
+        if !self.is_present().await.unwrap_or(false) {
+            anyhow::bail!("instance `{}` not present; nothing to export", self.instance);
+        }
+        // Stop the VM first — exporting a running VM's qcow2 risks
+        // a torn snapshot. limactl will refuse if running anyway.
+        let _ = self.stop().await;
+
+        let inst_dir = self.instance_dir();
+        if !inst_dir.exists() {
+            anyhow::bail!("Lima instance dir missing: {}", inst_dir.display());
+        }
+        // tar czf <dest> -C <inst_dir> .
+        let dest_str = dest.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 dest: {}", dest.display()))?;
+        let inst_str = inst_dir.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 inst dir: {}", inst_dir.display()))?;
+        let spec = CommandSpec::new("tar", ["czf", dest_str, "-C", inst_str, "."])
+            .with_timeout(Duration::from_secs(20 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!(
+                "tar czf failed (exit {}): {}",
+                res.exit_code,
+                tail_n(&res.stderr, 20)
+            );
+        }
+        Ok(())
+    }
+
+    async fn import_image(&self, src: &std::path::Path) -> anyhow::Result<()> {
+        // Refuse to overwrite a present instance — caller should destroy first.
+        if self.is_present().await.unwrap_or(false) {
+            anyhow::bail!(
+                "instance `{}` already present; destroy it before importing",
+                self.instance
+            );
+        }
+        let inst_dir = self.instance_dir();
+        tokio::fs::create_dir_all(&inst_dir).await
+            .map_err(|e| anyhow::anyhow!("create {}: {e}", inst_dir.display()))?;
+        let src_str = src.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 src: {}", src.display()))?;
+        let inst_str = inst_dir.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 inst dir: {}", inst_dir.display()))?;
+        let spec = CommandSpec::new("tar", ["xzf", src_str, "-C", inst_str])
+            .with_timeout(Duration::from_secs(20 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            // Roll back partial extract on failure.
+            let _ = tokio::fs::remove_dir_all(&inst_dir).await;
+            anyhow::bail!(
+                "tar xzf failed (exit {}): {}",
+                res.exit_code,
+                tail_n(&res.stderr, 20)
+            );
+        }
+        Ok(())
+    }
+
     async fn destroy(&self) -> anyhow::Result<()> {
         // No-op when the instance isn't present at all — idempotent.
         if !self.is_present().await.unwrap_or(false) {

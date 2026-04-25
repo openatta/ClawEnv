@@ -200,6 +200,37 @@ impl SandboxBackend for PodmanBackend {
         Ok(())
     }
 
+    async fn export_image(&self, dest: &std::path::Path) -> anyhow::Result<()> {
+        if !self.is_present().await.unwrap_or(false) {
+            anyhow::bail!("container `{}` not present; nothing to export", self.instance);
+        }
+        let image = format!("clawenv/{}:latest", self.instance);
+        let dest_str = dest.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 dest: {}", dest.display()))?;
+        let spec = CommandSpec::new("podman", ["save", "-o", dest_str, image.as_str()])
+            .with_timeout(Duration::from_secs(20 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!("podman save failed (exit {}): {}", res.exit_code, res.stderr);
+        }
+        Ok(())
+    }
+
+    async fn import_image(&self, src: &std::path::Path) -> anyhow::Result<()> {
+        // podman load reads the OCI tarball and registers the image
+        // under whatever tag it was saved with. The destination
+        // instance name is set by the subsequent `create()`.
+        let src_str = src.to_str()
+            .ok_or_else(|| anyhow::anyhow!("non-UTF8 src: {}", src.display()))?;
+        let spec = CommandSpec::new("podman", ["load", "-i", src_str])
+            .with_timeout(Duration::from_secs(20 * 60));
+        let res = self.runner.exec(spec, CancellationToken::new()).await?;
+        if !res.success() {
+            anyhow::bail!("podman load failed (exit {}): {}", res.exit_code, res.stderr);
+        }
+        Ok(())
+    }
+
     async fn destroy(&self) -> anyhow::Result<()> {
         if !self.is_present().await.unwrap_or(false) {
             return Ok(());

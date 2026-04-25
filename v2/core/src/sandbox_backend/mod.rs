@@ -74,6 +74,30 @@ pub trait SandboxBackend: Send + Sync {
     /// Must be idempotent — destroying a missing instance is a no-op.
     async fn destroy(&self) -> anyhow::Result<()>;
 
+    /// Export the VM/container as a single archive at `dest`. Format
+    /// is backend-specific:
+    /// - Lima: tar.gz of `~/.lima/<inst>/`
+    /// - WSL: `wsl --export <distro> <file>` (native rootfs tar)
+    /// - Podman: `podman save <image>` (OCI image tarball)
+    ///
+    /// Caller is expected to know which backend they're consuming
+    /// the archive for. Bundle metadata (manifest.toml) is a v1-era
+    /// nicety we don't carry forward — the destination format is
+    /// just the raw image.
+    async fn export_image(&self, dest: &std::path::Path) -> anyhow::Result<()> {
+        let _ = dest;
+        anyhow::bail!("export_image not implemented for backend `{}`", self.name())
+    }
+
+    /// Import a previously exported image. The archive at `src` must
+    /// match this backend's export format; mismatches surface as the
+    /// underlying tool's parse error. After import, the instance is
+    /// in the same "defined but stopped" state as a fresh `create()`.
+    async fn import_image(&self, src: &std::path::Path) -> anyhow::Result<()> {
+        let _ = src;
+        anyhow::bail!("import_image not implemented for backend `{}`", self.name())
+    }
+
     /// Start the VM (idempotent — noop if already running).
     async fn start(&self) -> anyhow::Result<()>;
 

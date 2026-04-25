@@ -31,6 +31,7 @@ pub mod config_loader;
 pub mod launcher;
 pub mod update;
 pub mod bridge;
+pub mod browser;
 
 // Re-exports for convenience.
 pub use common::{

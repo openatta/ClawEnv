@@ -299,6 +299,58 @@ impl SandboxBackend for WslBackend {
         }
     }
 
+    async fn export_image(&self, dest: &std::path::Path) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        { let _ = dest; anyhow::bail!("WSL export requires Windows"); }
+
+        #[cfg(target_os = "windows")]
+        {
+            if !self.is_present().await.unwrap_or(false) {
+                anyhow::bail!("WSL distro `{}` not registered; nothing to export", self.instance);
+            }
+            let dest_str = dest.to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 dest: {}", dest.display()))?;
+            let spec = CommandSpec::new("wsl", ["--export", &self.instance, dest_str])
+                .with_timeout(Duration::from_secs(20 * 60));
+            let res = self.runner.exec(spec, CancellationToken::new()).await?;
+            if !res.success() {
+                anyhow::bail!("wsl --export failed (exit {}): {}", res.exit_code, res.stderr);
+            }
+            Ok(())
+        }
+    }
+
+    async fn import_image(&self, src: &std::path::Path) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        { let _ = src; anyhow::bail!("WSL import requires Windows"); }
+
+        #[cfg(target_os = "windows")]
+        {
+            if self.is_present().await.unwrap_or(false) {
+                anyhow::bail!(
+                    "WSL distro `{}` already registered; unregister it first",
+                    self.instance
+                );
+            }
+            let distro_dir = v2_config_dir().join("wsl").join(&self.instance);
+            tokio::fs::create_dir_all(&distro_dir).await
+                .map_err(|e| anyhow::anyhow!("create distro dir: {e}"))?;
+            let dir_str = distro_dir.to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 distro dir"))?;
+            let src_str = src.to_str()
+                .ok_or_else(|| anyhow::anyhow!("non-UTF8 src: {}", src.display()))?;
+            let spec = CommandSpec::new("wsl", [
+                "--import", self.instance.as_str(), dir_str, src_str, "--version", "2"
+            ]).with_timeout(Duration::from_secs(20 * 60));
+            let res = self.runner.exec(spec, CancellationToken::new()).await?;
+            if !res.success() {
+                let _ = tokio::fs::remove_dir_all(&distro_dir).await;
+                anyhow::bail!("wsl --import failed (exit {}): {}", res.exit_code, res.stderr);
+            }
+            Ok(())
+        }
+    }
+
     async fn destroy(&self) -> anyhow::Result<()> {
         #[cfg(not(target_os = "windows"))]
         { Ok(()) }
