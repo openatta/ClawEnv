@@ -54,6 +54,73 @@ impl SandboxBackend for PodmanBackend {
         Ok(res.success())
     }
 
+    async fn ensure_prerequisites(&self) -> anyhow::Result<()> {
+        // Wrong-host gate: Podman is the Linux backend in v2.
+        if !cfg!(target_os = "linux") {
+            anyhow::bail!(
+                "Podman is the Linux sandbox backend; on this host use Lima (macOS) or WSL2 (Windows)"
+            );
+        }
+
+        // Already installed? `podman --version` exits 0 → done.
+        let probe = CommandSpec::new("podman", ["--version"])
+            .with_timeout(Duration::from_secs(3));
+        if let Some(res) = try_exec(&self.runner, probe, CancellationToken::new()).await? {
+            if res.success() {
+                return Ok(());
+            }
+        }
+
+        // Detect package manager and try auto-install via sudo. Order
+        // mirrors v1 sandbox/podman.rs:154-159 — apt, dnf, pacman, zypper.
+        let candidates: &[(&str, &[&str])] = &[
+            ("apt-get", &["install", "-y", "podman"]),
+            ("dnf",     &["install", "-y", "podman"]),
+            ("pacman",  &["-S", "--noconfirm", "podman"]),
+            ("zypper",  &["install", "-y", "podman"]),
+        ];
+
+        for (pm, args) in candidates {
+            // `which <pm>` exits 0 when present.
+            let which = self.runner.exec(
+                CommandSpec::new("which", [*pm])
+                    .with_timeout(Duration::from_secs(3)),
+                CancellationToken::new(),
+            ).await;
+            let has_pm = which.map(|r| r.success()).unwrap_or(false);
+            if !has_pm { continue; }
+
+            let mut full_args: Vec<&str> = vec![*pm];
+            full_args.extend_from_slice(args);
+            let install = self.runner.exec(
+                CommandSpec::new("sudo", full_args)
+                    .with_timeout(Duration::from_secs(5 * 60)),
+                CancellationToken::new(),
+            ).await?;
+            if install.success() {
+                // Re-probe to confirm.
+                let reprobe = CommandSpec::new("podman", ["--version"])
+                    .with_timeout(Duration::from_secs(3));
+                if let Some(res) = try_exec(&self.runner, reprobe, CancellationToken::new()).await? {
+                    if res.success() {
+                        return Ok(());
+                    }
+                }
+            }
+            // This pm tried but didn't yield a working podman — try next.
+        }
+
+        anyhow::bail!(
+            "Could not install Podman automatically.\n\
+             Please install manually:\n\
+             - Fedora/RHEL: sudo dnf install podman\n\
+             - Ubuntu/Debian: sudo apt install podman\n\
+             - Arch:         sudo pacman -S podman\n\
+             - openSUSE:     sudo zypper install podman\n\
+             See https://podman.io/docs/installation"
+        )
+    }
+
     async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
         // Idempotent: if the container already exists, don't re-provision.
         if self.is_present().await.unwrap_or(false) {
@@ -244,5 +311,17 @@ mod tests {
         assert!((parse_cpu_percent("12.5%") - 12.5).abs() < 0.01);
         assert!((parse_cpu_percent("0.05") - 0.05).abs() < 0.001);
         assert_eq!(parse_cpu_percent("garbage"), 0.0);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[tokio::test]
+    async fn ensure_prerequisites_bails_on_non_linux() {
+        let b = PodmanBackend::new("demo");
+        let err = b.ensure_prerequisites().await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Linux"),
+            "wrong-host bail should mention Linux, got: {msg}"
+        );
     }
 }

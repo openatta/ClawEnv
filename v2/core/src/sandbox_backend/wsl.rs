@@ -73,6 +73,159 @@ impl SandboxBackend for WslBackend {
         }
     }
 
+    async fn ensure_prerequisites(&self) -> anyhow::Result<()> {
+        #[cfg(not(target_os = "windows"))]
+        { anyhow::bail!("WSL2 is the Windows sandbox backend; on this host use Lima (macOS) or Podman (Linux)"); }
+
+        #[cfg(target_os = "windows")]
+        {
+            // Lifted from v1 sandbox/wsl.rs:180-323. Three-stage check:
+            // (1) Hardware: Hyper-V feature detectable AND if we're in a
+            //     VM, nested-virt is on. (2) WSL features: WSL +
+            //     VirtualMachinePlatform are enabled in dism. (3) If both
+            //     enabled, set WSL2 default + update kernel. Otherwise
+            //     prompt UAC and run dism /enable-feature for both.
+            //
+            // dism + Get-WmiObject + Get-CimInstance produce no window
+            // flash; the UAC PowerShell with /enable-feature INTENTIONALLY
+            // shows a terminal window so the user sees the elevation
+            // prompt and progress.
+
+            // Stage 1: hardware virtualization probe.
+            let hyperv_check = LocalProcessRunner::new().exec(
+                CommandSpec::new("dism", [
+                    "/online", "/get-featureinfo",
+                    "/featurename:Microsoft-Hyper-V", "/English"
+                ]).with_timeout(Duration::from_secs(15)),
+                CancellationToken::new(),
+            ).await;
+            let _hyperv_available = hyperv_check.as_ref()
+                .map(|res| res.stdout.contains("State :") && !res.stdout.contains("not recognized"))
+                .unwrap_or(false);
+
+            // Are we inside a VM that lacks nested virtualization?
+            let vm_check = LocalProcessRunner::new().exec(
+                CommandSpec::new("powershell", [
+                    "-WindowStyle", "Hidden", "-Command",
+                    "(Get-WmiObject Win32_ComputerSystem).Model"
+                ]).with_timeout(Duration::from_secs(10)),
+                CancellationToken::new(),
+            ).await;
+            let is_virtual = vm_check.as_ref()
+                .map(|res| {
+                    let m = res.stdout.to_lowercase();
+                    m.contains("virtual") || m.contains("vmware") || m.contains("qemu")
+                        || m.contains("utm") || m.contains("parallels")
+                })
+                .unwrap_or(false);
+
+            if is_virtual {
+                let nested = LocalProcessRunner::new().exec(
+                    CommandSpec::new("powershell", [
+                        "-WindowStyle", "Hidden", "-Command",
+                        "(Get-CimInstance Win32_Processor).VirtualizationFirmwareEnabled"
+                    ]).with_timeout(Duration::from_secs(10)),
+                    CancellationToken::new(),
+                ).await;
+                let nested_ok = nested.as_ref()
+                    .map(|r| r.stdout.trim().contains("True"))
+                    .unwrap_or(false);
+                if !nested_ok {
+                    anyhow::bail!(
+                        "WSL2 requires hardware virtualization, which is not available in this virtual machine.\n\
+                         \n\
+                         This computer appears to be a VM without nested virtualization support.\n\
+                         WSL2 cannot run inside VMs that don't support nested virtualization.\n\
+                         \n\
+                         Options:\n\
+                         - Use a physical Windows PC for sandbox installation\n\
+                         - Use 'Native' install mode instead (no sandbox, runs directly on host)\n\
+                         - Use a cloud VM with nested virtualization (e.g., Azure Dv5 series)"
+                    );
+                }
+            }
+
+            // Stage 2: are WSL + VMP features both enabled?
+            if self.is_available().await? {
+                return Ok(());
+            }
+            let runner = LocalProcessRunner::new();
+            let wsl_check = runner.exec(
+                CommandSpec::new("dism", [
+                    "/online", "/get-featureinfo",
+                    "/featurename:Microsoft-Windows-Subsystem-Linux", "/English"
+                ]).with_timeout(Duration::from_secs(15)),
+                CancellationToken::new(),
+            ).await;
+            let wsl_enabled = wsl_check.as_ref()
+                .map(|r| r.stdout.contains("Enabled")).unwrap_or(false);
+
+            let vmp_check = runner.exec(
+                CommandSpec::new("dism", [
+                    "/online", "/get-featureinfo",
+                    "/featurename:VirtualMachinePlatform", "/English"
+                ]).with_timeout(Duration::from_secs(15)),
+                CancellationToken::new(),
+            ).await;
+            let vmp_enabled = vmp_check.as_ref()
+                .map(|r| r.stdout.contains("Enabled")).unwrap_or(false);
+
+            if wsl_enabled && vmp_enabled {
+                // Try setting WSL2 default + kernel update without UAC.
+                let _ = runner.exec(
+                    CommandSpec::new("wsl", ["--set-default-version", "2"])
+                        .with_timeout(Duration::from_secs(10)),
+                    CancellationToken::new(),
+                ).await;
+                let _ = runner.exec(
+                    CommandSpec::new("wsl", ["--update"])
+                        .with_timeout(Duration::from_secs(120)),
+                    CancellationToken::new(),
+                ).await;
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                if self.is_available().await? { return Ok(()); }
+            }
+
+            // Stage 3: enable features via UAC. Intentionally visible
+            // window so user sees elevation + dism output.
+            let install_script = "$ErrorActionPreference = 'Stop';\
+                Write-Host 'Enabling Windows Subsystem for Linux...';\
+                dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart;\
+                Write-Host 'Enabling Virtual Machine Platform...';\
+                dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart;\
+                Write-Host 'Installing WSL kernel update...';\
+                wsl --update 2>$null;\
+                Write-Host 'Done. A restart may be required.';\
+                Start-Sleep -Seconds 3";
+            let escaped = install_script.replace('\'', "''");
+            let outer = format!(
+                "Start-Process -FilePath 'powershell' -ArgumentList '-ExecutionPolicy Bypass -Command {escaped}' -Verb RunAs -Wait"
+            );
+            let elev = runner.exec(
+                CommandSpec::new("powershell", ["-Command", outer.as_str()])
+                    .with_timeout(Duration::from_secs(10 * 60)),
+                CancellationToken::new(),
+            ).await;
+            if elev.map(|r| r.success()).unwrap_or(false) {
+                tokio::time::sleep(Duration::from_secs(3)).await;
+                if self.is_available().await? { return Ok(()); }
+                anyhow::bail!(
+                    "WSL2 installation completed. A system restart is required.\n\
+                     Restart your computer, then run this command again."
+                );
+            }
+            anyhow::bail!(
+                "WSL2 installation was cancelled or failed.\n\
+                 To install manually:\n\
+                 1. Open PowerShell as Administrator\n\
+                 2. dism /online /enable-feature /featurename:Microsoft-Windows-Subsystem-Linux /all /norestart\n\
+                 3. dism /online /enable-feature /featurename:VirtualMachinePlatform /all /norestart\n\
+                 4. Restart your computer\n\
+                 5. Run this command again"
+            );
+        }
+    }
+
     async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
         #[cfg(not(target_os = "windows"))]
         { let _ = opts; anyhow::bail!("WslBackend::create requires Windows"); }
@@ -294,6 +447,18 @@ mod tests {
             .await
             .unwrap_err();
         assert!(format!("{err}").contains("requires Windows"));
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn ensure_prerequisites_bails_on_non_windows() {
+        let b = WslBackend::new("demo");
+        let err = b.ensure_prerequisites().await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Windows"),
+            "wrong-host bail should mention Windows, got: {msg}"
+        );
     }
 
     #[cfg(not(target_os = "windows"))]

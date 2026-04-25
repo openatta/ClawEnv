@@ -90,6 +90,24 @@ pub fn v2_templates_dir() -> PathBuf {
     v2_config_dir().join("templates")
 }
 
+/// Directory where private host-side tooling (Lima binary, etc.)
+/// installed by `ensure_prerequisites` lives. Matches v1 layout
+/// (`~/.clawenv/bin/`) so an existing v1 install just works.
+pub fn clawenv_bin_dir() -> PathBuf {
+    clawenv_root().join("bin")
+}
+
+/// Resolve `limactl` binary path. Prefers our private install at
+/// `~/.clawenv/bin/limactl` (placed there by ensure_prerequisites),
+/// falls back to PATH so brew-installed limactl is also picked up.
+pub fn limactl_bin() -> String {
+    let private = clawenv_bin_dir().join(if cfg!(windows) { "limactl.exe" } else { "limactl" });
+    if private.exists() {
+        return private.to_string_lossy().into_owned();
+    }
+    "limactl".into()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

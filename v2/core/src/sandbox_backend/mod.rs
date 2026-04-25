@@ -40,6 +40,27 @@ pub trait SandboxBackend: Send + Sync {
         self.is_available().await
     }
 
+    /// Make sure the host-side tooling for this backend is installed
+    /// (`limactl` for Lima, WSL2 features + kernel for WSL, `podman`
+    /// binary for Podman). Idempotent: if already present, returns
+    /// Ok(()) without doing anything.
+    ///
+    /// Each backend's impl is platform-specific:
+    /// - Lima: download tarball from catalog, extract to `~/.clawenv/`,
+    ///   strip macOS quarantine attr.
+    /// - WSL: enable WSL + VirtualMachinePlatform features via dism
+    ///   under UAC; verify nested-virt support inside VMs.
+    /// - Podman: detect package manager (apt/dnf/pacman/zypper) and
+    ///   `sudo <pm> install -y podman`.
+    ///
+    /// On the wrong host (e.g. WSL on macOS, Podman on Windows) the
+    /// impl returns an error explaining the mismatch. Callers should
+    /// route to `detect_backend_for_host()` first rather than calling
+    /// the wrong backend's prereq.
+    async fn ensure_prerequisites(&self) -> anyhow::Result<()> {
+        anyhow::bail!("ensure_prerequisites: backend `{}` does not implement prereq install", self.name())
+    }
+
     /// Provision a fresh VM / container. Renders the backend's template
     /// (Lima YAML, WSL rootfs import + provision script, Podman build),
     /// invokes the backend tool, blocks until provision completes.

@@ -4,8 +4,10 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::{try_exec, CancellationToken, CommandRunner, CommandSpec};
-use crate::paths::{lima_home, v2_templates_dir};
+use crate::common::{try_exec, CancellationToken, CommandRunner, CommandSpec, ProgressSink};
+use crate::download_ops::{CatalogBackedDownloadOps, DownloadOps};
+use crate::extract::{extract_archive, ExtractOpts};
+use crate::paths::{clawenv_bin_dir, clawenv_root, lima_home, limactl_bin, v2_templates_dir};
 use crate::provisioning::{render_lima_yaml, CreateOpts};
 use crate::runners::LocalProcessRunner;
 
@@ -40,7 +42,7 @@ impl SandboxBackend for LimaBackend {
         }
         // `limactl list <instance> --format json` returns the row — parse state.
         // Tolerate `limactl` not being installed — report "not available".
-        let spec = CommandSpec::new("limactl", ["list", &self.instance, "--format", "json"])
+        let spec = CommandSpec::new(limactl_bin(), ["list", &self.instance, "--format", "json"])
             .with_timeout(Duration::from_secs(5));
         let Some(res) = try_exec(&self.runner, spec, CancellationToken::new()).await?
             else { return Ok(false); };
@@ -58,6 +60,70 @@ impl SandboxBackend for LimaBackend {
         // Lima stores every VM as a subdir of LIMA_HOME — presence of
         // <lima_home>/<instance>/lima.yaml means "defined" (stopped or running).
         Ok(self.instance_dir().join("lima.yaml").exists())
+    }
+
+    async fn ensure_prerequisites(&self) -> anyhow::Result<()> {
+        // Wrong-host gate: Lima is the macOS backend in v2.
+        if !cfg!(target_os = "macos") {
+            anyhow::bail!(
+                "Lima is the macOS sandbox backend; on this host use Podman (Linux) or WSL2 (Windows)"
+            );
+        }
+
+        // Already installed somewhere? Probe `limactl --version`.
+        // limactl_bin() prefers our private path, so this finds either
+        // a previous prereq install or a brew-installed binary.
+        let probe = CommandSpec::new(limactl_bin(), ["--version"])
+            .with_timeout(Duration::from_secs(3));
+        if let Some(res) = try_exec(&self.runner, probe, CancellationToken::new()).await? {
+            if res.success() {
+                return Ok(());
+            }
+        }
+
+        // Fetch lima tarball via DownloadOps (catalog has it pinned by
+        // sha256). Cache hit → no network; cache miss → triple-deadline
+        // download + verify.
+        let downloader = CatalogBackedDownloadOps::with_defaults();
+        let tarball = downloader
+            .fetch("lima", None, ProgressSink::noop(), CancellationToken::new())
+            .await
+            .map_err(|e| anyhow::anyhow!("fetch Lima from catalog: {e}"))?;
+
+        // Extract into ~/.clawenv/ (tarball layout: ./bin/limactl + ./share/lima/...).
+        let dest = clawenv_root();
+        tokio::fs::create_dir_all(&dest).await
+            .map_err(|e| anyhow::anyhow!("create {}: {e}", dest.display()))?;
+        let dest_clone = dest.clone();
+        let tarball_clone = tarball.clone();
+        tokio::task::spawn_blocking(move || {
+            extract_archive(&tarball_clone, &dest_clone, &ExtractOpts {
+                strip_components: 0,
+                clean_dest: false,
+            })
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("extract join: {e}"))?
+        .map_err(|e| anyhow::anyhow!("extract Lima tarball: {e}"))?;
+
+        // Verify the binary landed where we expected.
+        let private = clawenv_bin_dir().join("limactl");
+        if !private.exists() {
+            anyhow::bail!(
+                "Lima tarball extracted but {} is missing — unexpected archive layout",
+                private.display()
+            );
+        }
+
+        // macOS quarantine strip (best-effort — curl-fetched tarballs
+        // typically don't carry the attribute, but Safari downloads do).
+        let _ = self.runner.exec(
+            CommandSpec::new("xattr", ["-dr", "com.apple.quarantine", &dest.to_string_lossy()])
+                .with_timeout(Duration::from_secs(5)),
+            CancellationToken::new(),
+        ).await;
+
+        Ok(())
     }
 
     async fn create(&self, opts: &CreateOpts) -> anyhow::Result<()> {
@@ -93,7 +159,7 @@ impl SandboxBackend for LimaBackend {
         // drive this via ProgressSink (deferred until we introduce a
         // streaming variant).
         let spec = CommandSpec::new(
-            "limactl",
+            limactl_bin(),
             [
                 "start",
                 "--name",
@@ -126,7 +192,7 @@ impl SandboxBackend for LimaBackend {
         }
         // `limactl delete --force <name>` tolerates running VMs by
         // stopping first. Kills the VM dir under LIMA_HOME.
-        let spec = CommandSpec::new("limactl", ["delete", "--force", &self.instance])
+        let spec = CommandSpec::new(limactl_bin(), ["delete", "--force", &self.instance])
             .with_timeout(Duration::from_secs(2 * 60));
         let res = self.runner.exec(spec, CancellationToken::new()).await?;
         if !res.success() {
@@ -144,7 +210,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn start(&self) -> anyhow::Result<()> {
-        let spec = CommandSpec::new("limactl", ["start", &self.instance])
+        let spec = CommandSpec::new(limactl_bin(), ["start", &self.instance])
             .with_timeout(Duration::from_secs(5 * 60));
         let res = self.runner.exec(spec, CancellationToken::new()).await?;
         if !res.success() {
@@ -155,7 +221,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn stop(&self) -> anyhow::Result<()> {
-        let spec = CommandSpec::new("limactl", ["stop", &self.instance])
+        let spec = CommandSpec::new(limactl_bin(), ["stop", &self.instance])
             .with_timeout(Duration::from_secs(2 * 60));
         let res = self.runner.exec(spec, CancellationToken::new()).await?;
         if !res.success() {
@@ -166,7 +232,7 @@ impl SandboxBackend for LimaBackend {
     }
 
     async fn exec(&self, cmd: &str) -> anyhow::Result<String> {
-        let spec = CommandSpec::new("limactl", ["shell", &self.instance, "sh", "-c", cmd])
+        let spec = CommandSpec::new(limactl_bin(), ["shell", &self.instance, "sh", "-c", cmd])
             .with_timeout(Duration::from_secs(5 * 60));
         let res = self.runner.exec(spec, CancellationToken::new()).await?;
         if !res.success() {
@@ -280,6 +346,18 @@ mod tests {
         let b = LimaBackend::new("demo");
         assert_eq!(b.name(), "Lima");
         assert_eq!(b.instance(), "demo");
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[tokio::test]
+    async fn ensure_prerequisites_bails_on_non_macos() {
+        let b = LimaBackend::new("demo");
+        let err = b.ensure_prerequisites().await.unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("macOS"),
+            "wrong-host bail should mention macOS, got: {msg}"
+        );
     }
 
     #[test]
