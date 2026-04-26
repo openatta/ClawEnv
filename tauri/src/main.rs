@@ -172,6 +172,9 @@ fn main() {
                         // empty on Linux per CLAUDE.md, so this is a
                         // no-op there other than the descriptor file.
                         let mcp_state = build_mcp_state(global.bridge.port);
+                        // Surface "MCP active" in the tray tooltip the
+                        // moment we mount it, before any tool call.
+                        tray::set_mcp_active(mcp_state.is_some());
 
                         if let Err(e) = bridge_server::start_bridge(
                             global.bridge.port,
@@ -397,14 +400,55 @@ fn main() {
         });
 }
 
+/// Per-category opt-in for the MCP input/screen tools. Read from
+/// `[clawenv.bridge.mcp]` in `~/.clawenv/config.toml`. Defaults are
+/// chosen on a "least surprise + least power" axis: screen capture is
+/// usually what triggers the agent to take actions, but synthetic
+/// keyboard / mouse can take destructive actions on whatever window
+/// happens to be focused — those default OFF until the user explicitly
+/// turns them on.
+#[derive(Debug, Clone, Copy)]
+struct McpAllow {
+    keyboard: bool,
+    mouse: bool,
+    screen: bool,
+}
+
+impl Default for McpAllow {
+    fn default() -> Self {
+        Self { keyboard: false, mouse: false, screen: true }
+    }
+}
+
+fn load_mcp_allow() -> McpAllow {
+    let path = clawops_core::paths::clawenv_root().join("config.toml");
+    let Ok(s) = std::fs::read_to_string(&path) else {
+        return McpAllow::default();
+    };
+    let Ok(root) = toml::from_str::<toml::Value>(&s) else {
+        return McpAllow::default();
+    };
+    let table = root
+        .get("clawenv").and_then(|v| v.get("bridge")).and_then(|v| v.get("mcp"));
+    let mut out = McpAllow::default();
+    if let Some(t) = table {
+        if let Some(b) = t.get("allow_keyboard").and_then(|v| v.as_bool()) { out.keyboard = b; }
+        if let Some(b) = t.get("allow_mouse").and_then(|v| v.as_bool())    { out.mouse    = b; }
+        if let Some(b) = t.get("allow_screen").and_then(|v| v.as_bool())   { out.screen   = b; }
+    }
+    out
+}
+
 /// Build the optional MCP state for the local input/screen tool
-/// server. Generates a fresh per-launch token, populates the platform
-/// tool registry, and writes `~/.clawenv/bridge.mcp.json` so claws and
-/// other MCP clients can discover the endpoint without copy-paste.
+/// server. Filters the platform registry by the per-category opt-in,
+/// generates a fresh per-launch token, and writes the discovery
+/// descriptor at `~/.clawenv/bridge.mcp.json` so claws / Claude Code
+/// can connect without copy-paste.
 ///
-/// Returns `None` when the descriptor write fails — the bridge still
-/// starts, just without MCP. We don't bail the whole bridge on this
-/// path because HIL + exec-approval are independently valuable.
+/// Returns `None` when (a) every tool category is disabled (so the
+/// registry would be empty — no point advertising), or (b) the
+/// descriptor write fails. The bridge still starts in either case so
+/// HIL + exec-approval are unaffected.
 fn build_mcp_state(bridge_port: u16) -> Option<bridge_server::McpState> {
     use bridge_server::mcp::{
         default_descriptor_path, random_token, write_descriptor, BridgeMcpDescriptor,
@@ -412,7 +456,20 @@ fn build_mcp_state(bridge_port: u16) -> Option<bridge_server::McpState> {
     // Cap screenshot output dimension; a single 4K capture base64-encoded
     // is ~10MB which is fine over loopback but we don't need to ship 4K
     // by default. Override via env later if a claw insists.
-    let registry = clawops_core::input::build_default(1920);
+    let full_registry = clawops_core::input::build_default(1920);
+    let allow = load_mcp_allow();
+    let registry = full_registry.filter(|name| {
+        if name.starts_with("input_keyboard_") { return allow.keyboard; }
+        if name.starts_with("input_mouse_")    { return allow.mouse; }
+        if name.starts_with("screen_")         { return allow.screen; }
+        false // unknown prefix — deny
+    });
+
+    if registry.is_empty() {
+        tracing::info!("MCP not exposed: every tool category is disabled in [clawenv.bridge.mcp]");
+        return None;
+    }
+
     let token = random_token();
     let url = format!("http://127.0.0.1:{bridge_port}/mcp");
     let desc = BridgeMcpDescriptor {
@@ -425,7 +482,10 @@ fn build_mcp_state(bridge_port: u16) -> Option<bridge_server::McpState> {
         tracing::warn!("MCP descriptor write failed ({}): {e}", path.display());
         return None;
     }
-    tracing::info!("MCP server descriptor written to {}", path.display());
+    tracing::info!(
+        "MCP server descriptor written to {} (allowed: kbd={} mouse={} screen={})",
+        path.display(), allow.keyboard, allow.mouse, allow.screen
+    );
     Some(bridge_server::McpState { registry, token })
 }
 

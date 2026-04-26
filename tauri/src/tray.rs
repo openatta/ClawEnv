@@ -1,3 +1,5 @@
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{
     tray::{TrayIconBuilder, TrayIconEvent},
     AppHandle, Emitter, Manager,
@@ -11,15 +13,30 @@ pub enum TrayStatus {
     Error,
 }
 
+/// Set when the bridge mounts the MCP sub-router. The tooltip surfaces
+/// `(MCP)` as a passive "agents can drive your kbd/mouse/screen right
+/// now" reminder. Atomic instead of state-passing because tray refresh
+/// fires from sync callbacks without an obvious place to thread state.
+static MCP_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_mcp_active(on: bool) {
+    MCP_ACTIVE.store(on, Ordering::Relaxed);
+}
+
 /// Update the tray tooltip based on status (icon always stays as the Logo)
 pub fn set_tray_status(app: &AppHandle, status: TrayStatus) {
-    let tooltip = match status {
+    let base = match status {
         TrayStatus::Running => "ClawEnv — Running",
         TrayStatus::Stopped => "ClawEnv — Stopped",
         TrayStatus::Error => "ClawEnv — Error",
     };
+    let tooltip = if MCP_ACTIVE.load(Ordering::Relaxed) {
+        format!("{base} • MCP active")
+    } else {
+        base.to_string()
+    };
     if let Some(tray) = app.tray_by_id("clawenv-tray") {
-        let _ = tray.set_tooltip(Some(tooltip));
+        let _ = tray.set_tooltip(Some(&tooltip));
     }
 }
 

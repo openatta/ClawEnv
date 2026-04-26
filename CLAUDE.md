@@ -31,7 +31,10 @@ tauri/           # clawgui — Tauri GUI 应用（含 System Tray，spawn clawcl
   src/instance_helper.rs # backend_for_instance / 端口查找
   src/claw_meta.rs       # 已知 claw 的 display_name / logo / npm_package
   src/gui_cache.rs       # ~/.clawenv/gui-cache.json（latest-version 缓存）
-  src/bridge_server/     # 内嵌 HIL/exec-approval HTTP server（待 AttaRun 接管）
+  src/bridge_server/     # 内嵌 HTTP server：HIL/exec-approval +
+                         #   /mcp 本地 MCP server（input/screen 工具，
+                         #   描述子 ~/.clawenv/bridge.mcp.json mode 0600）
+                         #   待 AttaRun 接管
 src/             # 前端 SolidJS（直接调 Tauri IPC，从不直接 spawn CLI）
 assets/          # v1 资源（lima、mcp、claw-registry.toml）
 assets/v2/       # v2 资源（lima/clawenv-alpine.yaml、podman/Containerfile、mcp/*）

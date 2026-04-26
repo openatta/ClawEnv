@@ -78,6 +78,28 @@ impl ToolRegistry {
         v.sort();
         v
     }
+
+    /// Drop every handler whose name doesn't satisfy `keep`. Used by
+    /// the GUI to enforce per-category opt-in: e.g. ship the keyboard
+    /// handlers only when the user explicitly enabled keyboard control
+    /// in `[clawenv.bridge.mcp]`.
+    pub fn filter<F>(self, keep: F) -> Self
+    where
+        F: Fn(&str) -> bool,
+    {
+        let map: HashMap<String, Arc<dyn ToolHandler>> = self
+            .inner
+            .iter()
+            .filter(|(name, _)| keep(name))
+            .map(|(n, h)| (n.clone(), h.clone()))
+            .collect();
+        Self { inner: Arc::new(map) }
+    }
+
+    /// True when no handlers are registered. The bridge uses this to
+    /// decide whether to expose the MCP routes / write the descriptor
+    /// at all — there's no point advertising an empty server.
+    pub fn is_empty(&self) -> bool { self.inner.is_empty() }
 }
 
 #[cfg(test)]
@@ -108,5 +130,38 @@ mod tests {
 
         let err = reg.call("nope", serde_json::json!({})).await.unwrap_err();
         assert_eq!(err.code(), "invalid_argument");
+    }
+
+    struct Named(&'static str);
+    #[async_trait]
+    impl ToolHandler for Named {
+        fn spec(&self) -> ToolSpec {
+            ToolSpec {
+                name: self.0.into(),
+                description: "".into(),
+                input_schema: serde_json::json!({}),
+            }
+        }
+        async fn call(&self, _: serde_json::Value) -> Result<serde_json::Value, ToolError> {
+            Ok(serde_json::json!({}))
+        }
+    }
+
+    #[test]
+    fn filter_drops_handlers_outside_predicate() {
+        let reg = ToolRegistry::new(vec![
+            Arc::new(Named("input_keyboard_type")),
+            Arc::new(Named("input_mouse_click")),
+            Arc::new(Named("screen_capture")),
+        ]);
+        let filtered = reg.filter(|n| n.starts_with("screen_"));
+        assert_eq!(filtered.names(), vec!["screen_capture".to_string()]);
+        assert!(!filtered.is_empty());
+    }
+
+    #[test]
+    fn empty_registry_is_empty() {
+        let reg = ToolRegistry::new(vec![]);
+        assert!(reg.is_empty());
     }
 }
