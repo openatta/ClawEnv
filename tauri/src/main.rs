@@ -165,11 +165,20 @@ fn main() {
                                 let _ = bh.emit(event, payload.to_string());
                             });
                         let hw_token = std::env::var("CLAWENV_HW_TOKEN").unwrap_or_default();
+
+                        // Build the local MCP server state (input/screen
+                        // tools for agents to drive the host) and write
+                        // the discovery descriptor. The registry is
+                        // empty on Linux per CLAUDE.md, so this is a
+                        // no-op there other than the descriptor file.
+                        let mcp_state = build_mcp_state(global.bridge.port);
+
                         if let Err(e) = bridge_server::start_bridge(
                             global.bridge.port,
                             permissions,
                             Some(emitter),
                             hw_token,
+                            mcp_state,
                         ).await {
                             tracing::error!("Bridge server failed: {e}");
                         }
@@ -358,6 +367,8 @@ fn main() {
             ipc::export_cancel,
             ipc::lite::lite_scan_packages,
             ipc::lite::pick_import_folder,
+            ipc::mcp_perm_status,
+            ipc::mcp_open_perm_url,
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {
@@ -384,6 +395,38 @@ fn main() {
                 }
             }
         });
+}
+
+/// Build the optional MCP state for the local input/screen tool
+/// server. Generates a fresh per-launch token, populates the platform
+/// tool registry, and writes `~/.clawenv/bridge.mcp.json` so claws and
+/// other MCP clients can discover the endpoint without copy-paste.
+///
+/// Returns `None` when the descriptor write fails — the bridge still
+/// starts, just without MCP. We don't bail the whole bridge on this
+/// path because HIL + exec-approval are independently valuable.
+fn build_mcp_state(bridge_port: u16) -> Option<bridge_server::McpState> {
+    use bridge_server::mcp::{
+        default_descriptor_path, random_token, write_descriptor, BridgeMcpDescriptor,
+    };
+    // Cap screenshot output dimension; a single 4K capture base64-encoded
+    // is ~10MB which is fine over loopback but we don't need to ship 4K
+    // by default. Override via env later if a claw insists.
+    let registry = clawops_core::input::build_default(1920);
+    let token = random_token();
+    let url = format!("http://127.0.0.1:{bridge_port}/mcp");
+    let desc = BridgeMcpDescriptor {
+        url: url.clone(),
+        token: token.clone(),
+        pid: std::process::id(),
+    };
+    let path = default_descriptor_path();
+    if let Err(e) = write_descriptor(&path, &desc) {
+        tracing::warn!("MCP descriptor write failed ({}): {e}", path.display());
+        return None;
+    }
+    tracing::info!("MCP server descriptor written to {}", path.display());
+    Some(bridge_server::McpState { registry, token })
 }
 
 /// Translate the toml::Table stored under `[clawenv.bridge.permissions]`

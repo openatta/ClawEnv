@@ -782,6 +782,7 @@ pub async fn start_bridge(
     permissions: BridgePermissions,
     event_emitter: Option<EventEmitter>,
     hw_auth_token: String,
+    mcp: Option<super::mcp::McpState>,
 ) -> anyhow::Result<()> {
     let (hw_notify_tx, _) = broadcast::channel::<String>(64);
     let (hw_targeted_tx, _) = broadcast::channel::<(String, String)>(64);
@@ -802,7 +803,7 @@ pub async fn start_bridge(
         hw_auth_token,
     }));
 
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/api/health", get(health_handler))
         .route("/api/permissions", get(permissions_handler))
         .route("/api/file/read", post(file_read_handler))
@@ -822,6 +823,14 @@ pub async fn start_bridge(
         .route("/api/hw/notify", post(hw_notify_handler))
         .route("/ws/hw", get(hw_ws_handler))
         .with_state(state);
+
+    // Mount the MCP sub-router on the same listener when an input
+    // ToolRegistry was supplied. Each sub-router carries its own state
+    // (Bridge's RwLock'd SharedState here, MCP's per-launch token
+    // there) so the two coexist without sharing typed state.
+    if let Some(mcp_state) = mcp {
+        app = app.merge(super::mcp::router(mcp_state));
+    }
 
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
     tracing::info!("Bridge server listening on 0.0.0.0:{port}");

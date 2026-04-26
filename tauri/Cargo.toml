@@ -26,7 +26,13 @@ hex = "0.4"
 # Embedded HIL + exec-approval + hardware bridge HTTP server (lifted
 # from v1 core's `bridge::server` — GUI-private since the AttaRun
 # bridge daemon hasn't subsumed it yet, see docs/v2/v0.5.x-features.md).
+# Local MCP server for native input/screen tools mounts on the same
+# axum router via `bridge_server::mcp`.
 axum = { version = "0.8", features = ["ws"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile = "3"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 # macOS proxy detection via SystemConfiguration framework — covers any active
