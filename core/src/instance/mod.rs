@@ -10,7 +10,7 @@
 pub mod config;
 pub mod orchestrator;
 
-pub use config::{InstanceConfig, InstanceRegistry, PortBinding, SandboxKind};
+pub use config::{BrowserBinding, InstanceConfig, InstanceRegistry, PortBinding, SandboxKind};
 pub use orchestrator::{
     CreateOpts, CreateReport, DestroyReport, InstallOpts, InstallReport,
     InstanceOrchestrator, LaunchReport, UpgradeOpts, UpgradeReport,

@@ -221,11 +221,8 @@ export default function LiteStepScan(props: {
                           {pkg.platform === "lima"
                             ? t("⚠ 将首先安装 Lima（无需重启）",
                                 "⚠ Lima will be installed first (no restart needed)")
-                            : pkg.platform === "wsl2"
-                              ? t("⚠ 将首先安装 WSL2（可能需要重启 Windows）",
-                                  "⚠ WSL2 will be installed first (Windows restart may be required)")
-                              : t("⚠ 将首先安装 Podman",
-                                  "⚠ Podman will be installed first")}
+                            : t("⚠ 将首先安装 WSL2（可能需要重启 Windows）",
+                                "⚠ WSL2 will be installed first (Windows restart may be required)")}
                         </div>
                       </Show>
                     </div>

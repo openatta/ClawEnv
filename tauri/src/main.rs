@@ -1,17 +1,24 @@
 // Prevents additional console window on Windows in release
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod bridge_server;
+mod claw_meta;
 mod cli_bridge;
-mod tray;
+mod gui_cache;
+mod instance_helper;
 mod ipc;
+mod tray;
+mod util;
 
-use clawenv_core::browser::BrowserBackend;
-use clawenv_core::config::ConfigManager;
-use clawenv_core::launcher;
+use clawops_core::browser::{BrowserBackend, BrowserStatus, ChromiumBackend};
+use clawops_core::config_loader;
+use clawops_core::instance::{InstanceRegistry, SandboxKind};
+use clawops_core::launcher;
+use clawops_core::proxy::{ProxySource, ProxyTriple};
+use clawops_core::wire::StatusResponse;
 use tauri::{Emitter, Manager};
 
 fn main() {
-    // Initialize logging — visible when run from terminal
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -21,25 +28,27 @@ fn main() {
 
     // Startup proxy injection: feed OS-detected proxy (if any) into this
     // process's env so every spawned subprocess (clawcli, native claws)
-    // inherits it. `core::proxy_resolver` handles priority chain —
-    // shell env > config > OS detect. See docs/23-proxy-architecture.md §3.
-    //
-    // OS detection itself lives in `ipc::detect_system_proxy_native_only`
-    // because it pulls in GUI-only deps (system-configuration / winreg /
-    // gsettings). We pass the detected payload into env manually here so
-    // when the CLI subprocess's resolver later queries env it sees it.
+    // inherits it. Priority chain: explicit config > shell env > OS detect.
     {
-        use clawenv_core::config::{proxy_resolver, ConfigManager};
-        // First, explicit config wins.
-        if let Ok(config) = ConfigManager::load() {
-            if let Some(t) = proxy_resolver::triple_from_config_proxy(
-                &config.config().clawenv.proxy,
-                proxy_resolver::ProxySource::GlobalConfig,
-            ) {
-                proxy_resolver::apply_env(&t);
+        if let Ok(global) = config_loader::load_global() {
+            if global.proxy.enabled && !global.proxy.http_proxy.is_empty() {
+                let triple = ProxyTriple {
+                    http: global.proxy.http_proxy.clone(),
+                    https: if global.proxy.https_proxy.is_empty() {
+                        global.proxy.http_proxy.clone()
+                    } else {
+                        global.proxy.https_proxy.clone()
+                    },
+                    no_proxy: if global.proxy.no_proxy.is_empty() {
+                        "localhost,127.0.0.1".into()
+                    } else {
+                        global.proxy.no_proxy.clone()
+                    },
+                    source: ProxySource::GlobalConfig,
+                };
+                util::apply_proxy_env(&triple);
             }
         }
-        // Then OS detection fills gaps.
         if std::env::var("HTTPS_PROXY").ok().filter(|s| !s.is_empty()).is_none()
             && std::env::var("https_proxy").ok().filter(|s| !s.is_empty()).is_none()
         {
@@ -50,30 +59,23 @@ fn main() {
                 if !http.is_empty() || !https.is_empty() {
                     let effective_http  = if http.is_empty() { https } else { http };
                     let effective_https = if https.is_empty() { http } else { https };
-                    let triple = proxy_resolver::ProxyTriple {
+                    let triple = ProxyTriple {
                         http: effective_http.to_string(),
                         https: effective_https.to_string(),
                         no_proxy: no_p.to_string(),
-                        source: proxy_resolver::ProxySource::OsSystem,
+                        source: ProxySource::OsSystem,
                     };
-                    proxy_resolver::apply_env(&triple);
+                    util::apply_proxy_env(&triple);
                     tracing::info!(target: "clawenv::proxy", "startup: injected OS proxy {effective_http}");
                 }
             }
         }
     }
 
-    // Pin LIMA_HOME to ~/.clawenv/lima so every spawned limactl uses the
-    // private data directory instead of the system default ~/.lima.
+    // Pin LIMA_HOME to ~/.clawenv/lima so every spawned limactl uses our
+    // private data dir instead of the system default ~/.lima.
     #[cfg(target_os = "macos")]
-    clawenv_core::sandbox::init_lima_env();
-
-    // Pin Podman's XDG_DATA_HOME / XDG_RUNTIME_DIR to ~/.clawenv/podman-*
-    // so container storage, volumes, db and the runtime socket all live
-    // inside our tree — parity with Lima (macOS) and WSL (Windows, which
-    // already imports distros under ~/.clawenv/wsl/).
-    #[cfg(target_os = "linux")]
-    clawenv_core::sandbox::init_podman_env();
+    util::init_lima_env();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
@@ -84,16 +86,11 @@ fn main() {
             Some(vec!["--minimized"]),
         ))
         .setup(|app| {
-            // Initialize system tray
             tray::setup_tray(app.handle())?;
 
             // OS proxy watcher — 30s polling, emits `os-proxy-changed` on
-            // transitions. Simple polling trumps per-platform notification
-            // APIs because it works the same on macOS + Windows without
-            // platform-specific runloop gymnastics. Polling interval is the
-            // worst-case latency users see between "toggle Clash" and "claw
-            // sees new proxy", but Restart instance is free anyway so this
-            // is mostly for the UI indicator and passive env refresh.
+            // transitions. Polling is the same on macOS + Windows without
+            // platform-specific runloop gymnastics.
             {
                 let watcher_handle = app.handle().clone();
                 std::thread::spawn(move || {
@@ -111,7 +108,6 @@ fn main() {
                         let sig = h.finish();
                         if sig != last_sig {
                             last_sig = sig;
-                            // Refresh env for newly-spawned subprocesses.
                             if let Some(v) = current.as_ref() {
                                 let http  = v.get("http_proxy").and_then(|s| s.as_str()).unwrap_or("");
                                 let https = v.get("https_proxy").and_then(|s| s.as_str()).unwrap_or("");
@@ -119,16 +115,16 @@ fn main() {
                                 let eh = if http.is_empty() { https } else { http };
                                 let es = if https.is_empty() { http } else { https };
                                 if !eh.is_empty() {
-                                    let t = clawenv_core::config::proxy_resolver::ProxyTriple {
+                                    let t = ProxyTriple {
                                         http: eh.into(),
                                         https: es.into(),
                                         no_proxy: no_p.into(),
-                                                        source: clawenv_core::config::proxy_resolver::ProxySource::OsSystem,
+                                        source: ProxySource::OsSystem,
                                     };
-                                    clawenv_core::config::proxy_resolver::apply_env(&t);
+                                    util::apply_proxy_env(&t);
                                 }
                             } else {
-                                clawenv_core::config::proxy_resolver::clear_env();
+                                util::clear_proxy_env();
                             }
                             let _ = watcher_handle.emit("os-proxy-changed", &current);
                             tracing::info!(target: "clawenv::proxy", "OS proxy changed (watcher)");
@@ -154,23 +150,24 @@ fn main() {
                 }
             });
 
-            // Start bridge server if enabled
+            // Embedded HIL + exec-approval bridge HTTP server. Lifted from
+            // v1 core; long-term home is the AttaRun bridge daemon
+            // (docs/v2/v0.5.x-features.md "Bridge admin UI").
             let bridge_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                if let Ok(config) = ConfigManager::load() {
-                    let bridge_cfg = &config.config().clawenv.bridge;
-                    if bridge_cfg.enabled {
-                        tracing::info!("Starting bridge server on port {}", bridge_cfg.port);
-                        // Create event emitter closure for HIL notifications
+                if let Ok(global) = config_loader::load_global() {
+                    if global.bridge.enabled {
+                        tracing::info!("Starting bridge server on port {}", global.bridge.port);
+                        let permissions = parse_bridge_permissions(&global.bridge.permissions);
                         let bh = bridge_handle.clone();
-                        let emitter: clawenv_core::bridge::server::EventEmitter =
+                        let emitter: bridge_server::EventEmitter =
                             Box::new(move |event, payload| {
                                 let _ = bh.emit(event, payload.to_string());
                             });
                         let hw_token = std::env::var("CLAWENV_HW_TOKEN").unwrap_or_default();
-                        if let Err(e) = clawenv_core::bridge::server::start_bridge(
-                            bridge_cfg.port,
-                            bridge_cfg.permissions.clone(),
+                        if let Err(e) = bridge_server::start_bridge(
+                            global.bridge.port,
+                            permissions,
                             Some(emitter),
                             hw_token,
                         ).await {
@@ -180,24 +177,24 @@ fn main() {
                 }
             });
 
-            // Spawn background instance health monitor — polls CLI `status` command
+            // Background instance health monitor — polls clawcli `status`.
             let monitor_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 use std::collections::HashMap;
-                use clawenv_core::api::StatusResponse;
 
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-                let interval = ConfigManager::load()
-                    .map(|c| c.config().clawenv.tray.monitor_interval_sec)
+                let interval: u32 = config_loader::load_global()
+                    .ok()
+                    .map(|_| 5_u32)
                     .unwrap_or(5);
 
                 let mut prev_health: HashMap<String, String> = HashMap::new();
 
                 loop {
-                    // Reload config each cycle to pick up new/removed instances
-                    if let Ok(config) = ConfigManager::load() {
-                        for inst in config.instances() {
+                    let registry = InstanceRegistry::with_default_path();
+                    if let Ok(instances) = registry.list().await {
+                        for inst in &instances {
                             let health = match cli_bridge::run_cli(&["status", &inst.name]).await {
                                 Ok(data) => {
                                     serde_json::from_value::<StatusResponse>(data)
@@ -207,13 +204,11 @@ fn main() {
                                 Err(_) => "unreachable".into(),
                             };
 
-                            // Emit health event to frontend
                             let _ = monitor_handle.emit("instance-health", serde_json::json!({
                                 "instance_name": inst.name,
                                 "health": health,
                             }));
 
-                            // Notify on health changes
                             if let Some(prev) = prev_health.get(&inst.name) {
                                 if *prev != health {
                                     let _ = tray::refresh_tray(&monitor_handle);
@@ -233,15 +228,11 @@ fn main() {
                             }
                             prev_health.insert(inst.name.clone(), health);
 
-                            // Check browser HIL status for sandbox instances
-                            if inst.sandbox_type != clawenv_core::sandbox::SandboxType::Native
-                                && inst.browser.enabled
-                            {
-                                if let Ok(backend) = clawenv_core::manager::instance::backend_for_instance(inst) {
-                                    let browser = clawenv_core::browser::chromium::ChromiumBackend::new(
-                                        std::sync::Arc::from(backend) as std::sync::Arc<dyn clawenv_core::sandbox::SandboxBackend>
-                                    );
-                                    if let Ok(clawenv_core::browser::BrowserStatus::Interactive { ref novnc_url })
+                            // Browser HIL probe — only for sandbox claws with browser enabled.
+                            if inst.backend != SandboxKind::Native && inst.browser.enabled {
+                                if let Ok(backend_arc) = instance_helper::backend_arc_for_instance(inst) {
+                                    let browser = ChromiumBackend::new(backend_arc);
+                                    if let Ok(BrowserStatus::Interactive { ref novnc_url })
                                         = browser.status().await
                                     {
                                         let _ = monitor_handle.emit("hil-required", serde_json::json!({
@@ -258,41 +249,53 @@ fn main() {
                 }
             });
 
-            // Background update check — cache results silently, no popup.
-            // User can check updates manually from ClawPage.
+            // Background update check — refresh GUI cache for tray badge.
             let update_handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
-                // Check network periodically
                 tokio::time::sleep(std::time::Duration::from_secs(30)).await;
                 loop {
-                    if let Ok(mut config) = ConfigManager::load() {
-                        let npm_registry = config.config().clawenv.mirrors.npm_registry_url();
-                        let instances = config.instances().to_vec();
+                    let registry = InstanceRegistry::with_default_path();
+                    if let Ok(instances) = registry.list().await {
+                        let npm_registry = config_loader::load_global()
+                            .ok()
+                            .map(|g| g.mirrors.npm_registry.clone())
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| "https://registry.npmjs.org".into());
                         for inst in &instances {
-                            let claw_reg = clawenv_core::claw::ClawRegistry::load();
-                            let npm_pkg = claw_reg.get(&inst.claw_type).npm_package.clone();
-                            match clawenv_core::update::checker::check_latest_version(&inst.version, &npm_registry, &npm_pkg).await {
+                            let meta = claw_meta::meta_for(&inst.claw);
+                            if meta.npm_package.is_empty() || inst.claw_version.is_empty() {
+                                continue;
+                            }
+                            match clawops_core::update::check_latest_version(
+                                &inst.claw_version,
+                                &npm_registry,
+                                meta.npm_package,
+                            ).await {
                                 Ok(info) => {
-                                    // Cache the result
-                                    if let Some(entry) = config.config_mut().instances.iter_mut().find(|i| i.name == inst.name) {
-                                        entry.cached_latest_version = info.latest.clone();
-                                        entry.cached_version_check_at = format!("{:?}", std::time::SystemTime::now());
-                                    }
-
+                                    gui_cache::record_latest(&inst.name, &info.latest);
                                     if info.has_upgrade {
-                                        tracing::info!("Update available for '{}': {} → {}", inst.name, info.current, info.latest);
-                                        // No popup — user checks updates from ClawPage manually
-                                        let title = if info.is_security_release { "Security Update Available" } else { "Update Available" };
-                                        tray::send_notification(&update_handle, title,
-                                            &format!("OpenClaw {} → {} for '{}'", info.current, info.latest, inst.name));
+                                        tracing::info!(
+                                            "Update available for '{}': {} → {}",
+                                            inst.name, info.current, info.latest
+                                        );
+                                        let title = if info.is_security_release {
+                                            "Security Update Available"
+                                        } else {
+                                            "Update Available"
+                                        };
+                                        tray::send_notification(
+                                            &update_handle,
+                                            title,
+                                            &format!("{} {} → {} for '{}'",
+                                                meta.display_name, info.current, info.latest, inst.name),
+                                        );
                                     }
                                 }
                                 Err(e) => tracing::debug!("Update check failed for '{}': {e}", inst.name),
                             }
                         }
-                        config.save().ok();
                     }
-                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await; // 1h
+                    tokio::time::sleep(std::time::Duration::from_secs(3600)).await;
                 }
             });
 
@@ -358,30 +361,16 @@ fn main() {
             ipc::exit_app,
         ])
         .on_window_event(|window, event| {
-            // Close button hides the MAIN window instead of quitting — so the
-            // app can keep running from the system tray. Secondary windows
-            // (install wizard, etc.) get normal close behaviour; silently
-            // hiding them turned subsequent "Add instance" clicks into no-ops
-            // because open_install_window's `get_webview_window(label)` kept
-            // returning the hidden window.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     let _ = window.hide();
                     api.prevent_close();
                 }
-                // Other windows: let the default destroy path run, so the next
-                // Add click builds a fresh window instead of focusing a hidden
-                // ghost with the same label.
             }
         })
         .build(tauri::generate_context!())
         .expect("error while building ClawEnv")
         .run(|app, event| {
-            // macOS-only handling: the Reopen event only fires on Apple
-            // platforms. On Windows/Linux the closure args are otherwise
-            // unused — `let _ = (...)` consumes them so clippy's
-            // `unused_variables` stays quiet without an ecosystem-level
-            // `#[allow]` sprinkled on the closure signature.
             #[cfg(not(target_os = "macos"))]
             let _ = (&app, &event);
 
@@ -395,4 +384,29 @@ fn main() {
                 }
             }
         });
+}
+
+/// Translate the toml::Table stored under `[clawenv.bridge.permissions]`
+/// into the strongly-typed `BridgePermissions` the bridge server
+/// consumes. Falls back to defaults on parse failure so a malformed
+/// permissions block doesn't crash the GUI.
+fn parse_bridge_permissions(t: &toml::Table) -> bridge_server::BridgePermissions {
+    serde_json::to_value(t)
+        .ok()
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_else(|| {
+            // Minimal safe defaults — file ops disabled, exec gated.
+            bridge_server::BridgePermissions {
+                file_read: vec![],
+                file_write: vec![],
+                file_deny: vec![],
+                exec_allow: vec![],
+                exec_deny: vec![],
+                require_approval: vec!["**".into()],
+                auto_approve: vec![],
+                shell_enabled: false,
+                shell_program: if cfg!(target_os = "windows") { "powershell".into() } else { "bash".into() },
+                shell_require_approval: true,
+            }
+        })
 }

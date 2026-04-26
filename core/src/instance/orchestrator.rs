@@ -29,7 +29,7 @@ use crate::proxy::{apply::apply_to_sandbox, ProxyTriple};
 use crate::sandbox_backend::{LimaBackend, PodmanBackend, SandboxBackend, WslBackend};
 use crate::sandbox_ops::{LimaOps, PodmanOps, SandboxOps, WslOps};
 
-use super::config::{InstanceConfig, InstanceRegistry, PortBinding, SandboxKind};
+use super::config::{BrowserBinding, InstanceConfig, InstanceRegistry, PortBinding, SandboxKind};
 
 pub struct CreateOpts {
     pub name: String,
@@ -242,9 +242,12 @@ impl InstanceOrchestrator {
         let inst = InstanceConfig {
             name: opts.name.clone(),
             claw: opts.claw,
+            claw_version: String::new(),
             backend: opts.backend,
             sandbox_instance: opts.sandbox_instance,
             ports: opts.ports,
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: String::new(),
             note: opts.note,
@@ -419,6 +422,7 @@ impl InstanceOrchestrator {
             let inst = InstanceConfig {
                 name: opts.name.clone(),
                 claw: opts.claw.clone(),
+                claw_version: opts.claw_version.clone(),
                 backend: opts.backend,
                 sandbox_instance: opts.name.clone(),
                 ports: vec![PortBinding {
@@ -426,6 +430,8 @@ impl InstanceOrchestrator {
                     guest: opts.gateway_port,
                     label: "gateway".into(),
                 }],
+                browser: BrowserBinding { enabled: opts.install_browser, vnc_ws_port: 0 },
+                proxy: None,
                 created_at: Utc::now().to_rfc3339(),
                 updated_at: String::new(),
                 note: "(dry-run; not persisted)".into(),
@@ -523,6 +529,7 @@ impl InstanceOrchestrator {
         let inst = InstanceConfig {
             name: opts.name.clone(),
             claw: opts.claw.clone(),
+            claw_version: opts.claw_version.clone(),
             backend: opts.backend,
             sandbox_instance: opts.name.clone(),
             ports: vec![PortBinding {
@@ -530,6 +537,8 @@ impl InstanceOrchestrator {
                 guest: opts.gateway_port,
                 label: "gateway".into(),
             }],
+            browser: BrowserBinding { enabled: opts.install_browser, vnc_ws_port: 0 },
+            proxy: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: String::new(),
             note: String::new(),
@@ -689,6 +698,7 @@ impl InstanceOrchestrator {
         let inst = InstanceConfig {
             name: opts.name.clone(),
             claw: opts.claw,
+            claw_version: opts.claw_version.clone(),
             backend: SandboxKind::Native,
             sandbox_instance: String::new(),
             ports: vec![PortBinding {
@@ -696,6 +706,8 @@ impl InstanceOrchestrator {
                 guest: opts.gateway_port,
                 label: "gateway".into(),
             }],
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: Utc::now().to_rfc3339(),
             updated_at: String::new(),
             note: String::new(),
@@ -1438,9 +1450,12 @@ mod tests {
         o.registry.insert(InstanceConfig {
             name: "already".into(),
             claw: "openclaw".into(),
+            claw_version: String::new(),
             backend: SandboxKind::Lima,
             sandbox_instance: "already".into(),
             ports: vec![],
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: "ts".into(),
             updated_at: String::new(),
             note: String::new(),
@@ -1539,9 +1554,12 @@ mod tests {
         o.registry.insert(InstanceConfig {
             name: "nat".into(),
             claw: "openclaw".into(),
+            claw_version: String::new(),
             backend: SandboxKind::Native,
             sandbox_instance: String::new(),
             ports: vec![],
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: "ts".into(),
             updated_at: String::new(),
             note: String::new(),
@@ -1574,9 +1592,12 @@ mod tests {
         o.registry.insert(InstanceConfig {
             name: "orphan".into(),
             claw: "unknown-claw-xyz".into(),
+            claw_version: String::new(),
             backend: SandboxKind::Lima,
             sandbox_instance: "orphan".into(),
             ports: vec![],
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: "ts".into(),
             updated_at: String::new(),
             note: String::new(),

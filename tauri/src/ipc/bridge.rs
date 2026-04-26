@@ -1,65 +1,45 @@
-use clawenv_core::config::ConfigManager;
-use clawenv_core::manager::instance;
+use clawops_core::bridge::read_gateway_token;
+use clawops_core::config_loader;
+use clawops_core::instance::InstanceRegistry;
+
+use crate::instance_helper;
+use crate::util;
 
 /// Read the gateway auth token from inside the sandbox.
 ///
-/// Tries multiple paths (home dir may vary between users) and uses
-/// Node.js JSON parsing instead of fragile grep/sed.
+/// v2 lifted the JSON-parse + multi-path-probe logic into
+/// `clawops_core::bridge::read_gateway_token`, so the Tauri side just
+/// resolves the instance + sandbox backend and forwards.
 #[tauri::command]
 pub async fn get_gateway_token(name: String) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let registry = clawenv_core::claw::ClawRegistry::load();
-    let desc = registry.get(&inst.claw_type);
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-
-    // Use node to reliably parse JSON; supports both old (j.token) and new (j.gateway.auth.token) formats
-    let script = format!(
-        r#"node -e "
-const fs = require('fs'), path = require('path'), id = '{id}';
-let homes = [];
-try {{ homes = fs.readdirSync('/home').map(u => '/home/'+u+'/.'+id+'/'+id+'.json'); }} catch {{}}
-const home = process.env.HOME || process.env.USERPROFILE || '~';
-const candidates = [path.join(home, '.'+id, id+'.json'), ...homes.filter(f => {{ try {{ return fs.existsSync(f); }} catch {{ return false; }} }})];
-for (const f of candidates) {{
-  try {{
-    const j = JSON.parse(fs.readFileSync(f,'utf8'));
-    const t = (j.gateway && j.gateway.auth && j.gateway.auth.token) || j.token || '';
-    if (t) {{ process.stdout.write(t); process.exit(0); }}
-  }} catch {{}}
-}}
-""#,
-        id = desc.id
-    );
-
-    let result = backend.exec(&script).await.unwrap_or_default();
-    let token = result.trim().to_string();
+    let registry = InstanceRegistry::with_default_path();
+    let inst = registry.find(&name).await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+    let backend = instance_helper::backend_arc_for_instance(&inst)?;
+    let token = read_gateway_token(&backend, &inst.claw)
+        .await
+        .map_err(|e| e.to_string())?;
     if token.is_empty() {
         return Err(format!("No gateway token found for '{name}'. Is the instance running?"));
     }
     Ok(token)
 }
 
-/// Get bridge server configuration — direct core (lightweight config read)
 #[tauri::command]
 pub fn get_bridge_config() -> Result<serde_json::Value, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let bridge = &config.config().clawenv.bridge;
-    serde_json::to_value(bridge).map_err(|e| e.to_string())
+    let global = config_loader::load_global().map_err(|e| e.to_string())?;
+    serde_json::to_value(&global.bridge).map_err(|e| e.to_string())
 }
 
-/// Update bridge server configuration
 #[tauri::command]
 pub async fn save_bridge_config(bridge_json: String) -> Result<(), String> {
-    let bridge: clawenv_core::config::BridgeConfig =
+    let bridge: config_loader::BridgeConfig =
         serde_json::from_str(&bridge_json).map_err(|e| e.to_string())?;
-    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
-    config.config_mut().clawenv.bridge = bridge;
-    config.save().map_err(|e| e.to_string())
+    config_loader::save_bridge_section(&bridge).map_err(|e| e.to_string())
 }
 
-/// Open URL in platform default browser — GUI-only
 #[tauri::command]
 pub async fn open_url_in_browser(url: String) -> Result<(), String> {
-    clawenv_core::platform::process::open_url(&url).await.map_err(|e| e.to_string())
+    util::open_url(&url).await.map_err(|e| e.to_string())
 }

@@ -1,4 +1,4 @@
-use clawenv_core::config::ProxyConfig;
+use clawops_core::proxy::ProxyConfig;
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -128,39 +128,8 @@ pub fn detect_system_proxy_native_only() -> Option<serde_json::Value> {
     { return detect_macos_proxy(); }
     #[cfg(target_os = "windows")]
     { return detect_windows_proxy(); }
-    #[cfg(target_os = "linux")]
-    {
-        // gsettings must be invoked async — to stay blocking here we use
-        // std::process. GNOME-only; non-GNOME Linux relies on shell env.
-        return detect_linux_proxy_blocking();
-    }
     #[allow(unreachable_code)]
     None
-}
-
-/// Blocking sibling of `detect_linux_proxy` for use from `main()`.
-#[cfg(target_os = "linux")]
-fn detect_linux_proxy_blocking() -> Option<serde_json::Value> {
-    fn gs(key: &str, subkey: &str) -> Option<String> {
-        let output = std::process::Command::new("gsettings")
-            .args(["get", key, subkey])
-            .output().ok()?;
-        if !output.status.success() { return None; }
-        let s = String::from_utf8_lossy(&output.stdout).trim().trim_matches('\'').to_string();
-        if s.is_empty() || s == "''" { None } else { Some(s) }
-    }
-    let mode = gs("org.gnome.system.proxy", "mode")?;
-    if mode != "manual" { return None; }
-    let host = gs("org.gnome.system.proxy.http", "host").unwrap_or_default();
-    let port = gs("org.gnome.system.proxy.http", "port").unwrap_or_default();
-    if host.is_empty() || port == "0" { return None; }
-    let url = format!("http://{host}:{port}");
-    Some(serde_json::json!({
-        "detected": true,
-        "source": "GNOME gsettings",
-        "http_proxy": url, "https_proxy": url,
-        "no_proxy": "localhost,127.0.0.1",
-    }))
 }
 
 /// Test connectivity TO a set of targets FROM inside a specific sandbox VM.
@@ -176,15 +145,14 @@ pub async fn test_instance_network(
     name: String,
     targets: Vec<String>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    use clawenv_core::config::ConfigManager;
+    use clawops_core::instance::InstanceRegistry;
 
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = config.instances().iter()
-        .find(|i| i.name == name)
+    let registry = InstanceRegistry::with_default_path();
+    let inst = registry.find(&name).await
+        .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Instance '{name}' not found"))?;
 
-    let backend = clawenv_core::manager::instance::backend_for_instance(inst)
-        .map_err(|e| e.to_string())?;
+    let backend = crate::instance_helper::backend_for_instance(&inst)?;
 
     let mut results = Vec::new();
     for t in targets {
@@ -276,12 +244,6 @@ pub async fn detect_system_proxy() -> Result<serde_json::Value, String> {
     // 2b. Windows — registry.
     #[cfg(target_os = "windows")]
     if let Some(v) = detect_windows_proxy() {
-        return Ok(v);
-    }
-
-    // 2c. Linux — GNOME gsettings.
-    #[cfg(target_os = "linux")]
-    if let Some(v) = detect_linux_proxy().await {
         return Ok(v);
     }
 
@@ -496,59 +458,3 @@ fn detect_windows_proxy() -> Option<serde_json::Value> {
     }))
 }
 
-/// Linux proxy detection via GNOME gsettings. KDE and env-var-driven setups
-/// are handled by the env-var branch at the top of `detect_system_proxy`.
-/// A plain Linux box with no proxy configured simply returns `None`.
-#[cfg(target_os = "linux")]
-async fn detect_linux_proxy() -> Option<serde_json::Value> {
-    async fn gs(key: &str, subkey: &str) -> Option<String> {
-        let output = tokio::process::Command::new("gsettings")
-            .args(["get", key, subkey])
-            .output().await.ok()?;
-        if !output.status.success() { return None; }
-        let s = String::from_utf8_lossy(&output.stdout).trim().trim_matches('\'').to_string();
-        if s.is_empty() || s == "''" { None } else { Some(s) }
-    }
-
-    let mode = gs("org.gnome.system.proxy", "mode").await?;
-    if mode != "manual" {
-        // `auto` uses PAC URL — same caveat as macOS. Report but don't claim
-        // a usable proxy URL.
-        if mode == "auto" {
-            let pac = gs("org.gnome.system.proxy", "autoconfig-url").await.unwrap_or_default();
-            return Some(serde_json::json!({
-                "detected": false,
-                "source": "gnome-pac",
-                "http_proxy": "",
-                "https_proxy": "",
-                "no_proxy": "",
-                "pac_url": pac,
-                "note": "GNOME auto-proxy (PAC) detected. PAC scripts are not resolved — please enter an explicit proxy.",
-            }));
-        }
-        return None;
-    }
-
-    let http_host = gs("org.gnome.system.proxy.http", "host").await.unwrap_or_default();
-    let http_port = gs("org.gnome.system.proxy.http", "port").await.unwrap_or_default();
-    let https_host = gs("org.gnome.system.proxy.https", "host").await.unwrap_or_default();
-    let https_port = gs("org.gnome.system.proxy.https", "port").await.unwrap_or_default();
-
-    let http  = (!http_host.is_empty()  && http_port != "0").then(|| format!("http://{http_host}:{http_port}"));
-    let https = (!https_host.is_empty() && https_port != "0").then(|| format!("http://{https_host}:{https_port}"));
-
-    if http.is_none() && https.is_none() {
-        return None;
-    }
-
-    let h = http.clone().or_else(|| https.clone()).unwrap();
-    let s = https.or(http).unwrap();
-
-    Some(serde_json::json!({
-        "detected": true,
-        "source": "GNOME gsettings",
-        "http_proxy": h,
-        "https_proxy": s,
-        "no_proxy": "localhost,127.0.0.1",
-    }))
-}

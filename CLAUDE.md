@@ -19,18 +19,20 @@ OpenClaw（及 claw 生态）的跨平台沙盒安装器、启动器与管理器
 | Sandbox| ✅ Lima | ✅ WSL2 | ✅ Podman |
 | GUI    | ✅     | ✅       | ❌ 不支持 |
 
-**Linux GUI 明确不支持**：现存的 Linux GUI 相关代码（例如 `install_native/linux.rs` 的 Node 安装、`SandboxPage` 的 Podman 路径等）保留但不主动维护、不为其做新特性适配。新增 GUI 功能只保证 macOS + Windows 双平台同步，Linux 侧维持现状即可，不需要清理。Linux 用户通过 CLI（`clawcli`）使用。
+**Linux GUI 明确不支持**：tauri/ 里 Linux 专属分支已删除（v0.4 清理）。新增 GUI 功能只保证 macOS + Windows 双平台同步。Linux 用户通过 CLI（`clawcli`）使用。
 
-## Workspace 结构（v2 迁移后）
+## Workspace 结构
 
 ```
-core/            # clawops-core — v2 沙盒/安装/wire 类型（SSOT）
-cli/             # clawcli — v2 统一 CLI（GUI 的 sidecar 二进制）
+core/            # clawops-core — 沙盒/安装/wire 类型（SSOT）
+cli/             # clawcli — 统一 CLI（GUI 的 sidecar 二进制）
 tauri/           # clawgui — Tauri GUI 应用（含 System Tray，spawn clawcli）
+  src/util.rs            # silent_cmd / open_url / proxy env helpers
+  src/instance_helper.rs # backend_for_instance / 端口查找
+  src/claw_meta.rs       # 已知 claw 的 display_name / logo / npm_package
+  src/gui_cache.rs       # ~/.clawenv/gui-cache.json（latest-version 缓存）
+  src/bridge_server/     # 内嵌 HIL/exec-approval HTTP server（待 AttaRun 接管）
 src/             # 前端 SolidJS（直接调 Tauri IPC，从不直接 spawn CLI）
-legacy/core/     # clawenv-core — v1 内进程 API（GUI 仍依赖于
-                 #   ConfigManager / ClawRegistry / browser HIL /
-                 #   manager::instance；v0.5.x 移除，详见 docs/v2/v0.5.x-features.md）
 assets/          # v1 资源（lima、mcp、claw-registry.toml）
 assets/v2/       # v2 资源（lima/clawenv-alpine.yaml、podman/Containerfile、mcp/*）
 docs/            # v1 规格文档
@@ -39,8 +41,7 @@ tests/e2e/       # v1 e2e 脚本
 tests/v2/e2e/    # v2 e2e 脚本（run.sh + scenarios/）
 ```
 
-`Cargo.toml` workspace 成员：`core`、`cli`、`tauri`、`legacy/core`。
-原 v2/ 子目录已扁平化合并；v1 cli 已删除（v2 clawcli 替代）。
+`Cargo.toml` workspace 成员：`core`、`cli`、`tauri`。legacy/core 已在 v0.4 删除。
 
 ## 架构铁律
 
@@ -53,7 +54,7 @@ tests/v2/e2e/    # v2 e2e 脚本（run.sh + scenarios/）
 7. **Claw 管理页是 WebView**：不自己实现管理 UI，内嵌加载各 Claw 产品自带的 Web 管理面板。ClawPage 组件通过 ClawDescriptor 动态适配不同产品。
 
 8. **CLI 是核心**：所有业务逻辑通过 CLI（`clawcli --json`）暴露，Tauri GUI 是薄壳，通过 `cli_bridge` spawn CLI 子进程。
-9. **Shell 安全**：所有拼入 shell 的动态变量必须用 `shell_quote()` / `powershell_quote()` 转义（`core/src/platform/mod.rs`）。
+9. **Shell 安全**：所有拼入 shell 的动态变量必须用 `shell_quote()` 转义（`core/src/sandbox_backend/`）。
 10. **Bridge 是独立 daemon**：AttaRun bridge 和沙盒实例平级，由系统守护机制（launchd/systemd/Task Scheduler）托管。ClawEnv 通过 admin API（HTTP `127.0.0.1`）和守护协议管理，不做父进程。ClawEnv tray 关闭不影响 bridge 在线状态。详见 `docs/22-attarun-bridge.md`。
 
 ## Rust 版本

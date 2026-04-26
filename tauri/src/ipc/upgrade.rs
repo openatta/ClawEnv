@@ -1,4 +1,4 @@
-use clawenv_core::api::UpdateCheckResponse;
+use clawops_core::wire::UpdateCheckResponse;
 use tauri::Emitter;
 
 use crate::cli_bridge::{self, CliEvent};

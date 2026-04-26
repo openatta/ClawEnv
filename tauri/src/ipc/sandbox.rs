@@ -1,18 +1,19 @@
-use clawenv_core::api::SandboxListResponse;
-use clawenv_core::browser::chromium::ChromiumBackend;
-use clawenv_core::browser::BrowserBackend;
-use clawenv_core::config::ConfigManager;
-use clawenv_core::manager::instance;
-#[cfg(target_os = "windows")]
-use clawenv_core::platform::process::silent_cmd;
+use clawops_core::browser::{BrowserBackend, BrowserStatus, ChromiumBackend};
+use clawops_core::config_loader;
+use clawops_core::instance::InstanceRegistry;
+use clawops_core::sandbox_backend::SandboxBackend;
+use clawops_core::wire::{SandboxListResponse, SandboxVmInfo};
 use std::sync::Arc;
 use tauri::Emitter;
 
 use crate::cli_bridge;
+use crate::instance_helper;
 use crate::ipc::emit::{emit_instance_changed, InstanceAction, InstanceChanged};
+#[cfg(target_os = "windows")]
+use crate::util::silent_cmd;
 
 #[tauri::command]
-pub async fn list_sandbox_vms() -> Result<Vec<clawenv_core::api::SandboxVmInfo>, String> {
+pub async fn list_sandbox_vms() -> Result<Vec<SandboxVmInfo>, String> {
     let data = cli_bridge::run_cli(&["sandbox", "list"]).await.map_err(|e| e.to_string())?;
     let resp: SandboxListResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
     Ok(resp.vms)
@@ -22,26 +23,12 @@ pub async fn list_sandbox_vms() -> Result<Vec<clawenv_core::api::SandboxVmInfo>,
 pub async fn get_sandbox_disk_usage() -> Result<String, String> {
     #[cfg(target_os = "macos")]
     {
-        let lima_dir = clawenv_core::sandbox::lima_home();
+        let lima_dir = clawops_core::paths::lima_home();
         let output = tokio::process::Command::new("du")
             .args(["-sh", &lima_dir.to_string_lossy()])
             .output().await.map_err(|e| e.to_string())?;
         let s = String::from_utf8_lossy(&output.stdout);
         Ok(s.split_whitespace().next().unwrap_or("unknown").to_string())
-    }
-    #[cfg(target_os = "linux")]
-    {
-        // Report the size of the private Podman data dir directly — matches
-        // Lima (macOS) and WSL (Windows), which also `du`/PowerShell the
-        // ClawEnv-owned directory rather than asking the tool about global
-        // state. `podman system df` would count any containers the user
-        // created outside of ClawEnv, inflating the number.
-        let data_dir = clawenv_core::sandbox::podman_data_home();
-        let output = tokio::process::Command::new("du")
-            .args(["-sh", &data_dir.to_string_lossy()])
-            .output().await.map_err(|e| e.to_string())?;
-        let s = String::from_utf8_lossy(&output.stdout);
-        Ok(s.split_whitespace().next().unwrap_or("0").to_string())
     }
     #[cfg(target_os = "windows")]
     {
@@ -89,29 +76,29 @@ where
     None
 }
 
-fn managed_instance_for_vm(vm_name: &str) -> Option<String> {
-    let config = match ConfigManager::load() {
-        Ok(c) => c,
+async fn managed_instance_for_vm(vm_name: &str) -> Option<String> {
+    let registry = InstanceRegistry::with_default_path();
+    let instances = match registry.list().await {
+        Ok(v) => v,
         Err(e) => {
-            tracing::warn!("managed_instance_for_vm: failed to load config: {e}");
+            tracing::warn!("managed_instance_for_vm: failed to load registry: {e}");
             return None;
         }
     };
-    let pairs = config.instances().iter()
-        .map(|i| (i.name.clone(), i.sandbox_id.clone()));
+    let pairs = instances.iter()
+        .map(|i| (i.name.clone(), i.sandbox_instance.clone()));
     let hit = match_instance_by_sandbox_id(vm_name, pairs);
     // A managed-looking VM (clawenv-/ClawEnv- prefix) with no matching
-    // sandbox_id in config.toml points at a genuine data inconsistency:
-    // either the config got corrupted, or an install aborted before
-    // save_config. Log it so the cascade-delete no-op is visible in the
-    // tracing backend instead of silently falling through to raw VM delete.
+    // sandbox_instance in the registry points at a genuine data inconsistency:
+    // either the registry got corrupted, or an install aborted before
+    // save_config. Log it so the cascade-delete no-op is visible.
     if hit.is_none()
         && (vm_name.starts_with("clawenv-") || vm_name.starts_with("ClawEnv-"))
     {
         tracing::warn!(
             "managed_instance_for_vm: VM '{}' looks managed but has no matching \
-             instance.sandbox_id in config.toml — falling back to raw VM action \
-             (cascade delete will not update config)",
+             instance.sandbox_instance in registry — falling back to raw VM action \
+             (cascade delete will not update registry)",
             vm_name
         );
     }
@@ -188,9 +175,9 @@ mod match_instance_tests {
 #[tauri::command]
 pub async fn sandbox_vm_action(app: tauri::AppHandle, vm_name: String, action: String) -> Result<(), String> {
     if action == "delete" {
-        if let Some(instance_name) = managed_instance_for_vm(&vm_name) {
+        if let Some(instance_name) = managed_instance_for_vm(&vm_name).await {
             // Route through the cascade-delete path: stops the VM, deletes files,
-            // removes the instance from config.toml, and emits the full event chain.
+            // removes the instance from registry, and emits the full event chain.
             return super::instance::delete_instance_with_progress(app, instance_name).await;
         }
     }
@@ -203,30 +190,13 @@ pub async fn sandbox_vm_action(app: tauri::AppHandle, vm_name: String, action: S
             "delete" => vec!["delete", "--force", &vm_name],
             _ => return Err(format!("Unknown action: {action}")),
         };
-        let status = tokio::process::Command::new(clawenv_core::sandbox::limactl_bin())
+        let status = tokio::process::Command::new(clawops_core::paths::limactl_bin())
             .args(&args)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .status().await.map_err(|e| e.to_string())?;
         if !status.success() {
             return Err(format!("limactl {} {} failed", action, vm_name));
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        let args = match action.as_str() {
-            "start" => vec!["start".to_string(), vm_name.clone()],
-            "stop" => vec!["stop".to_string(), vm_name.clone()],
-            "delete" => vec!["rm".to_string(), "-f".to_string(), vm_name.clone()],
-            _ => return Err(format!("Unknown action: {action}")),
-        };
-        let status = tokio::process::Command::new("podman")
-            .args(&args)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status().await.map_err(|e| e.to_string())?;
-        if !status.success() {
-            return Err(format!("podman {} {} failed", action, vm_name));
         }
     }
     #[cfg(target_os = "windows")]
@@ -254,8 +224,8 @@ pub async fn sandbox_vm_action(app: tauri::AppHandle, vm_name: String, action: S
     tracing::info!("Sandbox VM action: {} on {}", action, vm_name);
 
     // Emit instance-changed for managed VMs so the frontend refreshes health
-    // and button state. Orphan VMs have no config entry and are a no-op here.
-    if let Some(inst_name) = managed_instance_for_vm(&vm_name) {
+    // and button state. Orphan VMs have no registry entry and are a no-op here.
+    if let Some(inst_name) = managed_instance_for_vm(&vm_name).await {
         let act = match action.as_str() {
             "start" => Some(InstanceAction::Start),
             "stop" => Some(InstanceAction::Stop),
@@ -269,12 +239,19 @@ pub async fn sandbox_vm_action(app: tauri::AppHandle, vm_name: String, action: S
     Ok(())
 }
 
-/// Check if Chromium is installed in a sandbox instance
+async fn resolve_backend(name: &str) -> Result<(clawops_core::instance::InstanceConfig, Arc<dyn SandboxBackend>), String> {
+    let registry = InstanceRegistry::with_default_path();
+    let inst = registry.find(name).await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+    let backend_arc = instance_helper::backend_arc_for_instance(&inst)?;
+    Ok((inst, backend_arc))
+}
+
+/// Check if Chromium is installed in a sandbox instance.
 #[tauri::command]
 pub async fn check_chromium_installed(name: String) -> Result<bool, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let (_, backend) = resolve_backend(&name).await?;
     let result = backend.exec("which chromium 2>/dev/null || which chromium-browser 2>/dev/null || echo ''").await;
     match result {
         Ok(out) => Ok(!out.trim().is_empty()),
@@ -282,17 +259,20 @@ pub async fn check_chromium_installed(name: String) -> Result<bool, String> {
     }
 }
 
-/// Install Chromium + noVNC in a running sandbox instance
+/// Install Chromium + noVNC in a running sandbox instance.
+///
+/// v2 doesn't yet expose a per-line streaming exec on the bare
+/// `SandboxBackend` trait (only `ExecutionContext` does), so this
+/// runs the apk install as a single blocking exec and emits one
+/// "in progress" + one "done" event. Live log streaming will return
+/// when the install path is moved onto `ExecutionContext`.
 #[tauri::command]
 pub async fn install_chromium(
     app: tauri::AppHandle,
     name: String,
 ) -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
+    let (_, backend) = resolve_backend(&name).await?;
 
-    // Check if already installed
     let already = backend.exec("which chromium 2>/dev/null || which chromium-browser 2>/dev/null || echo ''").await.unwrap_or_default();
     if !already.trim().is_empty() {
         let _ = app.emit("chromium-install-progress", "Chromium is already installed!");
@@ -302,27 +282,19 @@ pub async fn install_chromium(
     let _ = app.emit("chromium-install-progress", "Installing Chromium and dependencies (~630MB)...");
     let _ = app.emit("chromium-install-progress", "Note: apk will resume from any previously downloaded packages.");
 
-    // Use exec_with_progress for streaming output
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
-    let app2 = app.clone();
-    tokio::spawn(async move {
-        while let Some(line) = rx.recv().await {
-            let _ = app2.emit("chromium-install-progress", &line);
-        }
-    });
-
-    let result = backend.exec_with_progress(
+    let result = backend.exec(
         "sudo apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1 || apk add --no-cache chromium xvfb-run x11vnc novnc websockify ttf-freefont 2>&1",
-        &tx,
     ).await;
-    drop(tx);
 
     match result {
         Ok(output) => {
+            for line in output.lines() {
+                let _ = app.emit("chromium-install-progress", line);
+            }
             let _ = app.emit("chromium-install-progress", "✓ Chromium installed successfully!");
             let _ = app.emit("chromium-install-complete", &name);
             emit_instance_changed(&app, InstanceChanged::simple(InstanceAction::InstallChromium, &name));
-            tracing::info!("Chromium installed in '{}': {}", name, output.chars().take(200).collect::<String>());
+            tracing::info!("Chromium installed in '{}': {} chars output", name, output.len());
             Ok(())
         }
         Err(e) => {
@@ -333,68 +305,55 @@ pub async fn install_chromium(
     }
 }
 
-/// Get browser status for a sandbox instance
 #[tauri::command]
 pub async fn browser_status(name: String) -> Result<serde_json::Value, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
-    let browser = ChromiumBackend::new(backend_arc);
-    let status = browser.status().await.map_err(|e| e.to_string())?;
+    let (_, backend) = resolve_backend(&name).await?;
+    let browser = ChromiumBackend::new(backend);
+    let status: BrowserStatus = browser.status().await.map_err(|e| e.to_string())?;
     serde_json::to_value(&status).map_err(|e| e.to_string())
 }
 
-/// Start browser in interactive (noVNC) mode for human intervention
 #[tauri::command]
 pub async fn browser_start_interactive(name: String) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
+    let (inst, backend) = resolve_backend(&name).await?;
     let vnc_port = inst.browser.vnc_ws_port;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
-    let browser = ChromiumBackend::new(backend_arc);
+    let browser = ChromiumBackend::new(backend);
     let url = browser.start_interactive(vnc_port).await.map_err(|e| e.to_string())?;
     Ok(url)
 }
 
-/// Resume headless mode after human intervention
 #[tauri::command]
 pub async fn browser_resume_headless(name: String) -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    let backend = instance::backend_for_instance(inst).map_err(|e| e.to_string())?;
-    let backend_arc: Arc<dyn clawenv_core::sandbox::SandboxBackend> = Arc::from(backend);
-    let browser = ChromiumBackend::new(backend_arc);
+    let (_, backend) = resolve_backend(&name).await?;
+    let browser = ChromiumBackend::new(backend);
     browser.resume_headless().await.map_err(|e| e.to_string())
 }
 
-/// Notify bridge server that HIL is complete (unblocks hil_request)
+fn bridge_port() -> Result<u16, String> {
+    Ok(config_loader::load_global().map_err(|e| e.to_string())?.bridge.port)
+}
+
 #[tauri::command]
 pub async fn hil_complete() -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let port = config.config().clawenv.bridge.port;
-    let url = format!("http://127.0.0.1:{port}/api/hil/complete");
-    reqwest::Client::new().post(&url).send().await.map_err(|e| e.to_string())?;
+    let port = bridge_port()?;
+    reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{port}/api/hil/complete"))
+        .send().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Approve a pending exec command
 #[tauri::command]
 pub async fn exec_approve() -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let port = config.config().clawenv.bridge.port;
+    let port = bridge_port()?;
     reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/api/exec/approve"))
         .send().await.map_err(|e| e.to_string())?;
     Ok(())
 }
 
-/// Deny a pending exec command
 #[tauri::command]
 pub async fn exec_deny() -> Result<(), String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let port = config.config().clawenv.bridge.port;
+    let port = bridge_port()?;
     reqwest::Client::new()
         .post(format!("http://127.0.0.1:{port}/api/exec/deny"))
         .send().await.map_err(|e| e.to_string())?;

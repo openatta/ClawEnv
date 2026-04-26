@@ -48,9 +48,12 @@ async fn resolve_instance(name: &str) -> anyhow::Result<InstanceConfig> {
     Ok(InstanceConfig {
         name: name.into(),
         claw: String::new(),
+        claw_version: String::new(),
         backend,
         sandbox_instance: name.into(),
         ports: Vec::new(),
+        browser: clawops_core::instance::BrowserBinding::default(),
+        proxy: None,
         created_at: String::new(),
         updated_at: String::new(),
         note: "(unregistered — synthesized from host defaults)".into(),
@@ -1407,6 +1410,7 @@ pub async fn run_import(ctx: &Ctx, args: ImportArgs) -> anyhow::Result<()> {
     let cfg = InstanceConfig {
         name: args.name.clone(),
         claw: manifest.claw_type.clone(),
+        claw_version: manifest.claw_version.clone(),
         backend: kind,
         sandbox_instance: args.name.clone(),
         ports: vec![PortBinding {
@@ -1414,6 +1418,8 @@ pub async fn run_import(ctx: &Ctx, args: ImportArgs) -> anyhow::Result<()> {
             guest: 3000,
             label: "gateway".into(),
         }],
+        browser: clawops_core::instance::BrowserBinding::default(),
+        proxy: None,
         created_at: now.clone(),
         updated_at: now,
         note: format!(

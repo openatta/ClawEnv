@@ -1,49 +1,54 @@
-// Settings use direct core calls — GUI settings page submits multiple fields
-// at once, which is more efficient as a single config load/save cycle.
-use clawenv_core::config::{ConfigManager, ProxyConfig, UserMode};
+//! Settings page handlers — drive `[clawenv.proxy]`, `[clawenv.bridge]`, and
+//! a small set of scalar fields under `[clawenv]` (language, theme).
+//!
+//! v2 `config_loader` is function-based rather than a stateful
+//! `ConfigManager`, so each save lands a focused write through
+//! `save_clawenv_field` / `save_proxy_section`. This is also
+//! transactionally cleaner than the v1 "load → mutate → save the whole
+//! file" pattern, which round-tripped any unrelated edits the user made
+//! out-of-band.
+
+use clawops_core::config_loader;
+use clawops_core::credentials;
+use clawops_core::instance::{InstanceRegistry, SandboxKind};
+use clawops_core::proxy::ProxyConfig;
 
 #[tauri::command]
 pub async fn save_settings(settings_json: String) -> Result<(), String> {
-    let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
-
-    // Parse the incoming JSON as partial config fields
     let values: serde_json::Value =
         serde_json::from_str(&settings_json).map_err(|e| e.to_string())?;
 
-    let cfg = config.config_mut();
-
     if let Some(lang) = values.get("language").and_then(|v| v.as_str()) {
-        cfg.clawenv.language = lang.to_string();
+        config_loader::save_clawenv_field("language", lang)
+            .map_err(|e| e.to_string())?;
     }
     if let Some(theme) = values.get("theme").and_then(|v| v.as_str()) {
-        cfg.clawenv.theme = theme.to_string();
+        config_loader::save_clawenv_field("theme", theme)
+            .map_err(|e| e.to_string())?;
     }
     if let Some(proxy) = values.get("proxy") {
         if let Ok(p) = serde_json::from_value::<ProxyConfig>(proxy.clone()) {
-            // Store proxy password in keychain if present in JSON
             if let Some(password) = proxy.get("auth_password").and_then(|v| v.as_str()) {
                 if !password.is_empty() {
-                    let _ = clawenv_core::config::keychain::store_proxy_password(password);
+                    let _ = credentials::store_proxy_password(password);
                 }
             }
-            cfg.clawenv.proxy = p;
+            config_loader::save_proxy_section(&p).map_err(|e| e.to_string())?;
         }
     }
     if let Some(auto_check) = values.get("auto_check_updates").and_then(|v| v.as_bool()) {
-        cfg.clawenv.updates.auto_check = auto_check;
+        config_loader::save_clawenv_field("auto_check_updates", &auto_check.to_string())
+            .map_err(|e| e.to_string())?;
     }
-
-    config.save().map_err(|e| e.to_string())
+    Ok(())
 }
 
-/// Check if autostart is enabled at OS level
 #[tauri::command]
 pub async fn autostart_is_enabled(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_autostart::ManagerExt;
     app.autolaunch().is_enabled().map_err(|e| e.to_string())
 }
 
-/// Enable or disable autostart at OS level
 #[tauri::command]
 pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), String> {
     use tauri_plugin_autostart::ManagerExt;
@@ -54,28 +59,29 @@ pub async fn autostart_set(app: tauri::AppHandle, enabled: bool) -> Result<(), S
     }
 }
 
+/// First-run config bootstrap. v2's `config_loader::load_global` returns
+/// defaults for a missing file, so the only "creation" step is writing
+/// the `user_mode` field so subsequent loads echo it back.
 #[tauri::command]
 pub async fn create_default_config(user_mode: String) -> Result<(), String> {
     let mode = match user_mode.to_lowercase().as_str() {
-        "developer" | "dev" => UserMode::Developer,
-        _ => UserMode::General,
+        "developer" | "dev" => "developer",
+        _ => "general",
     };
-    ConfigManager::create_default(mode).map_err(|e| e.to_string())?;
-    Ok(())
+    config_loader::save_clawenv_field("user_mode", mode).map_err(|e| e.to_string())
 }
 
-/// Diagnose instance/config consistency. Returns issues and offers repair.
+/// Diagnose instance / on-disk consistency. Returns issues + offers repair.
 #[tauri::command]
 pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
-    use clawenv_core::sandbox::SandboxType;
-
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let registry = InstanceRegistry::with_default_path();
+    let instances = registry.list().await.map_err(|e| e.to_string())?;
     let home = dirs::home_dir().unwrap_or_default();
     let mut issues: Vec<serde_json::Value> = Vec::new();
 
-    for inst in config.instances() {
-        match inst.sandbox_type {
-            SandboxType::Native => {
+    for inst in &instances {
+        match inst.backend {
+            SandboxKind::Native => {
                 let native_dir = home.join(".clawenv").join("native");
                 if !native_dir.exists() {
                     issues.push(serde_json::json!({
@@ -93,12 +99,12 @@ pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
                     }));
                 }
             }
-            SandboxType::LimaAlpine => {
-                let vm_dir = clawenv_core::sandbox::lima_home().join(&inst.sandbox_id);
+            SandboxKind::Lima => {
+                let vm_dir = clawops_core::paths::lima_home().join(&inst.sandbox_instance);
                 if !vm_dir.exists() {
                     issues.push(serde_json::json!({
                         "instance": inst.name, "type": "missing_vm",
-                        "message": format!("Lima VM missing: {}", inst.sandbox_id),
+                        "message": format!("Lima VM missing: {}", inst.sandbox_instance),
                         "fixable": true,
                     }));
                 }
@@ -107,18 +113,17 @@ pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
         }
     }
 
-    // Check orphan directories
     let native_dir = home.join(".clawenv").join("native");
-    if native_dir.exists() && !config.instances().iter().any(|i| i.sandbox_type == SandboxType::Native) {
+    if native_dir.exists() && !instances.iter().any(|i| i.backend == SandboxKind::Native) {
         issues.push(serde_json::json!({
             "instance": "(orphan)", "type": "orphan_native",
-            "message": "Orphan native directory exists but no native instance in config",
+            "message": "Orphan native directory exists but no native instance in registry",
             "fixable": true,
         }));
     }
 
-    // Detect legacy Lima VMs left in the system default ~/.lima/ from older
-    // clawenv builds (before LIMA_HOME was pinned to ~/.clawenv/lima).
+    // Legacy Lima VMs left in the system default ~/.lima/ from old builds
+    // (before LIMA_HOME was pinned to ~/.clawenv/lima).
     let legacy_lima = home.join(".lima");
     if legacy_lima.exists() {
         if let Ok(mut rd) = std::fs::read_dir(&legacy_lima) {
@@ -138,24 +143,20 @@ pub async fn diagnose_instances() -> Result<serde_json::Value, String> {
 
     Ok(serde_json::json!({
         "issues": issues,
-        "instance_count": config.instances().len(),
+        "instance_count": instances.len(),
     }))
 }
 
-/// Fix a diagnostic issue by removing orphan data or config entries
 #[tauri::command]
 pub async fn fix_diagnostic_issue(instance_name: String, issue_type: String) -> Result<(), String> {
     let home = dirs::home_dir().unwrap_or_default();
 
     match issue_type.as_str() {
         "missing_dir" | "missing_vm" => {
-            // Remove instance from config (data is gone)
-            let mut config = ConfigManager::load().map_err(|e| e.to_string())?;
-            config.config_mut().instances.retain(|i| i.name != instance_name);
-            config.save().map_err(|e| e.to_string())?;
+            let registry = InstanceRegistry::with_default_path();
+            let _ = registry.remove(&instance_name).await;
         }
         "orphan_native" => {
-            // Delete orphan native directory
             let native_dir = home.join(".clawenv").join("native");
             tokio::fs::remove_dir_all(&native_dir).await.ok();
         }

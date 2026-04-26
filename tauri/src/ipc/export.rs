@@ -13,30 +13,25 @@
 //! `CURRENT_CHILD_PID` slot. kill_on_drop is also on, so if the Tauri
 //! process dies the child tar cleans up too.
 
-use clawenv_core::config::ConfigManager;
-use clawenv_core::manager::instance;
-use clawenv_core::sandbox::SandboxType;
+use clawops_core::instance::{InstanceRegistry, SandboxKind};
 use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::Emitter;
 use tauri_plugin_dialog::DialogExt;
 
 use crate::cli_bridge::{run_cli_streaming, CliEvent};
 
-/// PID of the currently-running export CLI child, or 0 if idle. Set when a
-/// new export starts; cleared when it finishes. `export_cancel` reads this
-/// to send a SIGTERM/TerminateProcess. AtomicU32 is sufficient because we
-/// only run one export at a time (the filesystem dialog is modal).
+/// PID of the currently-running export CLI child, or 0 if idle.
 static CURRENT_CHILD_PID: AtomicU32 = AtomicU32::new(0);
 
 /// File naming: {sandbox}-{arch}-{claw_type}-{timestamp}.tar.gz
-fn suggest_filename(sandbox_type: &SandboxType, claw_type: &str) -> String {
+fn suggest_filename(backend: SandboxKind, claw_type: &str) -> String {
     let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
     let arch = std::env::consts::ARCH;
-    let platform = match sandbox_type {
-        SandboxType::LimaAlpine => "lima",
-        SandboxType::Wsl2Alpine => "wsl2",
-        SandboxType::PodmanAlpine => "podman",
-        SandboxType::Native => {
+    let platform = match backend {
+        SandboxKind::Lima => "lima",
+        SandboxKind::Wsl2 => "wsl2",
+        SandboxKind::Podman => "podman",
+        SandboxKind::Native => {
             if cfg!(target_os = "macos") { "macos" }
             else if cfg!(target_os = "windows") { "windows" }
             else { "linux" }
@@ -115,7 +110,7 @@ pub async fn export_cancel() -> Result<(), String> {
     {
         // /T reaps the whole process tree; /F forces without asking the
         // child nicely. silent_cmd prevents a flashing console window.
-        let _ = clawenv_core::platform::process::silent_cmd("taskkill")
+        let _ = crate::util::silent_cmd("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
             .status().await;
     }
@@ -156,13 +151,15 @@ async fn run_export_cli(app: &tauri::AppHandle, name: &str, output: &str) -> Res
 /// Export a sandbox VM image.
 #[tauri::command]
 pub async fn export_sandbox(app: tauri::AppHandle, name: String) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    if inst.sandbox_type == SandboxType::Native {
+    let registry = InstanceRegistry::with_default_path();
+    let inst = registry.find(&name).await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+    if inst.backend == SandboxKind::Native {
         return Err("Use 'Export Bundle' for native instances".into());
     }
 
-    let suggested = suggest_filename(&inst.sandbox_type, &inst.claw_type);
+    let suggested = suggest_filename(inst.backend, &inst.claw);
     let path = app.dialog().file()
         .set_file_name(&suggested)
         .add_filter("VM Image", &["tar.gz", "gz"])
@@ -188,13 +185,15 @@ pub async fn export_sandbox(app: tauri::AppHandle, name: String) -> Result<Strin
 /// Export a native instance as an offline bundle.
 #[tauri::command]
 pub async fn export_native_bundle(app: tauri::AppHandle, name: String) -> Result<String, String> {
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    let inst = instance::get_instance(&config, &name).map_err(|e| e.to_string())?;
-    if inst.sandbox_type != SandboxType::Native {
+    let registry = InstanceRegistry::with_default_path();
+    let inst = registry.find(&name).await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("Instance '{name}' not found"))?;
+    if inst.backend != SandboxKind::Native {
         return Err("Use 'Export Image' for sandbox instances".into());
     }
 
-    let suggested = suggest_filename(&inst.sandbox_type, &inst.claw_type);
+    let suggested = suggest_filename(inst.backend, &inst.claw);
     let path = app.dialog().file()
         .set_file_name(&suggested)
         .add_filter("Native Bundle", &["tar.gz", "gz"])

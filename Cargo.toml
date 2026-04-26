@@ -1,14 +1,10 @@
 [workspace]
 resolver = "2"
-# Layout (post v2 migration):
-#   core/        — clawops-core (v2 sandbox/install/wire types)
-#   cli/         — clawcli binary (v2 unified CLI, sidecar for the GUI)
-#   tauri/       — clawgui (Tauri shell + IPC adapters)
-#   legacy/core/ — clawenv-core (v1 in-process API the GUI still depends
-#                  on for ConfigManager / ClawRegistry / browser HIL /
-#                  manager::instance helpers; tracked for removal in
-#                  docs/v2/v0.5.x-features.md "Migration / cleanup").
-members = ["core", "cli", "tauri", "legacy/core"]
+# Layout:
+#   core/   — clawops-core (sandbox / install / wire types)
+#   cli/    — clawcli binary (unified CLI, sidecar for the GUI)
+#   tauri/  — clawgui (Tauri shell + IPC adapters)
+members = ["core", "cli", "tauri"]
 
 [workspace.package]
 version = "0.3.2"
@@ -16,9 +12,6 @@ edition = "2021"
 license = "MIT"
 
 [workspace.dependencies]
-# Shared versions — the two cores (v1 legacy + v2) need consistent
-# resolutions for tokio, serde, etc. so a single Cargo.lock works for
-# the whole workspace.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time", "sync"] }
 async-trait = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -39,7 +32,6 @@ comfy-table = "7"
 owo-colors = { version = "4", features = ["supports-colors"] }
 
 # Credentials — OS keychain (macOS / Windows / Linux Secret Service).
-# Service name MUST stay "clawenv" so v1 and v2 share stored secrets.
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 
 tar = "0.4"

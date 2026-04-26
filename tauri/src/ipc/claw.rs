@@ -1,7 +1,7 @@
-use clawenv_core::api::{ClawTypeInfo, ClawTypesResponse};
-use clawenv_core::claw::ClawRegistry;
+use clawops_core::wire::{ClawTypeInfo, ClawTypesResponse};
 use serde::Serialize;
 
+use crate::claw_meta;
 use crate::cli_bridge;
 
 /// TypeScript-facing claw-type record. The wire shape (`ClawTypeInfo`)
@@ -13,7 +13,7 @@ pub struct ClawTypeView {
     pub id: String,
     pub display_name: String,
     /// Emoji or path used by the GUI as the claw's icon. Lives in the
-    /// host-side claw_catalog (ClawRegistry), not the wire type.
+    /// host-side `claw_meta` table, not the wire type.
     pub logo: String,
     pub package_manager: String,
     pub package_id: String,
@@ -33,13 +33,11 @@ pub struct ClawTypeView {
 pub async fn list_claw_types() -> Result<Vec<ClawTypeView>, String> {
     let data = cli_bridge::run_cli(&["claw", "list"]).await.map_err(|e| e.to_string())?;
     let resp: ClawTypesResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
-    let registry = ClawRegistry::load();
-    Ok(resp.claw_types.into_iter().map(|t| enrich(t, &registry)).collect())
+    Ok(resp.claw_types.into_iter().map(enrich).collect())
 }
 
-fn enrich(t: ClawTypeInfo, registry: &ClawRegistry) -> ClawTypeView {
-    let desc = registry.get(&t.id);
-    let logo = desc.logo.clone();
+fn enrich(t: ClawTypeInfo) -> ClawTypeView {
+    let meta = claw_meta::meta_for(&t.id);
     let (npm_package, pip_package) = match t.package_manager.as_str() {
         "npm" => (t.package_id.clone(), String::new()),
         // pip + git_pip both surface their identifier as pip_package
@@ -49,7 +47,7 @@ fn enrich(t: ClawTypeInfo, registry: &ClawRegistry) -> ClawTypeView {
     ClawTypeView {
         id: t.id,
         display_name: t.display_name,
-        logo,
+        logo: meta.logo,
         package_manager: t.package_manager,
         package_id: t.package_id,
         npm_package,

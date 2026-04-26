@@ -9,10 +9,11 @@
 //! bundle's own manifest (`clawenv-bundle.toml`), not from the
 //! filename — filenames can lie, manifests are authoritative.
 
-use clawenv_core::claw::ClawRegistry;
-use clawenv_core::export::BundleManifest;
+use clawops_core::export::BundleManifest;
 use serde::Serialize;
 use std::path::Path;
+
+use crate::claw_meta;
 
 #[derive(Debug, Serialize)]
 pub struct PackageInfo {
@@ -99,9 +100,21 @@ struct HostContext {
 
 impl HostContext {
     async fn detect() -> Self {
-        let sandbox_available = match clawenv_core::sandbox::detect_backend() {
-            Ok(b) => b.is_available().await.unwrap_or(false),
-            Err(_) => false,
+        // v2 doesn't expose a single `detect_backend()` factory — each
+        // SandboxBackend impl has its own `is_available()` predicate.
+        // Build the host's default and probe it directly.
+        use clawops_core::sandbox_backend::{
+            LimaBackend, PodmanBackend, SandboxBackend, WslBackend,
+        };
+        let sandbox_available = if cfg!(target_os = "macos") {
+            LimaBackend::new("default".to_string())
+                .is_available().await.unwrap_or(false)
+        } else if cfg!(target_os = "windows") {
+            WslBackend::new("default".to_string())
+                .is_available().await.unwrap_or(false)
+        } else {
+            PodmanBackend::new("default".to_string())
+                .is_available().await.unwrap_or(false)
         };
         Self {
             platform: if cfg!(target_os = "macos") { "macos" }
@@ -191,17 +204,13 @@ async fn inspect_bundle(path: &Path, ctx: &HostContext) -> Option<PackageInfo> {
         reason = format!("Bundle for arch {}, host is {}", file_arch, ctx.arch);
     }
 
-    // Resolve display name from the registry. If the registry doesn't
-    // know this claw_type, fall back to the raw id with initial cap so
-    // the UI still shows something sensible.
+    // Resolve display name from the static GUI table. Unknown claw_type
+    // falls back to its raw id (capitalised) so the UI still shows
+    // something sensible.
     let claw_display_name = if claw_type.is_empty() {
         String::new()
     } else {
-        let reg = ClawRegistry::load();
-        match reg.get_strict(&claw_type) {
-            Ok(desc) => desc.display_name.clone(),
-            Err(_) => capitalize(&claw_type),
-        }
+        claw_meta::meta_for(&claw_type).display_name
     };
 
     Some(PackageInfo {
@@ -231,12 +240,4 @@ fn arch_matches(file: &str, host: &str) -> bool {
 
 fn first_line(s: &str) -> String {
     s.lines().next().unwrap_or("").to_string()
-}
-
-fn capitalize(s: &str) -> String {
-    let mut chars = s.chars();
-    match chars.next() {
-        Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
-        None => String::new(),
-    }
 }

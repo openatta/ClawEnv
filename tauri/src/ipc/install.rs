@@ -1,6 +1,6 @@
-use clawenv_core::api::{SystemCheckResponse, CheckItem as ApiCheckItem};
-use clawenv_core::config::ProxyConfig;
-use clawenv_core::config::proxy_resolver::{self, ProxySource};
+use clawops_core::credentials;
+use clawops_core::proxy::{ProxyConfig, ProxySource, ProxyTriple};
+use clawops_core::wire::{SystemCheckItem as ApiCheckItem, SystemInfo as SystemCheckResponse};
 use serde::Serialize;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
@@ -95,7 +95,7 @@ pub async fn install_openclaw(
     let proxy_env: Vec<(String, String)> = proxy_json
         .as_deref()
         .and_then(|s| serde_json::from_str::<ProxyConfig>(s).ok())
-        .and_then(|p| proxy_resolver::triple_from_config_proxy(&p, ProxySource::GlobalConfig))
+        .and_then(|p| triple_from_proxy_config(&p))
         .map(|t| vec![
             ("http_proxy".to_string(), t.http.clone()),
             ("HTTP_PROXY".to_string(), t.http),
@@ -229,34 +229,54 @@ pub async fn install_openclaw(
 
 #[tauri::command]
 pub async fn install_prerequisites(app: tauri::AppHandle) -> Result<(), String> {
-    // Prerequisites install is not in CLI yet — keep direct core call
-    use clawenv_core::sandbox::detect_backend;
-
-    let _ = app.emit("prereq-step", "Detecting sandbox backend...");
-    let backend = detect_backend().map_err(|e| e.to_string())?;
-
-    let available = backend.is_available().await.unwrap_or(false);
-    if available {
-        let _ = app.emit("prereq-step", &format!("{} is already installed", backend.name()));
-        return Ok(());
-    }
-
-    let _ = app.emit("prereq-step", &format!("{} not found, installing...", backend.name()));
-    let mut config = clawenv_core::config::ConfigManager::load()
-        .or_else(|_| clawenv_core::config::ConfigManager::create_default(
-            clawenv_core::config::UserMode::General,
-        ))
+    // v2: prerequisite installation is per-backend via SandboxOps. Run
+    // through clawcli to keep one code path; `clawcli system install-prerequisites`
+    // wires the same `ensure_prerequisites` flow with progress events.
+    let _ = app.emit("prereq-step", "Installing sandbox prerequisites...");
+    cli_bridge::run_cli(&["system", "install-prerequisites"]).await
         .map_err(|e| e.to_string())?;
-    // Still resolve the installer-scope proxy: `.resolve()` has the side
-    // effect of injecting HTTP_PROXY into the process env (via apply_env),
-    // which is what reqwest + subprocess downloads need. The returned
-    // triple itself is no longer consulted for URL tier selection.
-    let _ = clawenv_core::config::proxy_resolver::Scope::Installer
-        .resolve(&mut config).await;
-    backend.ensure_prerequisites().await.map_err(|e| e.to_string())?;
-    let _ = app.emit("prereq-step", &format!("{} installed successfully", backend.name()));
-
+    let _ = app.emit("prereq-step", "Prerequisites installed successfully");
     Ok(())
+}
+
+/// Translate a `ProxyConfig` (from the install wizard JSON) into a
+/// `ProxyTriple` for env injection. Replaces v1's
+/// `proxy_resolver::triple_from_config_proxy`. Loops up the password
+/// from the keychain when `auth_required` is set.
+fn triple_from_proxy_config(p: &ProxyConfig) -> Option<ProxyTriple> {
+    if !p.enabled || p.http_proxy.is_empty() {
+        return None;
+    }
+    // Inject password into the URL when auth is required and we have one
+    // in the keychain. Best-effort — if the keychain lookup fails, the
+    // bare URL is still returned and the user gets an upstream auth error.
+    let inject_auth = |url: &str| -> String {
+        if !p.auth_required || p.auth_user.is_empty() {
+            return url.into();
+        }
+        let pw = credentials::get_proxy_password().unwrap_or_default();
+        if pw.is_empty() {
+            return url.into();
+        }
+        // Cheap parser: assume scheme://host... — splice user:pw@ after scheme://.
+        if let Some(idx) = url.find("://") {
+            let (scheme, rest) = url.split_at(idx + 3);
+            return format!("{scheme}{}:{}@{rest}", p.auth_user, pw);
+        }
+        url.into()
+    };
+    let http = inject_auth(&p.http_proxy);
+    let https = if p.https_proxy.is_empty() {
+        http.clone()
+    } else {
+        inject_auth(&p.https_proxy)
+    };
+    let no_proxy = if p.no_proxy.is_empty() {
+        "localhost,127.0.0.1".into()
+    } else {
+        p.no_proxy.clone()
+    };
+    Some(ProxyTriple { http, https, no_proxy, source: ProxySource::GlobalConfig })
 }
 
 #[derive(Serialize)]
@@ -294,7 +314,7 @@ pub async fn system_check() -> Result<SystemCheckInfo, String> {
 pub async fn restart_computer() -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        clawenv_core::platform::process::silent_cmd("shutdown")
+        crate::util::silent_cmd("shutdown")
             .args(["/r", "/t", "5", "/c", "ClawEnv: Restarting to complete WSL2 installation"])
             .status()
             .await
@@ -397,8 +417,8 @@ pub async fn validate_import_file(file_path: String) -> Result<serde_json::Value
 /// Check if a native instance already exists
 #[tauri::command]
 pub async fn has_native_instance() -> Result<bool, String> {
-    use clawenv_core::config::ConfigManager;
-    use clawenv_core::sandbox::SandboxType;
-    let config = ConfigManager::load().map_err(|e| e.to_string())?;
-    Ok(config.instances().iter().any(|i| i.sandbox_type == SandboxType::Native))
+    use clawops_core::instance::{InstanceRegistry, SandboxKind};
+    let registry = InstanceRegistry::with_default_path();
+    let instances = registry.list().await.map_err(|e| e.to_string())?;
+    Ok(instances.iter().any(|i| i.backend == SandboxKind::Native))
 }

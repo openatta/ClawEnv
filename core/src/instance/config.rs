@@ -7,6 +7,7 @@ use tokio::fs;
 
 use crate::common::OpsError;
 use crate::paths::v2_instances_path;
+use crate::proxy::InstanceProxyConfig;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -50,12 +51,25 @@ pub struct PortBinding {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BrowserBinding {
+    pub enabled: bool,
+    /// noVNC websocket port on the host (typically 6080+).
+    pub vnc_ws_port: u16,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceConfig {
     /// Unique name (typed by user, e.g. "default").
     pub name: String,
     /// Which claw product (e.g. "hermes", "openclaw").
     pub claw: String,
+    /// Installed claw package version (e.g. "0.10.3"). Empty when unknown.
+    /// Set by orchestrator at install/upgrade time; consumed by GUI for
+    /// upgrade-availability checks without spawning `clawcli status`.
+    #[serde(default)]
+    pub claw_version: String,
     /// Where the claw runs.
     pub backend: SandboxKind,
     /// VM / container instance name (only meaningful for sandboxed backends).
@@ -63,6 +77,12 @@ pub struct InstanceConfig {
     pub sandbox_instance: String,
     #[serde(default)]
     pub ports: Vec<PortBinding>,
+    /// Browser HIL binding (only set when claw was installed with `--with-browser`).
+    #[serde(default)]
+    pub browser: BrowserBinding,
+    /// Per-instance proxy override. `None` means inherit global `[clawenv.proxy]`.
+    #[serde(default)]
+    pub proxy: Option<InstanceProxyConfig>,
     /// RFC3339 timestamp.
     pub created_at: String,
     #[serde(default)]
@@ -173,9 +193,12 @@ mod tests {
         InstanceConfig {
             name: name.into(),
             claw: "hermes".into(),
+            claw_version: String::new(),
             backend: SandboxKind::Lima,
             sandbox_instance: name.into(),
             ports: vec![PortBinding { host: 3000, guest: 3000, label: "gateway".into() }],
+            browser: BrowserBinding::default(),
+            proxy: None,
             created_at: "2026-04-23T00:00:00Z".into(),
             updated_at: String::new(),
             note: String::new(),

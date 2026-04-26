@@ -107,37 +107,43 @@ pub fn setup_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
 
 /// Refresh tray state (icon color based on instance health).
 pub fn refresh_tray(app: &AppHandle) -> Result<(), Box<dyn std::error::Error>> {
-    use clawenv_core::config::ConfigManager;
+    use clawops_core::instance::InstanceRegistry;
     use std::net::TcpStream;
     use std::time::Duration;
 
-    if let Ok(config) = ConfigManager::load() {
-        let any_running = config.instances().iter().any(|inst| {
-            // Probe whichever port is actually serving the UI: dashboard
-            // when it's been allocated (Hermes), else gateway (OpenClaw).
-            // Keep this in lockstep with instance_health in instance.rs —
-            // otherwise the tray and the UI's green/red dot would disagree
-            // and users would see "stopped" in tray while the UI says
-            // "running" (or vice versa).
-            let probe_port = if inst.gateway.dashboard_port != 0 {
-                inst.gateway.dashboard_port
-            } else {
-                inst.gateway.gateway_port
-            };
-            let addr = format!("127.0.0.1:{probe_port}");
-            TcpStream::connect_timeout(
-                &addr.parse().unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap()),
-                Duration::from_secs(1),
-            ).is_ok()
-        });
+    let registry = InstanceRegistry::with_default_path();
+    // refresh_tray fires from sync callbacks (tray menu, monitor tick).
+    // InstanceRegistry::load is async only because of tokio::fs — the
+    // payload is a small TOML file, so block_on is fine here.
+    let instances = tauri::async_runtime::block_on(async move {
+        registry.list().await.unwrap_or_default()
+    });
 
-        if config.instances().is_empty() {
-            set_tray_status(app, TrayStatus::Stopped);
-        } else if any_running {
-            set_tray_status(app, TrayStatus::Running);
-        } else {
-            set_tray_status(app, TrayStatus::Stopped);
-        }
+    if instances.is_empty() {
+        set_tray_status(app, TrayStatus::Stopped);
+        return Ok(());
+    }
+
+    let any_running = instances.iter().any(|inst| {
+        // Probe the gateway forward — that's what tells us the claw is
+        // serving traffic. Dashboard-style claws (Hermes) also expose
+        // gateway, so we don't need a separate dashboard probe.
+        let port = inst.ports.iter()
+            .find(|p| p.label == "gateway")
+            .map(|p| p.host)
+            .unwrap_or(0);
+        if port == 0 { return false; }
+        let addr = format!("127.0.0.1:{port}");
+        TcpStream::connect_timeout(
+            &addr.parse().unwrap_or_else(|_| "127.0.0.1:3000".parse().unwrap()),
+            Duration::from_secs(1),
+        ).is_ok()
+    });
+
+    if any_running {
+        set_tray_status(app, TrayStatus::Running);
+    } else {
+        set_tray_status(app, TrayStatus::Stopped);
     }
 
     Ok(())

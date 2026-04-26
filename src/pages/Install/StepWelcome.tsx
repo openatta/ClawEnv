@@ -27,7 +27,7 @@ export default function StepWelcome(props: {
             <li>下载并在沙盒中安装 {props.clawDisplayName}</li>
             <li>安装完成后，{props.clawDisplayName} 自己的管理界面会收集 API Key（ClawEnv 不经手凭证）</li>
           </ul>
-          <p class="text-gray-500 text-xs mt-2">支持平台：macOS (Lima)、Windows (WSL2)、Linux (Podman)</p>
+          <p class="text-gray-500 text-xs mt-2">支持平台：macOS (Lima)、Windows (WSL2)</p>
         </>) : (<>
           <p><strong>ClawEnv</strong> is a cross-platform sandbox installer and manager for <strong>{props.clawDisplayName}</strong>.</p>
           <p>It creates a secure, isolated sandbox environment (Alpine Linux) on your system, so {props.clawDisplayName} runs safely without affecting your host OS.</p>
@@ -38,7 +38,7 @@ export default function StepWelcome(props: {
             <li>Download and install {props.clawDisplayName} in a sandbox</li>
             <li>Post-install, {props.clawDisplayName}'s own management UI collects your API key — ClawEnv never handles credentials</li>
           </ul>
-          <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2), Linux (Podman)</p>
+          <p class="text-gray-500 text-xs mt-2">Supported: macOS (Lima), Windows (WSL2)</p>
         </>)}
       </div>
 
