@@ -1,6 +1,69 @@
 # ClawEnv v2 — release notes
 
-## v2-feature-complete — 2026-04-25 (pending)
+## v2-feature-complete — 2026-04-26
+
+### What this tag represents
+
+End of the v2 redesign cycle. CLI taxonomy locked per CLI-DESIGN.md,
+ExecutionContext abstraction landed, Tauri shell adapted to v2 verbs +
+v2 wire types, codebase flattened (v2/ subfolder retired, v1 root
+core/cli moved under legacy/), 583 unit + integration tests green.
+
+### Verb completeness pass (P0/P1/P2)
+
+P0 — runtime adapters in the Tauri shell:
+- `list_claw_types`: enriches v2 ClawTypeInfo with logo +
+  npm_package/pip_package split for the existing TS frontend.
+- `get_instance_logs`: deserializes the new `LogResponse{content}`
+  shape (was reading `data.as_str()` which silently emptied).
+- `edit_instance_ports`: removes the old gateway/ttyd forwards
+  before adding new ones (no more accumulation).
+
+P1 — placeholder flags now do real work:
+- `config show` emits flat dot-notation matching get/set keys.
+- `status capabilities.snapshot` is a real probe via the
+  SandboxBackend trait (Lima true, others false).
+- `launch --probe-secs / --no-probe` thread into the orchestrator.
+- `stop --timeout-secs` wraps the per-backend stop in a
+  wall-clock budget.
+- `logs --follow` streams via ExecutionContext::exec_streaming;
+  native takes the host `tail -F` path.
+- `doctor --fix` invokes `SandboxOps::repair` then re-doctors.
+- Removed `exec --no-tty` and `uninstall --force` (placeholders
+  that promised behavior they didn't have).
+
+P2 — architectural follow-throughs:
+- `exec` verb routes through `ExecutionContext` so native
+  instances get exec via NativeContext (no more "is native — bails").
+- `SandboxOps::rename` trait method added; Lima impl shells
+  `limactl rename`; WSL/Podman bail with the default impl.
+- `sandbox edit --disk-gb` writes `lima.yaml`'s `disk:` field;
+  non-Lima bails with the recreate workflow message.
+- `SandboxOps::resize_disk` trait method; Lima points at the
+  yaml-edit-then-restart path (CLI in-place is a v0.5 follow-up).
+- `tauri/edit_instance_resources` no longer drops `disk_gb`.
+- `docs/v2/v0.5.x-features.md` documents the deferred backlog
+  (per-instance proxy override, OS-proxy auto-refresh, sandbox
+  snapshot UI, bridge admin UI, in-place disk resize, etc.).
+
+### Repo migration
+
+- `v2/core/`  → `core/`        (clawops-core)
+- `v2/cli/`   → `cli/`         (clawcli; v1 cli/ deleted)
+- `v2/docs/`  → `docs/v2/`
+- `v2/tests/` → `tests/v2/`
+- `v2/assets/`→ `assets/v2/`   (preserves v1 `assets/` side-by-side)
+- v1 root `core/` → `legacy/core/` (clawenv-core; Tauri still
+  depends on it for ConfigManager / ClawRegistry / browser HIL /
+  manager::instance helpers — removal tracked in
+  `docs/v2/v0.5.x-features.md` "Migration / cleanup")
+
+Single Cargo workspace, single Cargo.lock, members:
+`core`, `cli`, `tauri`, `legacy/core`. CI workflow + e2e harness
+re-pathed; sidecar binary rebuilt at
+`tauri/binaries/clawcli-aarch64-apple-darwin`.
+
+### Earlier rc1-period fixes (kept for reference)
 
 Adds the post-rc1 hardening pass: real-machine matrix proven, two
 post-install bugs caught & fixed, perf baselines captured.
