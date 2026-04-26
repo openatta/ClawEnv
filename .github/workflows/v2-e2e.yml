@@ -27,12 +27,16 @@ on:
     branches: [main]
     tags: ['v2-*', 'v0.4.*']
     paths:
-      - 'v2/**'
+      - 'core/**'
+      - 'cli/**'
+      - 'tests/v2/**'
       - '.github/workflows/v2-e2e.yml'
   pull_request:
     branches: [main]
     paths:
-      - 'v2/**'
+      - 'core/**'
+      - 'cli/**'
+      - 'tests/v2/**'
       - '.github/workflows/v2-e2e.yml'
 
 env:
@@ -56,7 +60,7 @@ jobs:
         os: [macos-latest, ubuntu-latest, windows-latest]
     defaults:
       run:
-        working-directory: v2
+        working-directory: .
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -65,8 +69,8 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-v2-cargo-
 
       - name: cargo check
@@ -103,12 +107,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-v2-cargo-
 
       - name: Build clawcli
-        working-directory: v2
+        working-directory: .
         run: cargo build -p clawops-cli --release
 
       - name: Install jq (Linux)
@@ -126,7 +130,7 @@ jobs:
         shell: bash
         run: |
           for s in ${{ matrix.scenarios }}; do
-            ./v2/tests/e2e/run.sh "$s"
+            ./tests/v2/e2e/run.sh "$s"
           done
 
       - name: Skip note (no host scenario for this OS yet)
@@ -163,12 +167,12 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            v2/target
-          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+            target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-v2-cargo-
 
       - name: Build clawcli
-        working-directory: v2
+        working-directory: .
         run: cargo build -p clawops-cli --release
 
       - name: Install jq + sandbox prereqs (Linux)
@@ -185,7 +189,7 @@ jobs:
       - name: Run sandbox smoke scenario
         shell: bash
         timeout-minutes: 25
-        run: ./v2/tests/e2e/run.sh ${{ matrix.scenario }}
+        run: ./tests/v2/e2e/run.sh ${{ matrix.scenario }}
 
       - name: Archive logs on failure
         if: failure()

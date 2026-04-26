@@ -1,3 +1,55 @@
 [workspace]
 resolver = "2"
-members = ["core", "tauri", "cli"]
+# Layout (post v2 migration):
+#   core/        — clawops-core (v2 sandbox/install/wire types)
+#   cli/         — clawcli binary (v2 unified CLI, sidecar for the GUI)
+#   tauri/       — clawgui (Tauri shell + IPC adapters)
+#   legacy/core/ — clawenv-core (v1 in-process API the GUI still depends
+#                  on for ConfigManager / ClawRegistry / browser HIL /
+#                  manager::instance helpers; tracked for removal in
+#                  docs/v2/v0.5.x-features.md "Migration / cleanup").
+members = ["core", "cli", "tauri", "legacy/core"]
+
+[workspace.package]
+version = "0.3.2"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+# Shared versions — the two cores (v1 legacy + v2) need consistent
+# resolutions for tokio, serde, etc. so a single Cargo.lock works for
+# the whole workspace.
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "io-util", "time", "sync"] }
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+semver = "1"
+clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+
+comfy-table = "7"
+owo-colors = { version = "4", features = ["supports-colors"] }
+
+# Credentials — OS keychain (macOS / Windows / Linux Secret Service).
+# Service name MUST stay "clawenv" so v1 and v2 share stored secrets.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
+
+tar = "0.4"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+lzma-rs = "0.3"
+
+mockall = "0.13"
+tempfile = "3"
+axum = { version = "0.8", features = [] }
+tower = "0.5"
+assert_cmd = "2"
+predicates = "3"

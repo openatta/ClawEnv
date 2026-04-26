@@ -1,23 +1,29 @@
 [package]
+name = "clawops-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "ClawEnv v2 unified CLI"
+
+[[bin]]
 name = "clawcli"
-version = "0.3.2"
-edition = "2021"
+path = "src/main.rs"
 
 [dependencies]
-clawenv-core = { path = "../core" }
-clap       = { version = "4", features = ["derive", "color"] }
-dirs       = "5"
-indicatif  = "0.17"
-console    = "0.15"
-dialoguer  = "0.11"
-tokio      = { version = "1", features = ["rt-multi-thread", "macros", "process", "fs", "time", "sync"] }
-tracing    = "0.1"
+clawops-core = { path = "../core" }
+tokio.workspace = true
+clap.workspace = true
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-anyhow     = "1"
-reqwest    = { version = "0.12", default-features = false, features = ["rustls-tls"] }
-serde      = { version = "1", features = ["derive"] }
-serde_json = "1"
-chrono = "0.4"
+comfy-table.workspace = true
+owo-colors.workspace = true
+tempfile.workspace = true
+chrono.workspace = true
 
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
+[dev-dependencies]
+assert_cmd.workspace = true
+predicates.workspace = true
+tempfile.workspace = true

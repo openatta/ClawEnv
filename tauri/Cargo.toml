@@ -4,7 +4,9 @@ version = "0.3.2"
 edition = "2021"
 
 [dependencies]
-clawenv-core = { path = "../core" }
+# v1 in-process API — kept under legacy/ during the v2 migration period.
+# Removal tracked in docs/v2/v0.5.x-features.md "Migration / cleanup".
+clawenv-core = { path = "../legacy/core" }
 tauri = { version = "2", features = ["tray-icon", "devtools"] }
 tauri-plugin-shell = "2"
 tauri-plugin-notification = "2"

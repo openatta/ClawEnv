@@ -21,16 +21,26 @@ OpenClaw（及 claw 生态）的跨平台沙盒安装器、启动器与管理器
 
 **Linux GUI 明确不支持**：现存的 Linux GUI 相关代码（例如 `install_native/linux.rs` 的 Node 安装、`SandboxPage` 的 Podman 路径等）保留但不主动维护、不为其做新特性适配。新增 GUI 功能只保证 macOS + Windows 双平台同步，Linux 侧维持现状即可，不需要清理。Linux 用户通过 CLI（`clawcli`）使用。
 
-## Workspace 结构
+## Workspace 结构（v2 迁移后）
 
 ```
-core/            # 核心逻辑（平台无关，无 UI 依赖）
-tauri/           # Tauri GUI 应用（含 System Tray）
-cli/             # 纯 CLI（开发者模式）
-src/             # 前端 SolidJS
-assets/          # 平台模板、图标资源
-docs/            # 规格文档（SSOT，共 11 个文件）
+core/            # clawops-core — v2 沙盒/安装/wire 类型（SSOT）
+cli/             # clawcli — v2 统一 CLI（GUI 的 sidecar 二进制）
+tauri/           # clawgui — Tauri GUI 应用（含 System Tray，spawn clawcli）
+src/             # 前端 SolidJS（直接调 Tauri IPC，从不直接 spawn CLI）
+legacy/core/     # clawenv-core — v1 内进程 API（GUI 仍依赖于
+                 #   ConfigManager / ClawRegistry / browser HIL /
+                 #   manager::instance；v0.5.x 移除，详见 docs/v2/v0.5.x-features.md）
+assets/          # v1 资源（lima、mcp、claw-registry.toml）
+assets/v2/       # v2 资源（lima/clawenv-alpine.yaml、podman/Containerfile、mcp/*）
+docs/            # v1 规格文档
+docs/v2/         # v2 规格文档（CLI-DESIGN.md、DESIGN.md、v0.5.x-features.md…）
+tests/e2e/       # v1 e2e 脚本
+tests/v2/e2e/    # v2 e2e 脚本（run.sh + scenarios/）
 ```
+
+`Cargo.toml` workspace 成员：`core`、`cli`、`tauri`、`legacy/core`。
+原 v2/ 子目录已扁平化合并；v1 cli 已删除（v2 clawcli 替代）。
 
 ## 架构铁律
 
