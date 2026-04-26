@@ -32,6 +32,9 @@ pub mod launcher;
 pub mod update;
 pub mod bridge;
 pub mod browser;
+pub mod export;
+pub mod wire;
+pub mod exec_context;
 
 // Re-exports for convenience.
 pub use common::{

@@ -36,4 +36,21 @@ pub trait SandboxOps: Send + Sync {
     // ——— Monitoring ———
     async fn stats(&self) -> Result<ResourceStats, OpsError>;
     async fn dump_logs(&self, tail: Option<u32>) -> Result<String, OpsError>;
+
+    /// Rename the underlying VM/container. Default impl bails — only
+    /// backends with native rename support (Lima via `limactl rename`)
+    /// override this. WSL/Podman would have to destroy+recreate.
+    async fn rename(&self, _new_name: &str) -> Result<(), OpsError> {
+        Err(OpsError::Other(anyhow::anyhow!(
+            "rename: backend does not support in-place rename — destroy + recreate required"
+        )))
+    }
+
+    /// Resize the VM's primary disk in place. Default impl bails —
+    /// only Lima supports it (`limactl disk resize`). WSL/Podman bail.
+    async fn resize_disk(&self, _new_gb: u32) -> Result<(), OpsError> {
+        Err(OpsError::Other(anyhow::anyhow!(
+            "disk resize: backend does not support in-place disk resize"
+        )))
+    }
 }

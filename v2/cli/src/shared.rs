@@ -14,6 +14,9 @@ use crate::output::{CliEvent, Output};
 pub struct Ctx {
     pub json: bool,
     pub quiet: bool,
+    /// When true, suppress Progress events (Data/Complete still emit).
+    /// CLI-DESIGN.md §3.1.
+    pub no_progress: bool,
     pub instance: String,
     /// Wire-protocol emitter. Cheap to clone — it's just a `bool`.
     pub output: Output,

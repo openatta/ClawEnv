@@ -285,6 +285,29 @@ impl InstanceOrchestrator {
             }
         }
 
+        // Wipe the underlying VM/container too. Without this, a later
+        // `clawcli import --name <same>` bails with "already present"
+        // because Lima/Podman/WSL still have the instance on disk
+        // (P3-a roundtrip lesson, 2026-04-25). For Native, there's
+        // nothing on the backend to destroy — the install dir under
+        // ~/.clawenv/native/<name>/ is a registry artifact, not a VM.
+        if inst.backend != SandboxKind::Native {
+            if let Some(backend) = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance) {
+                progress.at(70, "destroy-vm",
+                    format!("Removing {:?} instance `{}`", inst.backend, inst.sandbox_instance)).await;
+                // Tolerate failure — registry removal still happens, and a
+                // half-destroyed VM is the user's existing problem (e.g.
+                // limactl in a broken state). Surface in tracing.
+                if let Err(e) = backend.destroy().await {
+                    tracing::warn!(
+                        target: "clawenv::destroy",
+                        "backend.destroy({:?}) failed (continuing): {e}",
+                        inst.backend
+                    );
+                }
+            }
+        }
+
         progress.at(90, "remove", format!("Removing `{name}` from registry")).await;
         let removed = self.registry.remove(name).await?;
 
@@ -419,16 +442,12 @@ impl InstanceOrchestrator {
 
         // ——— Stage 4: BootVerify ———
         progress.at(60, "boot-verify",
-            "Checking VM is reachable via exec").await;
-        // Right-after-boot exec probe — Lima SSH ControlMaster may be
-        // mid-warmup. Use the retry variant (v0.2.10 lesson).
-        let probe = backend.exec_argv_with_retry(&["echo", "clawops-ok"]).await
-            .map_err(|e| OpsError::Other(anyhow::anyhow!("VM exec probe: {e}")))?;
-        if !probe.contains("clawops-ok") {
-            return Err(OpsError::Other(anyhow::anyhow!(
-                "VM reachable but exec probe returned unexpected output: {probe:?}"
-            )));
-        }
+            "Verifying VM exec + DNS + fs (3-probe gate)").await;
+        // Three-probe post-boot verify (v0.2.12 lesson). Each probe has
+        // its own retry budget via exec_argv_with_retry, so transient
+        // SSH races during the gate don't fail the install. See
+        // provisioning/post_boot.rs for the rationale on each probe.
+        crate::provisioning::post_boot::verify_post_boot(&backend).await?;
 
         // ——— Stage 5: ConfigureProxy (mirrors + proxy application) ———
         progress.at(65, "configure-mirrors", "Applying apk/npm mirrors").await;
@@ -554,16 +573,32 @@ impl InstanceOrchestrator {
             ));
         }
 
-        // Preflight: node must be present. Don't auto-install here —
-        // it's a surprise-y side-effect; user runs `clawcli native
-        // upgrade node` explicitly first.
+        // Preflight: node must be present. When --autoinstall-deps is
+        // set we self-bootstrap into ~/.clawenv/node before installing
+        // the claw; otherwise bail with a hint.
         progress.at(20, "preflight", "Probing host node/git").await;
         let native_ops = DefaultNativeOps::new();
-        let status = native_ops.status().await?;
-        let node = status.node.as_ref().ok_or_else(|| OpsError::unsupported(
-            "install",
-            "native install requires node on host; run `clawcli native upgrade node` first",
-        ))?;
+        let mut status = native_ops.status().await?;
+        if status.node.is_none() {
+            if opts.autoinstall_native_deps {
+                progress.at(25, "install-node",
+                    "Bootstrapping node into ~/.clawenv/node").await;
+                native_ops.upgrade_node(
+                    crate::native_ops::VersionSpec::Latest,
+                    progress.clone(),
+                ).await?;
+                status = native_ops.status().await?;
+            } else {
+                return Err(OpsError::unsupported(
+                    "install",
+                    "native install requires node on host; rerun with `--autoinstall-deps` \
+                     to fetch it into ~/.clawenv/node automatically",
+                ));
+            }
+        }
+        let node = status.node.as_ref().ok_or_else(|| OpsError::Other(anyhow::anyhow!(
+            "node bootstrap reported success but native_ops.status() still has no node"
+        )))?;
 
         // Resolve npm next to node. Portable Node ships npm in the
         // same `bin/` dir on unix, or as `npm.cmd` next to node.exe on Windows.
@@ -800,9 +835,20 @@ impl InstanceOrchestrator {
     /// Callers should `clawcli stop` first if they need a clean restart.
     ///
     /// Probes the gateway port (or dashboard port if dashboard exists)
-    /// for readiness, up to 30s. Returns when port responds or after
-    /// timeout (with a warning, not a hard failure — slow boots happen).
+    /// for readiness, up to `probe_secs` (default 120s — see comment
+    /// inside). Returns when port responds or after timeout (warning,
+    /// not hard failure — slow boots happen). `no_probe=true` skips the
+    /// probe entirely and returns once daemons are spawned.
     pub async fn launch(&self, name: &str) -> Result<LaunchReport, OpsError> {
+        self.launch_with_probe(name, 120, false).await
+    }
+
+    pub async fn launch_with_probe(
+        &self,
+        name: &str,
+        probe_secs: u64,
+        no_probe: bool,
+    ) -> Result<LaunchReport, OpsError> {
         let inst = self.registry.find(name).await?
             .ok_or_else(|| OpsError::not_found(format!("instance `{name}`")))?;
         let provisioning = provisioning_for(&inst.claw)
@@ -873,19 +919,54 @@ impl InstanceOrchestrator {
         }
 
         // Probe the user-facing port (dashboard if present, else gateway).
-        // 30s budget, 1s tick.
+        // 120s budget — observed real value (P3-c, openclaw on Lima):
+        // gateway cold start does node import (~10s) THEN per-plugin
+        // bundled-runtime-deps install (acpx ~50s + browser ~30s) before
+        // the HTTP listener opens. Total ~90s on first launch, dropping
+        // to ~10s on later launches once plugin caches are warm. Pick
+        // 120s so the worst case has headroom; surface the daemon log
+        // on timeout so the user can diagnose any genuine hang.
         let probe_port = if provisioning.has_dashboard() {
             dashboard_port
         } else {
             gateway_port
         };
-        let gateway_ready = probe_tcp_ready(probe_port, std::time::Duration::from_secs(30)).await;
+        let gateway_ready = if no_probe {
+            // Caller asked for daemons-spawned-but-don't-verify. Report
+            // the port without claiming it's reachable.
+            false
+        } else {
+            probe_tcp_ready(probe_port, std::time::Duration::from_secs(probe_secs)).await
+        };
+
+        // On probe-timeout, peek the daemon log inside the VM. Best-effort
+        // — failures here are non-fatal (we already report ready=false).
+        if !gateway_ready && !matches!(inst.backend, SandboxKind::Native) {
+            if let Some(backend) = Self::sandbox_backend_for(inst.backend, &inst.sandbox_instance) {
+                let log_paths = ["/tmp/clawenv-gateway.log", "/tmp/clawenv-dashboard.log"];
+                for log in log_paths {
+                    if let Ok(out) = backend.exec_argv(&[
+                        "sh", "-c",
+                        &format!("test -f {log} && tail -40 {log} || echo '({log}: not present)'")
+                    ]).await {
+                        tracing::warn!(
+                            target: "clawenv::launch",
+                            "gateway probe timeout — {log}:\n{}",
+                            out.trim()
+                        );
+                    }
+                }
+            }
+        }
 
         Ok(LaunchReport {
             instance_name: inst.name,
             started_processes: started.iter().map(|s| s.to_string()).collect(),
             gateway_ready,
-            ready_port: if gateway_ready { Some(probe_port) } else { None },
+            // With `no_probe`, surface the port the daemons were told to
+            // listen on so the GUI/scripts can wire up regardless of
+            // whether the probe ran.
+            ready_port: if gateway_ready || no_probe { Some(probe_port) } else { None },
         })
     }
 
@@ -1030,6 +1111,12 @@ pub struct InstallOpts {
     /// Intended for CI / Gate-0 verification.
     #[serde(default)]
     pub dry_run: bool,
+    /// On `backend == Native`, when host node/git is missing, install
+    /// them into `~/.clawenv/{node,git}` before proceeding instead of
+    /// bailing. Mirrors the same flag on `CreateOpts`. Ignored for
+    /// sandboxed backends (which don't depend on host node/git).
+    #[serde(default)]
+    pub autoinstall_native_deps: bool,
 }
 
 impl InstallOpts {
@@ -1048,6 +1135,7 @@ impl InstallOpts {
             proxy: None,
             mirrors: MirrorsConfig::default(),
             dry_run: false,
+            autoinstall_native_deps: false,
         }
     }
 }

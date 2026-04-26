@@ -38,6 +38,55 @@ impl LimaOps {
     fn lima_yaml_path(&self) -> PathBuf {
         lima_home().join(&self.instance_name).join("lima.yaml")
     }
+
+    /// Probe the VM state by parsing `limactl list <inst> --format json`.
+    /// Maps Lima's status strings to v2 VmState variants:
+    ///   "Running"            → Running
+    ///   "Stopped"            → Stopped
+    ///   "Broken" / errors    → Broken
+    ///   instance dir absent  → Missing
+    ///   anything else        → Unknown
+    /// Returns Unknown on probe failure (limactl missing, parse error, etc.)
+    /// — the caller already gracefully degrades.
+    async fn probe_state(&self) -> VmState {
+        use crate::common::CommandRunner;
+        use crate::paths::limactl_bin;
+        use crate::runners::LocalProcessRunner;
+        use crate::common::CommandSpec;
+        use std::time::Duration;
+
+        // No instance dir → never created on this machine.
+        if !lima_home().join(&self.instance_name).exists() {
+            return VmState::Missing;
+        }
+
+        let runner = LocalProcessRunner::new();
+        let spec = CommandSpec::new(
+            limactl_bin(),
+            ["list", &self.instance_name, "--format", "json"],
+        ).with_timeout(Duration::from_secs(5));
+        let res = match runner.exec(spec, CancellationToken::new()).await {
+            Ok(r) => r,
+            Err(_) => return VmState::Unknown,
+        };
+        if !res.success() {
+            return VmState::Unknown;
+        }
+        let first = res.stdout.lines().next().unwrap_or("").trim();
+        if first.is_empty() {
+            return VmState::Missing;
+        }
+        let v: serde_json::Value = match serde_json::from_str(first) {
+            Ok(v) => v,
+            Err(_) => return VmState::Unknown,
+        };
+        match v["status"].as_str() {
+            Some("Running") => VmState::Running,
+            Some("Stopped") => VmState::Stopped,
+            Some("Broken") => VmState::Broken,
+            Some(_) | None => VmState::Unknown,
+        }
+    }
 }
 
 #[async_trait]
@@ -50,16 +99,12 @@ impl SandboxOps for LimaOps {
             supports_rename: self.backend.supports_rename(),
             supports_resource_edit: self.backend.supports_resource_edit(),
             supports_port_edit: self.backend.supports_port_edit(),
-            supports_snapshot: false,
+            supports_snapshot: self.backend.supports_snapshot(),
         }
     }
 
     async fn status(&self) -> Result<SandboxStatus, OpsError> {
-        let state = if self.backend.is_available().await.unwrap_or(false) {
-            VmState::Running
-        } else {
-            VmState::Unknown
-        };
+        let state = self.probe_state().await;
         Ok(SandboxStatus {
             backend: BackendKind::Lima,
             instance_name: self.instance_name.clone(),
@@ -194,6 +239,45 @@ impl SandboxOps for LimaOps {
             .await
             .map_err(OpsError::Other)?;
         Ok(out)
+    }
+
+    async fn rename(&self, new_name: &str) -> Result<(), OpsError> {
+        // limactl rename is in-place: VM must be stopped first. Lima
+        // refuses to rename a Running VM with a clear error, but we
+        // pre-stop here so the user gets one operation that "just works".
+        use crate::paths::limactl_bin;
+        use tokio::process::Command;
+
+        let _ = self.backend.stop().await; // best-effort; tolerate stopped state
+
+        let out = Command::new(limactl_bin())
+            .args(["rename", &self.instance_name, new_name])
+            .output().await
+            .map_err(|e| OpsError::Other(anyhow::anyhow!("spawn limactl rename: {e}")))?;
+        if !out.status.success() {
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            return Err(OpsError::Other(anyhow::anyhow!(
+                "limactl rename {} -> {} failed: {}",
+                self.instance_name, new_name, stderr.trim()
+            )));
+        }
+        Ok(())
+    }
+
+    async fn resize_disk(&self, new_gb: u32) -> Result<(), OpsError> {
+        // Lima exposes per-VM disk resize via `limactl disk resize`,
+        // but only operates on disks declared as `additionalDisks`.
+        // For instances created with v2's standard template (single
+        // primary disk in lima.yaml top-level), the path is to edit
+        // lima.yaml's `disk:` field and restart. v2 doesn't yet edit
+        // lima.yaml from the rename path — so for now, document the
+        // workflow and bail with an actionable error.
+        let _ = new_gb;
+        Err(OpsError::Other(anyhow::anyhow!(
+            "lima disk resize: edit ~/.lima/{}/lima.yaml `disk:` field then `clawcli restart {}` \
+             (in-place CLI resize is a v0.5 follow-up — Lima primary disks need yaml edit + reboot)",
+            self.instance_name, self.instance_name,
+        )))
     }
 }
 

@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::paths::clawenv_root;
@@ -26,12 +26,43 @@ use crate::provisioning::MirrorsConfig;
 use crate::proxy::ProxyConfig;
 
 /// What v2 cares about from the global config.toml. Everything else
-/// (tray, bridge, instances, etc.) is silently ignored.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// (tray, instances, etc.) is silently ignored.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GlobalConfig {
     pub proxy: ProxyConfig,
     pub mirrors: MirrorsConfig,
+    pub bridge: BridgeConfig,
 }
+
+/// Minimal mirror of v1's `BridgeConfig`. v2 only typechecks the two
+/// scalar fields it cares about; the `permissions` blob (rules, allow/
+/// deny lists) is a passthrough — v2 stores+returns it unchanged so
+/// the GUI / bridge daemon can keep round-tripping their own shape.
+///
+/// Not Eq because `toml::Table` only implements PartialEq.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BridgeConfig {
+    #[serde(default = "default_bridge_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_bridge_port")]
+    pub port: u16,
+    /// Opaque to v2 — structure owned by the AttaRun bridge daemon.
+    #[serde(default)]
+    pub permissions: toml::Table,
+}
+
+impl Default for BridgeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_bridge_enabled(),
+            port: default_bridge_port(),
+            permissions: toml::Table::default(),
+        }
+    }
+}
+
+fn default_bridge_enabled() -> bool { true }
+fn default_bridge_port() -> u16 { 3100 }
 
 /// Default location v1 writes its config.toml to. CLAWENV_HOME env
 /// var overrides the root.
@@ -87,11 +118,107 @@ fn parse_toml_str(s: &str) -> Result<GlobalConfig, toml::de::Error> {
     struct V1ClawEnv {
         proxy: ProxyConfig,
         mirrors: MirrorsConfig,
+        bridge: BridgeConfig,
     }
     let root: V1Root = toml::from_str(s)?;
     Ok(GlobalConfig {
         proxy: root.clawenv.proxy,
         mirrors: root.clawenv.mirrors,
+        bridge: root.clawenv.bridge,
+    })
+}
+
+// ——— Save helpers (Phase M, P3-b et al.) ———
+//
+// Strategy: load the on-disk file as a free-form `toml::Table`,
+// mutate just the target subsection, write back. Preserves any
+// unknown fields written by v1 — v2 only owns the sections it
+// understands and is a no-op on the rest.
+//
+// All save fns honor the same `default_config_path()` so they
+// roundtrip cleanly with `load_global()`.
+
+/// Generic save: take a mutator that gets `&mut toml::Table` rooted at
+/// the file's top, with `[clawenv]` lazily created if absent.
+fn mutate_clawenv_section<F>(mutate: F) -> Result<(), ConfigLoadError>
+where
+    F: FnOnce(&mut toml::Table) -> Result<(), ConfigLoadError>,
+{
+    let path = default_config_path();
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|source| ConfigLoadError::Io { path: parent.to_path_buf(), source })?;
+    }
+    let mut root: toml::Table = match std::fs::read_to_string(&path) {
+        Ok(s) => toml::from_str(&s)
+            .map_err(|source| ConfigLoadError::Parse { path: path.clone(), source })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(source) => return Err(ConfigLoadError::Io { path: path.clone(), source }),
+    };
+
+    let clawenv = root
+        .entry("clawenv".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()));
+    let clawenv_table = match clawenv {
+        toml::Value::Table(t) => t,
+        _ => {
+            // Pathological: someone wrote `clawenv = "string"`. Replace
+            // with an empty table so the downstream mutate can succeed —
+            // we'd rather salvage than refuse to save.
+            *clawenv = toml::Value::Table(toml::Table::new());
+            match clawenv {
+                toml::Value::Table(t) => t,
+                _ => unreachable!(),
+            }
+        }
+    };
+
+    mutate(clawenv_table)?;
+
+    let serialised = toml::to_string_pretty(&root)
+        .map_err(|e| ConfigLoadError::Io {
+            path: path.clone(),
+            source: std::io::Error::other(format!("toml serialize: {e}")),
+        })?;
+    std::fs::write(&path, serialised)
+        .map_err(|source| ConfigLoadError::Io { path, source })
+}
+
+/// Persist the [clawenv.bridge] subsection, replacing any prior value.
+pub fn save_bridge_section(cfg: &BridgeConfig) -> Result<(), ConfigLoadError> {
+    let v = toml::Value::try_from(cfg)
+        .map_err(|e| ConfigLoadError::Io {
+            path: default_config_path(),
+            source: std::io::Error::other(format!("bridge → toml: {e}")),
+        })?;
+    mutate_clawenv_section(|clawenv| {
+        clawenv.insert("bridge".into(), v);
+        Ok(())
+    })
+}
+
+/// Persist the [clawenv.proxy] subsection.
+pub fn save_proxy_section(cfg: &ProxyConfig) -> Result<(), ConfigLoadError> {
+    let v = toml::Value::try_from(cfg)
+        .map_err(|e| ConfigLoadError::Io {
+            path: default_config_path(),
+            source: std::io::Error::other(format!("proxy → toml: {e}")),
+        })?;
+    mutate_clawenv_section(|clawenv| {
+        clawenv.insert("proxy".into(), v);
+        Ok(())
+    })
+}
+
+/// Persist a single scalar field directly under [clawenv]. Used for
+/// language / theme / version-style fields that aren't grouped into
+/// their own subsection.
+pub fn save_clawenv_field(key: &str, value: &str) -> Result<(), ConfigLoadError> {
+    let key = key.to_string();
+    let value = toml::Value::String(value.to_string());
+    mutate_clawenv_section(move |clawenv| {
+        clawenv.insert(key, value);
+        Ok(())
     })
 }
 

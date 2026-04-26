@@ -209,7 +209,8 @@ fn test_claw_types_includes_hermes() {
     assert!(hermes.is_some(), "hermes should be in claw types");
     let h = hermes.unwrap();
     assert_eq!(h["package_manager"], "git_pip");
-    assert_eq!(h["pip_package"], "hermes-agent");
+    // v2 wire merged npm_package/pip_package into a single package_id field.
+    assert_eq!(h["package_id"], "hermes-agent");
     assert_eq!(h["has_gateway_ui"], true);
     assert_eq!(h["supports_native"], false);
     assert_eq!(h["supports_mcp"], true);
@@ -234,8 +235,10 @@ fn test_claw_types_all_have_required_fields() {
     for ct in types {
         let id = ct["id"].as_str().unwrap_or("???");
         assert!(ct["display_name"].is_string(), "{id}: missing display_name");
-        assert!(ct["logo"].is_string(), "{id}: missing logo");
         assert!(ct["package_manager"].is_string(), "{id}: missing package_manager");
+        // v2 wire merged npm_package/pip_package into a single package_id field;
+        // the `logo` GUI field moved to the Tauri side's claw_catalog.
+        assert!(ct["package_id"].is_string(), "{id}: missing package_id");
         assert!(ct["default_port"].is_number(), "{id}: missing default_port");
         // Boolean fields must be present (not null)
         assert!(ct["supports_mcp"].is_boolean(), "{id}: missing supports_mcp");

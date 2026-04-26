@@ -135,13 +135,17 @@ pub trait SandboxBackend: Send + Sync {
     /// commonly happen right after VM boot (Lima's SSH ControlMaster
     /// hasn't warmed up yet, kex_exchange_identification reset, etc.).
     ///
-    /// Backoff schedule: 0ms → 1s → 3s → 9s (4 attempts total). Mirrors
-    /// v1 `proxy_resolver::exec_with_retry`.
+    /// Backoff schedule: 0ms → 1s → 3s → 9s → 30s (5 attempts, 43s
+    /// total wall). The original v1 schedule was 4 attempts / 13s but
+    /// P3-c real-machine runs found cases where Lima's SSH was unhappy
+    /// for ~20-25s right after the 3-probe post-boot gate handed back
+    /// control — adding the 30s tail handles those without needing
+    /// another retry layer in the calling code.
     ///
     /// Default impl wraps [`exec_argv`](Self::exec_argv); backends that
     /// know their own transient error patterns can override.
     async fn exec_argv_with_retry(&self, argv: &[&str]) -> anyhow::Result<String> {
-        let delays_ms: [u64; 4] = [0, 1_000, 3_000, 9_000];
+        let delays_ms: [u64; 5] = [0, 1_000, 3_000, 9_000, 30_000];
         let mut last_err: Option<anyhow::Error> = None;
         for (i, &d) in delays_ms.iter().enumerate() {
             if d > 0 {
@@ -180,6 +184,9 @@ pub trait SandboxBackend: Send + Sync {
     fn supports_rename(&self) -> bool { false }
     fn supports_resource_edit(&self) -> bool { false }
     fn supports_port_edit(&self) -> bool { false }
+    /// Whether this backend can capture/restore VM snapshots in-place
+    /// (Lima yes via `limactl snapshot`; podman/wsl have no equivalent).
+    fn supports_snapshot(&self) -> bool { false }
 }
 
 /// Returns true when an exec error string matches a known transient

@@ -5,3 +5,7 @@ pub mod download;
 pub mod instance;
 pub mod proxy;
 pub mod verbs;
+pub mod browser;
+pub mod bridge;
+pub mod config;
+pub mod system;

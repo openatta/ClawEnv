@@ -49,7 +49,7 @@ impl SandboxOps for WslOps {
             supports_rename: self.backend.supports_rename(),
             supports_resource_edit: self.backend.supports_resource_edit(),
             supports_port_edit: self.backend.supports_port_edit(),
-            supports_snapshot: false,
+            supports_snapshot: self.backend.supports_snapshot(),
         }
     }
 

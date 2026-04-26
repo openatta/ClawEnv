@@ -1,0 +1,196 @@
+name: v2-e2e
+
+# v2 unit + e2e smoke runner.
+#
+# Triggers:
+#   - schedule (nightly 06:00 UTC) — host-mode smokes only
+#   - workflow_dispatch with run_sandbox_scenarios=true — also runs the
+#     full Lima/Podman provisioning scenarios (~8-10min each, hosted
+#     runners may nest-virt fail or apt/podman fetch slow; treated as
+#     best-effort, see continue-on-error per step)
+#   - push of any branch tagged v2-rc* / v2-feature-* / v0.4.* — gates
+#     the candidate before promotion
+#
+# Path filter: only fires when v2/ or this workflow file changes, so
+# v1-only commits don't burn CI minutes.
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      run_sandbox_scenarios:
+        description: 'Also run full sandbox provisioning scenarios (~8-15min each, hosted-runner flaky)'
+        required: false
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    tags: ['v2-*', 'v0.4.*']
+    paths:
+      - 'v2/**'
+      - '.github/workflows/v2-e2e.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'v2/**'
+      - '.github/workflows/v2-e2e.yml'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+concurrency:
+  group: v2-e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ============================================================
+  # L1 — unit tests + clippy on all 3 OSes. Fast (~3min/OS).
+  # ============================================================
+  unit:
+    name: v2 unit (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-latest]
+    defaults:
+      run:
+        working-directory: v2
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            v2/target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-v2-cargo-
+
+      - name: cargo check
+        run: cargo check --workspace
+
+      - name: cargo test
+        run: cargo test --workspace --lib
+
+      - name: cargo clippy (warnings as errors)
+        run: cargo clippy --workspace --tests -- -D warnings
+
+  # ============================================================
+  # L2 — host-mode smoke scenarios (cheap, ~30s each). Always runs.
+  # ============================================================
+  smoke-host:
+    name: smoke host-mode (${{ matrix.os }})
+    needs: unit
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            scenarios: smoke-mac-native-noproxy
+          - os: ubuntu-latest
+            scenarios: ''  # Linux has no native host-mode scenario yet
+          - os: windows-latest
+            scenarios: ''  # Windows scenarios deferred (win-rsync infra)
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            v2/target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-v2-cargo-
+
+      - name: Build clawcli
+        working-directory: v2
+        run: cargo build -p clawops-cli --release
+
+      - name: Install jq (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get install -y jq
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        # jq is preinstalled on hosted macOS runners but `brew install jq`
+        # is a no-op if already present, so this is defensive.
+        run: brew list jq >/dev/null 2>&1 || brew install jq
+
+      - name: Run host-mode smoke scenarios
+        if: matrix.scenarios != ''
+        shell: bash
+        run: |
+          for s in ${{ matrix.scenarios }}; do
+            ./v2/tests/e2e/run.sh "$s"
+          done
+
+      - name: Skip note (no host scenario for this OS yet)
+        if: matrix.scenarios == ''
+        run: echo "(no host-mode smoke scenario defined for ${{ runner.os }} yet — sandbox scenarios cover this OS via the optional sandbox job)"
+
+  # ============================================================
+  # L3 — sandbox scenarios. Best-effort on hosted runners due to
+  # nested-virt + slow apt/podman install. Triggered by manual
+  # dispatch with run_sandbox_scenarios=true (or v2-rc/v0.4 tags).
+  # ============================================================
+  smoke-sandbox:
+    name: smoke sandbox (${{ matrix.os }})
+    needs: unit
+    if: |
+      (github.event_name == 'workflow_dispatch' && inputs.run_sandbox_scenarios) ||
+      startsWith(github.ref, 'refs/tags/v2-rc') ||
+      startsWith(github.ref, 'refs/tags/v0.4')
+    continue-on-error: true
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            scenario: smoke-mac-sandbox-noproxy
+          - os: ubuntu-latest
+            scenario: smoke-linux-podman-noproxy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            v2/target
+          key: ${{ runner.os }}-v2-cargo-${{ hashFiles('v2/**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-v2-cargo-
+
+      - name: Build clawcli
+        working-directory: v2
+        run: cargo build -p clawops-cli --release
+
+      - name: Install jq + sandbox prereqs (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y jq podman uidmap
+          podman --version
+
+      - name: Install jq (macOS)
+        if: runner.os == 'macOS'
+        run: brew list jq >/dev/null 2>&1 || brew install jq
+
+      - name: Run sandbox smoke scenario
+        shell: bash
+        timeout-minutes: 25
+        run: ./v2/tests/e2e/run.sh ${{ matrix.scenario }}
+
+      - name: Archive logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-sandbox-${{ matrix.os }}-logs
+          path: ~/Desktop/ClawEnv-v2/logs/
+          if-no-files-found: ignore

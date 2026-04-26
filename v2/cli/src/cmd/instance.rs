@@ -104,8 +104,33 @@ pub async fn run(cmd: InstanceCmd, ctx: &Ctx) -> anyhow::Result<()> {
             ctx.emit(&report)?;
         }
         InstanceCmd::Destroy { name } => {
+            // Stream progress so the GUI's delete-progress dialog can
+            // update its stage indicator (lookup → ports → destroy-vm
+            // → remove from registry). Mirrors run_install's pattern.
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<clawops_core::ProgressEvent>(32);
+            let sink = ProgressSink::new(tx);
+            let printer = {
+                let output = ctx.output.clone();
+                let json = ctx.json;
+                tokio::spawn(async move {
+                    while let Some(ev) = rx.recv().await {
+                        if json {
+                            output.emit(crate::output::CliEvent::Progress {
+                                stage: ev.stage.clone(),
+                                percent: ev.percent.unwrap_or(0),
+                                message: ev.message.clone(),
+                            });
+                        } else {
+                            let pct = ev.percent.map(|p| format!("{p:>3}%"))
+                                .unwrap_or_else(|| " … ".into());
+                            println!("[{pct}] {:<14} {}", ev.stage, ev.message);
+                        }
+                    }
+                })
+            };
             let o = InstanceOrchestrator::new();
-            let report = o.destroy(&name, ProgressSink::noop()).await?;
+            let report = o.destroy(&name, sink).await?;
+            let _ = printer.await;
             ctx.emit(&report)?;
         }
         InstanceCmd::Health => {

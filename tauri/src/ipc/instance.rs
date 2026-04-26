@@ -1,4 +1,4 @@
-use clawenv_core::api::{ListResponse, StatusResponse};
+use clawenv_core::api::{ListResponse, LogResponse, StatusResponse};
 use clawenv_core::claw::ClawRegistry;
 use clawenv_core::config::ConfigManager;
 use clawenv_core::manager::instance;
@@ -45,14 +45,17 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
 
     let registry = ClawRegistry::load();
     let instances = resp.instances.into_iter().map(|s| {
-        let desc = registry.get(&s.claw_type);
+        let desc = registry.get(&s.claw);
         InstanceInfo {
             name: s.name,
-            claw_type: s.claw_type,
+            // TS-facing field name kept as `claw_type` so existing
+            // frontend selectors continue to compile; v2 wire uses
+            // `claw`, the rename happens here in the adapter.
+            claw_type: s.claw,
             display_name: desc.display_name.clone(),
             logo: desc.logo.clone(),
-            sandbox_type: s.sandbox_type,
-            sandbox_id: s.sandbox_id,
+            sandbox_type: s.backend,
+            sandbox_id: s.sandbox_instance,
             version: s.version,
             gateway_port: s.gateway_port,
             ttyd_port: s.ttyd_port,
@@ -65,8 +68,12 @@ pub async fn list_instances() -> Result<Vec<InstanceInfo>, String> {
 
 #[tauri::command]
 pub async fn get_instance_logs(name: String) -> Result<String, String> {
+    // v2 emits `LogResponse {content: String}` (an object) — older callsite
+    // unwrapped `data.as_str()` which silently returned "" against the new
+    // shape. Deserialize properly so the GUI's log panel stays populated.
     let data = cli_bridge::run_cli(&["logs", &name]).await.map_err(|e| e.to_string())?;
-    Ok(data.as_str().unwrap_or("").to_string())
+    let resp: LogResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
+    Ok(resp.content)
 }
 
 #[tauri::command]
@@ -162,7 +169,8 @@ pub async fn stop_all_instances() -> Result<(), String> {
 
 #[tauri::command]
 pub async fn delete_instance(app: tauri::AppHandle, name: String) -> Result<(), String> {
-    cli_bridge::run_cli(&["uninstall", "--name", &name]).await.map_err(|e| e.to_string())?;
+    // v2: `uninstall <name>` is positional (no `--name` flag).
+    cli_bridge::run_cli(&["uninstall", &name]).await.map_err(|e| e.to_string())?;
     // `instance-changed` is the canonical state-sync event; the legacy
     // `instances-changed` (plural) is no longer emitted — MainLayout converged
     // its refresh logic onto `instance-changed`.
@@ -241,7 +249,11 @@ pub async fn delete_instance_with_progress(app: tauri::AppHandle, name: String) 
 
 #[tauri::command]
 pub async fn rename_instance(app: tauri::AppHandle, old_name: String, new_name: String) -> Result<(), String> {
-    cli_bridge::run_cli(&["rename", &old_name, &new_name]).await.map_err(|e| e.to_string())?;
+    // v2: `sandbox rename --from <old> --to <new>` (top-level `rename`
+    // verb was a v1 alias and got dropped). Backend support is still
+    // Lima-only; the v2 CLI bails clean for WSL/Podman.
+    cli_bridge::run_cli(&["sandbox", "rename", "--from", &old_name, "--to", &new_name])
+        .await.map_err(|e| e.to_string())?;
     emit_instance_changed(&app, InstanceChanged::renamed(&old_name, &new_name));
     Ok(())
 }
@@ -254,10 +266,16 @@ pub async fn edit_instance_resources(
     memory_mb: Option<u32>,
     disk_gb: Option<u32>,
 ) -> Result<(), String> {
-    let mut args = vec!["edit".to_string(), name.clone()];
+    // v2: top-level `edit` was a v1 alias. Resource edits route through
+    // `sandbox edit --cpus --memory-mb --disk-gb` (Lima only). For
+    // WSL/Podman the underlying CLI bails with an actionable error.
+    let mut args = vec![
+        "--instance".to_string(), name.clone(),
+        "sandbox".to_string(), "edit".to_string(),
+    ];
     if let Some(c) = cpus { args.extend(["--cpus".into(), c.to_string()]); }
-    if let Some(m) = memory_mb { args.extend(["--memory".into(), m.to_string()]); }
-    if let Some(d) = disk_gb { args.extend(["--disk".into(), d.to_string()]); }
+    if let Some(m) = memory_mb { args.extend(["--memory-mb".into(), m.to_string()]); }
+    if let Some(d) = disk_gb { args.extend(["--disk-gb".into(), d.to_string()]); }
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
     cli_bridge::run_cli(&refs).await.map_err(|e| e.to_string())?;
     // Changes only take effect after the VM/process restarts — surface that to the user.
@@ -275,10 +293,40 @@ pub async fn edit_instance_ports(
     gateway_port: u16,
     ttyd_port: u16,
 ) -> Result<(), String> {
+    // v2: port edits go through `sandbox port {add,remove}`. `add`
+    // alone leaks if the user is changing the host port — old forward
+    // stays. So we remove the existing host port first (best-effort:
+    // missing forward = ignore) and then add the new one. Read the
+    // current host ports from config.toml so we know what to remove.
+    let config = ConfigManager::load().map_err(|e| e.to_string())?;
+    let inst = config.instances().iter()
+        .find(|i| i.name == name)
+        .ok_or_else(|| format!("instance `{name}` not in registry"))?;
+    let old_gw = inst.gateway.gateway_port;
+    let old_tty = inst.gateway.ttyd_port;
+
+    if old_gw != 0 && old_gw != gateway_port {
+        let p = old_gw.to_string();
+        let _ = cli_bridge::run_cli(&[
+            "--instance", &name, "sandbox", "port", "remove", &p,
+        ]).await; // tolerate "not found" — it's the cleanup case
+    }
+    let gw = gateway_port.to_string();
     cli_bridge::run_cli(&[
-        "edit", &name,
-        "--gateway-port", &gateway_port.to_string(),
-        "--ttyd-port", &ttyd_port.to_string(),
+        "--instance", &name,
+        "sandbox", "port", "add", &gw, "3000",
+    ]).await.map_err(|e| e.to_string())?;
+
+    if old_tty != 0 && old_tty != ttyd_port {
+        let p = old_tty.to_string();
+        let _ = cli_bridge::run_cli(&[
+            "--instance", &name, "sandbox", "port", "remove", &p,
+        ]).await;
+    }
+    let tty = ttyd_port.to_string();
+    cli_bridge::run_cli(&[
+        "--instance", &name,
+        "sandbox", "port", "add", &tty, "7681",
     ]).await.map_err(|e| e.to_string())?;
     emit_instance_changed(
         &app,
@@ -484,7 +532,7 @@ pub async fn get_instance_capabilities(name: String) -> Result<serde_json::Value
 pub async fn get_instance_health(name: String) -> Result<String, String> {
     let data = cli_bridge::run_cli(&["status", &name]).await.map_err(|e| e.to_string())?;
     let resp: StatusResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
-    Ok(resp.health)
+    Ok(resp.summary.health)
 }
 
 #[tauri::command]

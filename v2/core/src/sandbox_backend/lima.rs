@@ -250,6 +250,30 @@ impl SandboxBackend for LimaBackend {
         if !self.is_present().await.unwrap_or(false) {
             return Ok(());
         }
+        // P3-c lesson (2026-04-25): `limactl delete --force` kills qemu
+        // and removes the VM dir, but does NOT terminate the hostagent
+        // process. The hostagent keeps the host-side port-forward
+        // listener open indefinitely, which (a) blocks subsequent
+        // re-installs at the same port, and (b) makes the test
+        // assertion "post-destroy port released" fail. Real Macs see
+        // multi-hour orphan hostagents from prior tests this way.
+        //
+        // Read the pidfile BEFORE delete (it's at <inst_dir>/ha.pid,
+        // gone after delete clears the dir) and SIGTERM the hostagent.
+        // Best-effort: if the pidfile is absent or the kill fails, fall
+        // through — the limactl delete still happens.
+        let ha_pid_path = self.instance_dir().join("ha.pid");
+        if let Ok(pid_str) = tokio::fs::read_to_string(&ha_pid_path).await {
+            if let Ok(pid) = pid_str.trim().parse::<i32>() {
+                let _ = tokio::process::Command::new("kill")
+                    .args(["-TERM", &pid.to_string()])
+                    .status().await;
+                // Brief grace so the hostagent releases its sockets
+                // before we yank the dir from underneath it.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+        }
+
         // `limactl delete --force <name>` tolerates running VMs by
         // stopping first. Kills the VM dir under LIMA_HOME.
         let spec = CommandSpec::new(limactl_bin(), ["delete", "--force", &self.instance])
@@ -333,6 +357,7 @@ impl SandboxBackend for LimaBackend {
     fn supports_rename(&self) -> bool { true }
     fn supports_resource_edit(&self) -> bool { true }
     fn supports_port_edit(&self) -> bool { true }
+    fn supports_snapshot(&self) -> bool { true }
 }
 
 /// Last N lines of a string — used for error-message tails so we don't

@@ -6,7 +6,9 @@ use crate::ipc::emit::{emit_instance_changed, InstanceAction, InstanceChanged};
 
 #[tauri::command]
 pub async fn check_instance_update(name: String) -> Result<UpdateCheckResponse, String> {
-    let data = cli_bridge::run_cli(&["update-check", &name]).await.map_err(|e| e.to_string())?;
+    // v2: `clawcli upgrade <name> --check` replaces v1's `update-check`
+    // verb. Same response shape (UpdateCheckResponse).
+    let data = cli_bridge::run_cli(&["upgrade", &name, "--check"]).await.map_err(|e| e.to_string())?;
     let resp: UpdateCheckResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
     Ok(resp)
 }
@@ -15,7 +17,8 @@ pub async fn check_instance_update(name: String) -> Result<UpdateCheckResponse, 
 pub async fn upgrade_instance(app: tauri::AppHandle, name: String, target_version: Option<String>) -> Result<(), String> {
     let mut args = vec!["upgrade".to_string(), name.clone()];
     if let Some(ver) = target_version {
-        args.push("--version".to_string());
+        // v2: target version flag is `--to`, not `--version`.
+        args.push("--to".to_string());
         args.push(ver);
     }
 

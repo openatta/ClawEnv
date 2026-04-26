@@ -12,6 +12,7 @@ pub mod background;
 pub mod templates;
 pub mod dashboard;
 pub mod mcp;
+pub mod post_boot;
 
 pub use mirrors::{apply_mirrors, MirrorsConfig, DEFAULT_ALPINE_REPO, DEFAULT_NPM_REGISTRY};
 pub use background::{

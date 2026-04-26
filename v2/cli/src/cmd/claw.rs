@@ -65,12 +65,9 @@ pub enum ConfigOp {
     List,
 }
 
-#[derive(Serialize, Debug)]
-struct ClawEntry {
-    id: String,
-    binary: String,
-    supports_native: bool,
-}
+// `ClawEntry` was the v2-native shape for `clawcli claw list`; Phase
+// M v2 replaced it with `wire::ClawTypesResponse` so v2 clawcli emits
+// v1-compat JSON for the GUI sidecar path.
 
 #[derive(Serialize, Debug)]
 struct CommandPreview {
@@ -192,18 +189,50 @@ async fn preview_or_execute(
 pub async fn run(cmd: ClawCmd, ctx: &Ctx) -> anyhow::Result<()> {
     match cmd {
         ClawCmd::List => {
-            let entries: Vec<ClawEntry> = ClawRegistry::all().into_iter().map(|c| ClawEntry {
-                id: c.id().into(),
-                binary: c.binary().into(),
-                supports_native: c.supports_native(),
-            }).collect();
-            ctx.emit_pretty(&entries, |rows| {
-                let mut t = new_table(["id", "binary", "native"]);
-                for r in rows {
+            // Phase M v2: emit v1-compatible ClawTypesResponse so the
+            // Tauri GUI's `list_claw_types` IPC consumes v2 sidecar
+            // unchanged. Pull provisioning metadata (display_name,
+            // package_manager, default_port, etc.) from
+            // `claw_ops::provisioning::all_provisionings`. Fields the v2
+            // provisioning trait doesn't carry (logo, has_gateway_ui)
+            // get sensible defaults — logo is GUI metadata that lives
+            // in the Tauri-side claw_catalog.
+            use clawops_core::claw_ops::{provisioning::all_provisionings, PackageManager};
+            let claw_types: Vec<clawops_core::wire::ClawTypeInfo> = all_provisionings()
+                .into_iter()
+                .map(|p| {
+                    let (pm_str, package_id) = match p.package_manager() {
+                        PackageManager::Npm => ("npm".to_string(), p.cli_binary().to_string()),
+                        PackageManager::Pip => ("pip".to_string(), p.cli_binary().to_string()),
+                        PackageManager::GitPip { repo, .. } => ("git_pip".to_string(), repo),
+                    };
+                    clawops_core::wire::ClawTypeInfo {
+                        id: p.id().into(),
+                        display_name: p.display_name().into(),
+                        package_manager: pm_str,
+                        package_id,
+                        default_port: p.default_port(),
+                        // MCP support proxied via mcp_set_cmd_template
+                        // presence — claws with no MCP install path
+                        // don't ship an MCP `set` shell template either.
+                        supports_mcp: p.mcp_set_cmd_template().is_some(),
+                        supports_browser: p.supports_browser(),
+                        has_gateway_ui: p.gateway_cmd_template().is_some()
+                            && p.dashboard_cmd_template().is_none(),
+                        supports_native: p.supports_native(),
+                    }
+                })
+                .collect();
+            let resp = clawops_core::wire::ClawTypesResponse { claw_types };
+            ctx.emit_pretty(&resp, |r| {
+                let mut t = new_table(["id", "name", "package_manager", "native", "browser"]);
+                for c in &r.claw_types {
                     t.add_row([
-                        r.id.clone(),
-                        r.binary.clone(),
-                        if r.supports_native { "yes" } else { "no" }.to_string(),
+                        c.id.clone(),
+                        c.display_name.clone(),
+                        c.package_manager.clone(),
+                        if c.supports_native { "yes" } else { "no" }.into(),
+                        if c.supports_browser { "yes" } else { "no" }.into(),
                     ]);
                 }
                 println!("{t}");

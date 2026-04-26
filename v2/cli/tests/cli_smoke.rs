@@ -73,13 +73,21 @@ fn claw_list_returns_both_products() {
 
 #[test]
 fn claw_list_json_is_valid_json() {
+    // Phase M v2: claw list emits ClawTypesResponse {claw_types: [...]}
+    // (v1-compat shape so Tauri's `list_claw_types` parses unchanged).
     let out = Command::cargo_bin("clawcli").unwrap()
         .args(["--json", "claw", "list"])
         .assert()
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
     let v = data_payload(&s);
-    assert!(v.is_array());
+    assert!(v.is_object(), "claw list should emit ClawTypesResponse object, got: {v}");
+    let arr = v["claw_types"].as_array().expect("claw_types must be array");
+    let ids: Vec<&str> = arr.iter()
+        .filter_map(|c| c["id"].as_str())
+        .collect();
+    assert!(ids.contains(&"hermes"));
+    assert!(ids.contains(&"openclaw"));
 }
 
 #[test]
@@ -337,12 +345,18 @@ fn verb_list_json_is_empty_array_on_fresh_home() {
         .success();
     let s = String::from_utf8_lossy(&out.get_output().stdout);
     let v = data_payload(&s);
-    assert!(v.is_array());
-    assert!(v.as_array().unwrap().is_empty());
+    // Phase M v2 schema: list emits ListResponse {instances: [InstanceSummary]}
+    // (mirrors v1 wire shape so Tauri can parse it directly).
+    assert!(v.is_object(), "list should emit ListResponse object, got: {v}");
+    let arr = v["instances"].as_array().expect("instances field must be array");
+    assert!(arr.is_empty());
 }
 
 #[test]
 fn verb_status_unregistered_instance_synthesises_view() {
+    // v2 status emits StatusResponse with InstanceSummary fields flattened
+    // inline: { name, claw, backend, sandbox_instance, health, ... }.
+    // Unregistered instances surface as health="missing" + claw="".
     let tmp = tempfile::TempDir::new().unwrap();
     let out = Command::cargo_bin("clawcli").unwrap()
         .env("CLAWENV_HOME", tmp.path())
@@ -352,8 +366,9 @@ fn verb_status_unregistered_instance_synthesises_view() {
     let s = String::from_utf8_lossy(&out.get_output().stdout);
     let v = data_payload(&s);
     assert_eq!(v["name"], "ghost");
-    assert_eq!(v["registered"], false);
+    assert_eq!(v["claw"], "");
     assert!(v["backend"].is_string());
+    assert_eq!(v["health"], "missing");
 }
 
 #[test]

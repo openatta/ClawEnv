@@ -429,14 +429,18 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         let health = clawenv_core::manager::instance::instance_health(inst).await;
                         instances.push(InstanceSummary {
                             name: inst.name.clone(),
-                            claw_type: inst.claw_type.clone(),
+                            // wire field rename: claw_type → claw,
+                            // sandbox_type → backend, sandbox_id → sandbox_instance.
+                            // v2 alignment so `clawenv list --json` and
+                            // `clawcli list --json` emit identical shapes.
+                            claw: inst.claw_type.clone(),
                             version: inst.version.clone(),
-                            sandbox_type: inst.sandbox_type.display_name().to_string(),
+                            backend: inst.sandbox_type.display_name().to_string(),
                             health: serde_json::to_value(health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
                             gateway_port: inst.gateway.gateway_port,
                             ttyd_port: inst.gateway.ttyd_port,
                             dashboard_port: inst.gateway.dashboard_port,
-                            sandbox_id: inst.sandbox_id.clone(),
+                            sandbox_instance: inst.sandbox_id.clone(),
                         });
                     }
                     let resp = ListResponse { instances };
@@ -488,17 +492,23 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
             let config = ConfigManager::load()?;
             let inst = clawenv_core::manager::instance::get_instance(&config, &name)?;
             let health = clawenv_core::manager::instance::instance_health(inst).await;
+            // v2 wire shape: StatusResponse flattens InstanceSummary inline
+            // (same fields top-level, no nested `summary` key on the wire
+            // due to #[serde(flatten)]). v1 GUI consumers read top-level
+            // names directly, so the on-the-wire JSON looks identical.
             let resp = StatusResponse {
-                name: inst.name.clone(),
-                claw_type: inst.claw_type.clone(),
-                version: inst.version.clone(),
-                sandbox_type: inst.sandbox_type.display_name().to_string(),
-                health: serde_json::to_value(health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
-                gateway_port: inst.gateway.gateway_port,
-                ttyd_port: inst.gateway.ttyd_port,
-                dashboard_port: inst.gateway.dashboard_port,
+                summary: InstanceSummary {
+                    name: inst.name.clone(),
+                    claw: inst.claw_type.clone(),
+                    version: inst.version.clone(),
+                    backend: inst.sandbox_type.display_name().to_string(),
+                    health: serde_json::to_value(health).unwrap_or_default().as_str().unwrap_or("unreachable").to_string(),
+                    gateway_port: inst.gateway.gateway_port,
+                    ttyd_port: inst.gateway.ttyd_port,
+                    dashboard_port: inst.gateway.dashboard_port,
+                    sandbox_instance: inst.sandbox_id.clone(),
+                },
                 capabilities: None,
-                gateway_token: None,
             };
             out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });
         }
@@ -1118,22 +1128,31 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
         // ====== ClawTypes ======
         Commands::ClawTypes => {
             let registry = clawenv_core::claw::ClawRegistry::load();
-            let types: Vec<ClawTypeInfo> = registry.list_all().iter().map(|d| ClawTypeInfo {
-                id: d.id.clone(),
-                display_name: d.display_name.clone(),
-                logo: d.logo.clone(),
-                package_manager: match d.package_manager {
-                    clawenv_core::claw::descriptor::PackageManager::Npm => "npm",
-                    clawenv_core::claw::descriptor::PackageManager::Pip => "pip",
-                    clawenv_core::claw::descriptor::PackageManager::GitPip => "git_pip",
-                }.to_string(),
-                npm_package: d.npm_package.clone(),
-                pip_package: d.pip_package.clone(),
-                default_port: d.default_port,
-                supports_mcp: d.supports_mcp,
-                supports_browser: d.supports_browser,
-                has_gateway_ui: d.has_gateway_ui,
-                supports_native: d.supports_native,
+            let types: Vec<ClawTypeInfo> = registry.list_all().iter().map(|d| {
+                // v2 wire merged npm_package/pip_package into a single
+                // package_id field. Pick the one that's populated for
+                // this descriptor — for git_pip it'll be a `git+https://`
+                // URL stored in `pip_package`.
+                let package_id = if !d.npm_package.is_empty() {
+                    d.npm_package.clone()
+                } else {
+                    d.pip_package.clone()
+                };
+                ClawTypeInfo {
+                    id: d.id.clone(),
+                    display_name: d.display_name.clone(),
+                    package_manager: match d.package_manager {
+                        clawenv_core::claw::descriptor::PackageManager::Npm => "npm",
+                        clawenv_core::claw::descriptor::PackageManager::Pip => "pip",
+                        clawenv_core::claw::descriptor::PackageManager::GitPip => "git_pip",
+                    }.to_string(),
+                    package_id,
+                    default_port: d.default_port,
+                    supports_mcp: d.supports_mcp,
+                    supports_browser: d.supports_browser,
+                    has_gateway_ui: d.has_gateway_ui,
+                    supports_native: d.supports_native,
+                }
             }).collect();
             let resp = ClawTypesResponse { claw_types: types };
             out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });
@@ -1293,13 +1312,17 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                             for line in String::from_utf8_lossy(&o.stdout).lines() {
                                 let p: Vec<&str> = line.split('\t').collect();
                                 if p.len() >= 5 {
+                                    // v2 wire shape: SandboxVmInfo dropped
+                                    // cpus/memory/disk/dir_size/ttyd_port (the
+                                    // GUI now reads them from `sandbox status`
+                                    // / `sandbox stats` if needed). p[2]..p[4]
+                                    // are still parsed above for backward
+                                    // compat with the human-format printer.
+                                    let _unused = (p[2], p[3], p[4]);
                                     vms.push(SandboxVmInfo {
                                         name: p[0].into(), status: p[1].into(),
-                                        cpus: p[2].into(), memory: p[3].into(),
-                                        disk: p[4].into(), dir_size: "-".into(),
                                         managed: p[0].starts_with("clawenv-"),
-                                        ttyd_port: None,
-                                        instance_name: None,
+                                        instance_name: String::new(),
                                     });
                                 }
                             }
@@ -1316,12 +1339,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                 let p: Vec<&str> = line.split('\t').collect();
                                 if !p.is_empty() {
                                     vms.push(SandboxVmInfo {
-                                        name: p[0].into(), status: p.get(1).unwrap_or(&"").to_string(),
-                                        cpus: "-".into(), memory: "-".into(),
-                                        disk: p.get(2).unwrap_or(&"-").to_string(), dir_size: "-".into(),
+                                        name: p[0].into(),
+                                        status: p.get(1).unwrap_or(&"").to_string(),
                                         managed: p[0].starts_with("clawenv-"),
-                                        ttyd_port: None,
-                                        instance_name: None,
+                                        instance_name: String::new(),
                                     });
                                 }
                             }
@@ -1366,12 +1387,10 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                                         let name = p[0].trim_start_matches('*').trim();
                                         if name.is_empty() { continue; }
                                         vms.push(SandboxVmInfo {
-                                            name: name.into(), status: p[1].into(),
-                                            cpus: "-".into(), memory: "-".into(),
-                                            disk: "-".into(), dir_size: "-".into(),
+                                            name: name.into(),
+                                            status: p[1].into(),
                                             managed: name.starts_with("ClawEnv") || name.starts_with("clawenv"),
-                                            ttyd_port: None,
-                                            instance_name: None,
+                                            instance_name: String::new(),
                                         });
                                     }
                                 }
@@ -1380,23 +1399,28 @@ async fn run(command: Commands, out: &Output) -> Result<()> {
                         // If WSL not installed, vms stays empty — no phantom entries
                     }
 
-                    // Fill ttyd_port AND instance_name for managed VMs by matching
-                    // VM name against each instance's sandbox_id (= VM name). The
-                    // old code stripped "clawenv-" and matched by instance.name,
-                    // which silently failed because sandbox_id contains an auto-
-                    // generated hash, not the user-chosen name.
+                    // Fill instance_name for managed VMs by matching
+                    // VM name against each instance's sandbox_id. The old
+                    // code stripped "clawenv-" and matched by instance.name,
+                    // which silently failed because sandbox_id contains an
+                    // auto-generated hash, not the user-chosen name.
                     let config = ConfigManager::load()?;
                     for vm in &mut vms {
                         if vm.managed {
                             if let Some(inst) = config.instances().iter().find(|i| i.sandbox_id == vm.name) {
-                                vm.ttyd_port = Some(inst.gateway.ttyd_port);
-                                vm.instance_name = Some(inst.name.clone());
+                                vm.instance_name = inst.name.clone();
                             }
                         }
                     }
 
+                    // backend label inferred from host platform (matches v2
+                    // SandboxKind::as_str()). v1 only ships the host's native
+                    // backend, so this is a single-value picker.
+                    let backend_label = if cfg!(target_os = "macos") { "lima" }
+                        else if cfg!(target_os = "windows") { "wsl2" }
+                        else { "podman" };
                     let resp = SandboxListResponse {
-                        total_disk_usage: "-".into(),
+                        backend: backend_label.into(),
                         vms,
                     };
                     out.emit(CliEvent::Data { data: serde_json::to_value(&resp)? });

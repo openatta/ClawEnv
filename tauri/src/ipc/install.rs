@@ -53,28 +53,39 @@ pub async fn install_openclaw(
     }
 
     let ct = claw_type.unwrap_or_else(|| "openclaw".into());
-    let mode = if use_native { "native" } else { "sandbox" };
     // Keep the instance name around for the post-install instance-changed
     // emit — `instance_name` itself is moved into the CLI args vec below.
     let instance_name_for_emit = instance_name.clone();
 
-    // Build CLI args
+    // Build v2 CLI args. Shape per CLI-DESIGN.md §7.1:
+    //   clawcli install <claw> --name <N> --backend <native|lima|wsl2|podman>
+    //                          --version <V> --port <P> [--browser]
+    //
+    // v1's `--mode sandbox|native` collapsed; v2 takes the backend
+    // explicitly. `native` skips the VM; sandboxed defaults pick the
+    // host's preferred backend (`lima`/`wsl2`/`podman`) when omitted.
+    // `--image` (v1 offline-install) has no v2 equivalent yet —
+    // dropped silently; the orchestrator stays online-only.
+    let _ = image; // ack the wizard arg without using it
+    let backend_arg = if use_native {
+        "native"
+    } else if cfg!(target_os = "macos") {
+        "lima"
+    } else if cfg!(target_os = "windows") {
+        "wsl2"
+    } else {
+        "podman"
+    };
     let mut args = vec![
         "install".to_string(),
-        "--mode".to_string(), mode.to_string(),
-        "--claw-type".to_string(), ct.clone(),
-        "--version".to_string(), claw_version,
+        ct.clone(),
         "--name".to_string(), instance_name,
+        "--backend".to_string(), backend_arg.to_string(),
+        "--version".to_string(), claw_version,
         "--port".to_string(), gateway_port.to_string(),
     ];
     if install_browser {
         args.push("--browser".to_string());
-    }
-    if let Some(ref img) = image {
-        if !img.is_empty() {
-            args.push("--image".to_string());
-            args.push(img.clone());
-        }
     }
 
     // Translate the wizard's proxy selection into HTTP_PROXY / HTTPS_PROXY /
@@ -261,7 +272,11 @@ pub struct SystemCheckInfo {
 
 #[tauri::command]
 pub async fn system_check() -> Result<SystemCheckInfo, String> {
-    let data = cli_bridge::run_cli(&["system-check"]).await.map_err(|e| e.to_string())?;
+    // v2: `clawcli system info` replaces v1's `system-check`. Same
+    // payload (probes OS / memory / disk / sandbox availability),
+    // re-typed as `SystemInfo` in v2 wire — the v1 alias here keeps
+    // the GUI's existing IPC contract stable.
+    let data = cli_bridge::run_cli(&["system", "info"]).await.map_err(|e| e.to_string())?;
     let resp: SystemCheckResponse = serde_json::from_value(data).map_err(|e| e.to_string())?;
 
     Ok(SystemCheckInfo {

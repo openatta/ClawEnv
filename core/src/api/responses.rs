@@ -7,13 +7,26 @@
 use serde::{Serialize, Deserialize};
 
 // ---- Instance ----
+//
+// Field names mirror v2 wire shapes (clawcli `--json` output) — not v1's
+// historical `claw_type`/`sandbox_type`/`sandbox_id` triple. The Tauri
+// IPC layer maps these into TypeScript-facing structs (`InstanceInfo`)
+// where the GUI's existing field names are preserved.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstanceSummary {
     pub name: String,
-    pub claw_type: String,
+    /// Claw product id (`openclaw`/`hermes`).
+    pub claw: String,
+    /// Backend kind: `native`/`lima`/`wsl2`/`podman`.
+    pub backend: String,
+    /// VM/container identifier (Lima instance, WSL distro, Podman
+    /// container). Empty for native; same as `name` when no separate
+    /// sandbox identity exists.
+    #[serde(default)]
+    pub sandbox_instance: String,
+    #[serde(default)]
     pub version: String,
-    pub sandbox_type: String,
     pub health: String,
     pub gateway_port: u16,
     #[serde(default)]
@@ -23,12 +36,6 @@ pub struct InstanceSummary {
     /// (Hermes). Frontend opens `http://127.0.0.1:{dashboard_port || gateway_port}/`.
     #[serde(default)]
     pub dashboard_port: u16,
-    /// Sandbox VM id (`clawenv-<hash>` for managed VMs, `"native"` for
-    /// native installs). Exposed so the ClawPage info table can show
-    /// which Lima/WSL/Podman VM hosts this claw — makes correlation
-    /// with SandboxPage + `limactl list` output obvious.
-    #[serde(default)]
-    pub sandbox_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,22 +43,24 @@ pub struct ListResponse {
     pub instances: Vec<InstanceSummary>,
 }
 
+/// Wraps multi-line log output into a single Data event payload.
+/// v2 emits an object (`{"content": "..."}`) instead of a bare JSON
+/// string so future fields (e.g. `truncated_at`, `file_paths`) can be
+/// added without breaking consumers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogResponse {
+    pub content: String,
+}
+
+/// `clawcli status` flattens the InstanceSummary fields inline (serde
+/// flatten on the v2 side). Using `#[serde(flatten)]` here mirrors that
+/// — `s.name` / `s.health` / etc. are read from top-level keys.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse {
-    pub name: String,
-    pub claw_type: String,
-    pub version: String,
-    pub sandbox_type: String,
-    pub health: String,
-    pub gateway_port: u16,
-    pub ttyd_port: u16,
-    /// See InstanceSummary.dashboard_port — same semantics.
-    #[serde(default)]
-    pub dashboard_port: u16,
+    #[serde(flatten)]
+    pub summary: InstanceSummary,
     #[serde(default)]
     pub capabilities: Option<CapabilitiesInfo>,
-    #[serde(default)]
-    pub gateway_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -59,6 +68,8 @@ pub struct CapabilitiesInfo {
     pub rename: bool,
     pub resource_edit: bool,
     pub port_edit: bool,
+    #[serde(default)]
+    pub snapshot: bool,
 }
 
 // ---- System Check ----
@@ -102,10 +113,11 @@ pub struct DoctorResponse {
 pub struct ClawTypeInfo {
     pub id: String,
     pub display_name: String,
-    pub logo: String,
     pub package_manager: String,
-    pub npm_package: String,
-    pub pip_package: String,
+    /// Package identifier within the manager (npm name, pip name, or
+    /// `git+https://...` URL). Replaces v1's split `npm_package` /
+    /// `pip_package` pair.
+    pub package_id: String,
     pub default_port: u16,
     pub supports_mcp: bool,
     pub supports_browser: bool,
@@ -135,27 +147,19 @@ pub struct UpdateCheckResponse {
 pub struct SandboxVmInfo {
     pub name: String,
     pub status: String,
-    pub cpus: String,
-    pub memory: String,
-    pub disk: String,
-    pub dir_size: String,
     /// Whether this VM is managed by ClawEnv
     pub managed: bool,
-    /// ttyd port for terminal access (only for managed instances)
+    /// User-chosen instance name when `managed=true`. Empty otherwise —
+    /// matches v2 wire (no Option wrapper; empty string = none).
     #[serde(default)]
-    pub ttyd_port: Option<u16>,
-    /// User-chosen instance name in config.toml. The VM `name` field holds the
-    /// `sandbox_id` (an auto-generated `clawenv-<hash>`), which does NOT equal
-    /// the instance name — callers that need to invoke instance-scoped IPCs
-    /// (install_chromium, export_sandbox, delete_instance) must use this.
-    #[serde(default)]
-    pub instance_name: Option<String>,
+    pub instance_name: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxListResponse {
+    /// Backend kind that owned the listed VMs (`lima`/`wsl2`/`podman`).
+    pub backend: String,
     pub vms: Vec<SandboxVmInfo>,
-    pub total_disk_usage: String,
 }
 
 // ---- Config ----

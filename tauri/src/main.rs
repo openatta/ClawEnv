@@ -201,7 +201,7 @@ fn main() {
                             let health = match cli_bridge::run_cli(&["status", &inst.name]).await {
                                 Ok(data) => {
                                     serde_json::from_value::<StatusResponse>(data)
-                                        .map(|r| r.health)
+                                        .map(|r| r.summary.health)
                                         .unwrap_or_else(|_| "unreachable".into())
                                 }
                                 Err(_) => "unreachable".into(),
