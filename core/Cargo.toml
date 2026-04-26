@@ -26,6 +26,16 @@ zip.workspace = true
 lzma-rs.workspace = true
 keyring.workspace = true
 
+# Native input + screen capture for the MCP tool registry. macOS + Windows
+# only — Linux build pulls these in but the input module returns an empty
+# registry there per CLAUDE.md "Linux GUI 不支持". Gating the deps too
+# would force a per-OS Cargo.toml; cleaner to keep one feature surface
+# and let the OS branch live in input::factory.
+enigo = "0.2"
+xcap = "0.9"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+base64 = "0.22"
+
 [dev-dependencies]
 mockall.workspace = true
 tempfile.workspace = true
