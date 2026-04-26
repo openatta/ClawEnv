@@ -1,80 +1,58 @@
-# ClawEnv
+# ClawEnv → ClawPod (moved)
 
-[![CI](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml/badge.svg)](https://github.com/openatta/ClawEnv/actions/workflows/ci.yml)
+> **This repository has moved.**
+>
+> ClawEnv has been merged into the **Atta** monorepo, where it lives as
+> the **ClawPod** desktop product alongside its sibling components
+> (AttaGo mobile app, AttaCloud server, shared protocol).
+>
+> - **New home**: <https://git.asfly.ltd/Atta/AttaGo> (under `ClawPod/`)
+> - **Last commit on this repo**: tagged [`pre-monorepo`](https://github.com/openatta/ClawEnv/releases/tag/pre-monorepo)
+> - **History preserved**: all 234 commits live on inside the Atta
+>   monorepo with `ClawPod/` as their root prefix (via
+>   `git filter-repo --to-subdirectory-filter ClawPod`).
 
-[中文文档](docs/README-zh.md)
+## Why the move
 
-> Cross-platform sandbox installer, launcher & manager for OpenClaw AI agents.
+ClawEnv (sandbox installer + manager) and AttaGo bridge (cloud
+connectivity for AI agents) were designed to be the same product seen
+from two angles. Combining them lets a single `ClawPod` install give
+users:
 
-ClawEnv creates a secure, isolated Alpine Linux sandbox on your system — powered by **Lima** (macOS), **WSL2** (Windows), or **Podman** (Linux) — so AI agents run safely without affecting your host OS.
+- Local sandbox install / upgrade / lifecycle for OpenClaw, Hermes,
+  and other "claw" AI agents (the original ClawEnv mission)
+- **Plus** mobile remote control via the AttaGo phone app, routed
+  through the AttaCloud signaling service (the AttaGo bridge mission)
 
-## Why ClawEnv?
+Anyone who only wants the cloud-relay piece can still run
+`attago-bridge` standalone — both deployments share one source of
+truth at `ClawPod/crates/atta-bridge/` in the new repo.
 
-- **Secure by default** — AI agents run inside an isolated sandbox (Alpine Linux VM/container), never touching your host files or system unless you explicitly allow it
-- **Zero dependencies** — ClawEnv downloads and manages its own Node.js and Git; no Homebrew, no system installers, no admin privileges needed
-- **Import / Export** — Package your entire environment (sandbox image or native bundle) as a single `.tar.gz` file; move it between machines with one click
-- **Permission-controlled bridge** — Agents access host files and commands only through a configurable allowlist/denylist with user approval popups
-- **Human-in-the-Loop** — When an agent hits a CAPTCHA or 2FA, the browser switches to interactive mode (noVNC) so you can step in and continue
-- **Multi-instance** — Run multiple OpenClaw instances side by side, each with its own 20-port block, configuration, and lifecycle
+## Where to find things
 
-## Download
+| You're looking for | New location |
+|---|---|
+| ClawEnv source (core/cli/tauri) | `ClawPod/{core,cli,tauri}/` in the Atta monorepo |
+| Bridge source (was AttaGo/bridge) | `ClawPod/crates/atta-bridge/` |
+| ClawEnv docs (v2 design, sandbox, etc.) | `ClawPod/docs/` |
+| Cross-product architecture | `docs/` at the Atta repo root |
+| Bridge design | `ClawPod/crates/atta-bridge/docs/BRIDGE_DESIGN.md` |
+| Issue tracker | Will move to the Atta monorepo's issue tracker; existing issues here remain readable |
 
-| Platform | Download |
-|----------|----------|
-| macOS (Apple Silicon) | [ClawEnv_0.2.0_aarch64.dmg](https://github.com/openatta/ClawEnv/releases/tag/v0.2.0) |
-| Windows (ARM64) | [ClawEnv_0.2.0_arm64-setup.exe](https://github.com/openatta/ClawEnv/releases/tag/v0.2.0) |
+## For existing clones
 
-## Features
+If you have a working clone of this repo:
 
-- **One-Click Install** — GUI wizard with system checks, proxy detection, progress tracking
-- **Sandbox Isolation** — Each instance in its own Alpine Linux VM/container
-- **Native Mode** — Optional host-native install for developers (no VM overhead)
-- **Import / Export** — Sandbox images and native bundles, with file validation
-- **System Tray** — Background health monitoring, notifications, quit options
-- **In-Browser Terminal** — ttyd + xterm.js per sandbox VM
-- **Browser HIL** — Human-in-the-Loop via noVNC for CAPTCHA/2FA
-- **MCP Bridge** — Host file/command access with permission control
-- **Exec Approval** — Agent commands require user confirmation
-- **Diagnostics** — Check instance/config consistency and auto-repair
-- **Autostart** — Optional launch-at-login
-- **Bilingual UI** — Chinese and English
+```sh
+# Fetch + check out the pre-monorepo tag if you need ClawEnv-specific
+# state for any reason.
+git fetch origin pre-monorepo
+git checkout pre-monorepo
 
-## Architecture
-
+# Otherwise: clone the Atta monorepo and use ClawPod/ inside it.
+git clone https://git.asfly.ltd/Atta/AttaGo.git Atta
+cd Atta/ClawPod
 ```
-GUI (SolidJS + Tauri) ──IPC──► clawcli --json <command>
-                                    │
-                          ┌─────────┼─────────┐
-                          ▼         ▼         ▼
-                        Lima      WSL2     Podman
-                       (macOS)   (Win)    (Linux)
-                          │         │         │
-                          └────Alpine Linux───┘
-                                    │
-                              OpenClaw Agent
-```
 
-**CLI-first**: All business logic in `clawcli`. GUI is a thin presentation shell.
-
-## Tech Stack
-
-| Layer | Technology |
-|-------|-----------|
-| Backend | Rust 2021, Tokio async |
-| GUI | Tauri v2 (native WebView) |
-| Frontend | SolidJS + TailwindCSS v4 |
-| CLI | clap v4 |
-| Bridge | Axum HTTP server |
-| Sandbox | Alpine Linux 3.23 |
-
-## Docs
-
-- [Overview](docs/01-overview.md)
-- [Architecture](docs/02-architecture.md)
-- [Tech Stack](docs/03-tech-stack.md)
-- [Sandbox Implementation](docs/04-sandbox.md)
-- [Packaging & Distribution](docs/05-packaging.md)
-
-## License
-
-MIT
+This repo is now **archived**. New work happens only inside the Atta
+monorepo.
